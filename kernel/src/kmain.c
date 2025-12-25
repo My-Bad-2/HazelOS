@@ -1,3 +1,5 @@
-#include <stdint.h>
+#include "arch.h"
 
-void kmain() {}
+void kmain() {
+    arch_halt(true);
+}

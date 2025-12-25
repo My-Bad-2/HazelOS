@@ -19,7 +19,7 @@
                 "PARAM_PROJECT_VERSION_MAJOR": "0",
                 "PARAM_PROJECT_VERSION_MINOR": "0",
                 "PARAM_PROJECT_VERSION_PATCH": "1",
-                "PARAM_PROJECT_C_STANDARD_VERSION": "23",
+                "PARAM_PROJECT_C_STANDARD_VERSION": "2Y",
                 "PARAM_PROJECT_CXX_STANDARD_VERSION": "26",
                 "PARAM_PROJECT_LIMINE_API_REV": "4",
                 "PARAM_PROJECT_ISO_DIR": "${sourceDir}/build/${presetName}/iso",

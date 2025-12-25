@@ -65,6 +65,7 @@ set(
     "-mgeneral-regs-only"
     "-mno-red-zone"
 	"-static"
+	"-std=gnu2y"
 )
 
 set(
@@ -164,8 +165,7 @@ set(
 	-no-shutdown
 	-serial stdio
 	-rtc base=localtime
-	-boot order=d,menu=on,splash-time=0	
-	-smp 2
+	-boot order=d,menu=on,splash-time=0
 )
 
 if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
