@@ -1,5 +1,5 @@
 #ifndef KERNEL_DRIVERS_UART_H
-#define KERNEL_DRIVERS_UART_H
+#define KERNEL_DRIVERS_UART_H 1
 
 #include <stdint.h>
 

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef KERNEL_BOOT_BOOT_H
+#define KERNEL_BOOT_BOOT_H 1
 
 #include "boot/limine.h"
 
@@ -11,4 +12,6 @@ extern volatile struct limine_hhdm_request hhdm_request;
 
 #ifdef __cplusplus
 }
+#endif
+
 #endif

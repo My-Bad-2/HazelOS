@@ -1,5 +1,5 @@
 #ifndef KERNEL_CPU_IO_H
-#define KERNEL_CPU_IO_H
+#define KERNEL_CPU_IO_H 1
 
 #include <stdint.h>
 

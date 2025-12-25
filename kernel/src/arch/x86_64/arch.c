@@ -1,7 +1,7 @@
-#include "arch.h"
-
 #include <stddef.h>
 
+#include "arch.h"
+#include "compiler.h"
 #include "drivers/uart.h"
 
 [[gnu::naked]]
@@ -20,6 +20,10 @@ void arch_pause(void) {
 }
 
 void arch_write(const char* str, size_t len) {
+    if (unlikely(!str)) {
+        return;
+    }
+
     for (size_t i = 0; i < len; ++i) {
         drivers_uart_writec(COM_PORT1, str[i]);
     }
@@ -37,6 +41,25 @@ void arch_halt(bool interrupts) {
     while (true) {
         asm volatile("hlt");
     }
+}
+
+size_t arch_save_flags(void) {
+    size_t rflags = 0;
+
+    asm volatile(
+        "pushfq\n\t"
+        "popq %0\n\t"
+        : "=r"(rflags)
+    );
+
+    return rflags;
+}
+
+void arch_restore_flags(size_t flags) {
+    asm volatile(
+        "pushq %0\n\t"
+        "popfq\n\t" ::"r"(flags)
+    );
 }
 
 void arch_serial_init(void) {
