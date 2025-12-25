@@ -1,8 +1,18 @@
----
 Language: Cpp
 BasedOnStyle: Google
 
-SortIncludes: false
+# Include Sorting
+SortIncludes: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: "^<.*"
+    Priority: 1
+  - Regex: '^".*internal/.*'
+    Priority: 3
+  - Regex: '^".*'
+    Priority: 2
+
+# General Formatting
 ColumnLimit: 100
 IndentWidth: 4
 TabWidth: 4
@@ -10,20 +20,12 @@ UseTab: Never
 AlignConsecutiveMacros: true
 AlignConsecutiveAssignments: true
 AlignConsecutiveBitFields: true
-
-# Treat these macros like standard loops (no indentation weirdness).
-# ForEachMacros:
-
-# Google enforces `Type* var`.
 PointerAlignment: Left
-
-# Don't indent namespaces.
 NamespaceIndentation: None
-
-# Ensure arguments pack tightly but legibly.
+BinPackArguments: false
+BinPackParameters: false
 AllowAllArgumentsOnNextLine: false
-BinPackArguments: true
-
-# Keep empty functions on one line.
+AllowAllParametersOfDeclarationOnNextLine: false
 AllowShortFunctionsOnASingleLine: Empty
 KeepEmptyLinesAtTheStartOfBlocks: false
+AlignAfterOpenBracket: BlockIndent

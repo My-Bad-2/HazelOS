@@ -27,6 +27,7 @@ Checks: >
   -bugprone-exception-escape,
   -performance-noexcept-move-constructor,
   -bugprone-throw-keyword-missing,
+  -bugprone-easily-swappable-parameters,
   
   # Disable standard IO checks
   -cert-err33-c,
