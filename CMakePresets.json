@@ -1,0 +1,196 @@
+{
+    "version": 10,
+    "$schema": "https://cmake.org/cmake/help/latest/_downloads/3e2d73bff478d88a7de0de736ba5e361/schema.json",
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 21,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "Base",
+            "hidden": true,
+            "description": "Base build",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "installDir": "${sourceDir}/build/install/${presetName}",
+            "cacheVariables": {
+                "PARAM_PROJECT_NAME": "Hazel",
+                "PARAM_PROJECT_SUMMARY": "Kernel",
+                "PARAM_PROJECT_VERSION_MAJOR": "0",
+                "PARAM_PROJECT_VERSION_MINOR": "0",
+                "PARAM_PROJECT_VERSION_PATCH": "1",
+                "PARAM_PROJECT_C_STANDARD_VERSION": "23",
+                "PARAM_PROJECT_CXX_STANDARD_VERSION": "26",
+                "PARAM_PROJECT_LIMINE_API_REV": "4",
+                "PARAM_PROJECT_ISO_DIR": "${sourceDir}/build/${presetName}/iso",
+                "PARAM_PROJECT_USE_LLVM_LIBC": true
+            }
+        },
+        {
+            "name": "x64",
+            "hidden": true,
+            "description": "x86_64 Build config",
+            "cacheVariables": {
+                "PARAM_PROJECT_ARCHITECTURE": "x86_64"
+            }
+        },
+        {
+            "name": "Debug",
+            "hidden": true,
+            "description": "Enable Debug build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "Release",
+            "hidden": true,
+            "description": "Enable Release build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "MinSizeRelease",
+            "hidden": true,
+            "description": "Enable MinSIzeRel build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "MinSizeRel"
+            }
+        },
+        {
+            "name": "ReleaseWithDebug",
+            "hidden": true,
+            "description": "Enable RelWithDebInfo build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        },
+        {
+            "name": "Clang",
+            "hidden": true,
+            "generator": "Unix Makefiles",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-clang.cmake"
+        },
+        {
+            "name": "GCC",
+            "hidden": true,
+            "generator": "Unix Makefiles",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-gcc.cmake"
+        },
+        {
+            "name": "x86_64-clang",
+            "description": "Build x86_64 kernel using Clang with RelWithDebInfo",
+            "inherits": [
+                "Base",
+                "x64",
+                "Clang",
+                "ReleaseWithDebug"
+            ]
+        },
+        {
+            "name": "x86_64-clang-debug",
+            "description": "Build x86_64 kernel using Clang with Debug",
+            "inherits": [
+                "Base",
+                "x64",
+                "Clang",
+                "Debug"
+            ]
+        },
+        {
+            "name": "x86_64-clang-release",
+            "description": "Build x86_64 kernel using Clang with Release",
+            "inherits": [
+                "Base",
+                "x64",
+                "Clang",
+                "Release"
+            ]
+        },
+        {
+            "name": "x86_64-clang-minsize",
+            "description": "Build x86_64 kernel using Clang with MinSizeRel",
+            "inherits": [
+                "Base",
+                "x64",
+                "Clang",
+                "MinSizeRelease"
+            ]
+        },
+        {
+            "name": "x86_64-gcc",
+            "description": "Build x86_64 kernel using gcc cross compiler with RelWithDebInfo",
+            "inherits": [
+                "Base",
+                "x64",
+                "GCC",
+                "ReleaseWithDebug"
+            ]
+        },
+        {
+            "name": "x86_64-gcc-debug",
+            "description": "Build x86_64 kernel using gcc cross compiler with Debug",
+            "inherits": [
+                "Base",
+                "x64",
+                "GCC",
+                "Debug"
+            ]
+        },
+        {
+            "name": "x86_64-gcc-release",
+            "description": "Build x86_64 kernel using gcc cross compiler with Release",
+            "inherits": [
+                "Base",
+                "x64",
+                "GCC",
+                "Release"
+            ]
+        },
+        {
+            "name": "x86_64-gcc-minsize",
+            "description": "Build x86_64 kernel using gcc cross compiler with MinSizeRel",
+            "inherits": [
+                "Base",
+                "x64",
+                "GCC",
+                "MinSizeRelease"
+            ]
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "x86_64-clang",
+            "configurePreset": "x86_64-clang"
+        },
+        {
+            "name": "x86_64-clang-debug",
+            "configurePreset": "x86_64-clang-debug"
+        },
+        {
+            "name": "x86_64-clang-minsize",
+            "configurePreset": "x86_64-clang-minsize"
+        },
+        {
+            "name": "x86_64-clang-release",
+            "configurePreset": "x86_64-clang-release"
+        },
+        {
+            "name": "x86_64-gcc",
+            "configurePreset": "x86_64-gcc"
+        },
+        {
+            "name": "x86_64-gcc-debug",
+            "configurePreset": "x86_64-gcc-debug"
+        },
+        {
+            "name": "x86_64-gcc-minsize",
+            "configurePreset": "x86_64-gcc-minsize"
+        },
+        {
+            "name": "x86_64-gcc-release",
+            "configurePreset": "x86_64-gcc-release"
+        }
+    ]
+}

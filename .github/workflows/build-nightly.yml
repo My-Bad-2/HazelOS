@@ -1,0 +1,75 @@
+name: Nightly Release
+
+on:
+    schedule:
+        - cron: "0 0 * * *"
+    workflow_dispatch:
+
+jobs:
+    nightly-release:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Get Date
+              run: echo "DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+            - name: Build Podman Image
+              run: |
+                  podman build -t cpp-build-env -f Containerfile .
+
+            - name: Build Release Preset
+              run: |
+                  podman run --rm \
+                    -v ${{ github.workspace }}:/src \
+                    -w /src \
+                    cpp-build-env \
+                    bash -c "git config --global --add safe.directory /src && cmake -S . --preset x86_64-clang-release && cd build/x86_64-clang-release && make && make install_limine && make iso && make patch_limine"
+
+            - name: Package Artifact
+              run: |
+                  mkdir release_dist
+                  cp build/x86_64-clang-release/noise.iso release_dist/
+            - name: Generate Release Notes
+              run: |
+                  ISO_HASH=$(sha256sum release_dist/noise.iso | cut -d ' ' -f 1)
+                  CHANGELOG=$(git log -n 5 --pretty=format:"- %h - %s")
+                  cat <<EOF > release_notes.md
+                  ## Nightly Build - ${{ env.DATE }}
+
+                  > **Development Snapshot**: This build is automatically generated from the latest source code. It may contain bugs or incomplete features.
+
+                  ### Build Information
+                  | Detail | Value |
+                  | :--- | :--- |
+                  | **Commit** | [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) |
+                  | **Branch** | ${{ github.ref_name }} |
+                  | **Built At** | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |
+
+                  ### Verification (SHA256)
+                  Use this hash to verify the integrity of \`noise.iso\`:
+                  \`\`\`
+                  $ISO_HASH
+                  \`\`\`
+
+                  ### Recent Changes
+                  $CHANGELOG
+                  EOF
+
+            - name: Create Nightly Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  name: Nightly Build - ${{ env.DATE }}
+                  tag_name: nightly-${{ env.DATE }}
+                  body_path: release_notes.md
+                  files: |
+                      release_dist/*
+                  prerelease: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

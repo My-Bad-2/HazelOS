@@ -1,0 +1,29 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+
+SortIncludes: false
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AlignConsecutiveMacros: true
+AlignConsecutiveAssignments: true
+AlignConsecutiveBitFields: true
+
+# Treat these macros like standard loops (no indentation weirdness).
+# ForEachMacros:
+
+# Google enforces `Type* var`.
+PointerAlignment: Left
+
+# Don't indent namespaces.
+NamespaceIndentation: None
+
+# Ensure arguments pack tightly but legibly.
+AllowAllArgumentsOnNextLine: false
+BinPackArguments: true
+
+# Keep empty functions on one line.
+AllowShortFunctionsOnASingleLine: Empty
+KeepEmptyLinesAtTheStartOfBlocks: false

@@ -1,0 +1,72 @@
+---
+# Checks: A allow-list followed by specific suppressions
+Checks: >
+  -*
+  # Enable Core Analyzers
+  clang-analyzer-*,
+  bugprone-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  
+  # Even if not Linux, these catch pointer bugs
+  linuxkernel-*,
+  
+  # Readability (Selectively)
+  readability-*,
+  
+  # Modernize (Avoid things that require full STL)
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-use-using,
+  modernize-use-bool-literals,
+  
+  # --- SUPPRESSIONS ---
+  
+  # Disable Exception checks
+  -bugprone-exception-escape,
+  -performance-noexcept-move-constructor,
+  -bugprone-throw-keyword-missing,
+  
+  # Disable standard IO checks
+  -cert-err33-c,
+  -bugprone-reserved-identifier,
+  
+  # Disable Magic Numbers (Too noisy for Register/Bit-banging definitions)
+  -readability-magic-numbers,
+  
+  # Disable Complexity checks
+  -readability-function-cognitive-complexity,
+  -readability-function-size,
+  
+  # Disable Variable length/naming checks
+  -readability-identifier-length,
+  
+  # Disable New/Delete checks
+  # (Re-enable this after mapping kalloc to standard operators)
+  -cppcoreguidelines-owning-memory,
+  
+  # Avoid suggesting auto, Prefer explicit types
+  -modernize-use-auto,
+  
+  # Avoid Trailing Return Types
+  -modernize-use-trailing-return-type
+
+# Treat warnings as errors to enforce quality in CI/CD
+WarningsAsErrors: 'bugprone-*,linuxkernel-*,clang-analyzer-*,performance-*'
+
+# Analyze headers within project, exclude external toolchain headers
+HeaderFilterRegex: '.*/(src|include)/.*'
+
+# Format style
+FormatStyle: file
+
+CheckOptions:
+  # Enforce naming conventions
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  # Allow commonly used short variable names (i, j, k, ret, ptr)
+  - key: readability-identifier-length.MinimumVariableNameLength
+    value: 3
+  - key: readability-identifier-length.IgnoredVariableNames
+    value: "^[a-z]$|^id$|^fd$|^ip$"
