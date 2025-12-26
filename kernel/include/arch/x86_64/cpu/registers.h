@@ -3,7 +3,7 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
-// Original source:
+// Original source (upto `#ifndef __ASSEMBLER__`):
 // https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/zircon/kernel/arch/x86/include/arch/x86/registers.h
 
 #ifndef KERNEL_CPU_REGISTERS_H
@@ -242,6 +242,86 @@
      X86_DR7_G3 | X86_DR7_RW0 | X86_DR7_LEN0 | X86_DR7_RW1 | X86_DR7_LEN1 | X86_DR7_RW2 |       \
      X86_DR7_LEN2 | X86_DR7_RW3 | X86_DR7_LEN3)
 
+
+// INVPCID Types
+#define INVPCID_INDIVIDUAL_ADDR 0            // Invalidate specific addr in specific PCID
+#define INVPCID_SINGLE_CONTEXT  1            // Invalidate all entries for specific PCID
+#define INVPCID_ALL_CONTEXT     2            // Invalidate all entries for all PCIDs (including Global)
+#define INVPCID_ALL_CONTEXT_RETAIN_GLOBAL 3  // Invalidate all entries for all PCIDs (excluding Global)
+
 // clang-format on
 
+#ifndef __ASSEMBLER__
+#include <stdint.h>
+
+#define DEFINE_CR_ACCESSOR(n)                                    \
+    static inline uint64_t read_cr##n(void) {                    \
+        uint64_t val;                                            \
+        asm volatile("mov %%cr" #n ", %0" : "=r"(val));          \
+        return val;                                              \
+    }                                                            \
+                                                                 \
+    static inline void write_cr##n(uint64_t val) {               \
+        asm volatile("mov %0, %%cr" #n : : "r"(val) : "memory"); \
+    }
+
+DEFINE_CR_ACCESSOR(0)
+DEFINE_CR_ACCESSOR(2)
+DEFINE_CR_ACCESSOR(3)
+DEFINE_CR_ACCESSOR(4)
+
+static inline uint64_t read_msr(uint64_t address) {
+    uint32_t low, high;
+    asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(address));
+    return ((uint64_t)high << 32) | low;
+}
+
+static inline void write_msr(uint64_t address, uint64_t value) {
+    uint32_t low  = value & 0xffffffff;
+    uint32_t high = value >> 32;
+
+    asm volatile("wrmsr" ::"a"(low), "d"(high), "c"(address));
+}
+
+#define DEFINE_DR_ACCESSOR(n)                                    \
+    static inline uint64_t read_dr##n(void) {                    \
+        uint64_t val;                                            \
+        asm volatile("mov %%dr" #n ", %0" : "=r"(val));          \
+        return val;                                              \
+    }                                                            \
+                                                                 \
+    static inline void write_dr##n(uint64_t val) {               \
+        asm volatile("mov %0, %%dr" #n : : "r"(val) : "memory"); \
+    }
+
+// Define accessors for the Breakpoint Address Registers
+DEFINE_DR_ACCESSOR(0)
+DEFINE_DR_ACCESSOR(1)
+DEFINE_DR_ACCESSOR(2)
+DEFINE_DR_ACCESSOR(3)
+
+// Define accessors for Status (DR6) and Control (DR7)
+DEFINE_DR_ACCESSOR(6)
+DEFINE_DR_ACCESSOR(7)
+
+static inline void invlpg(void* addr) {
+    asm volatile("invlpg (%0)" : : "r"(addr) : "memory");
+}
+
+// The descriptor required by the INVPCID instruction (128 bits)
+typedef struct [[gnu::packed]] {
+    uint64_t pcid : 12;  // Low 12 bits: PCID
+    uint64_t rsvd : 52;  // Reserved (must be 0)
+    uint64_t addr;       // Linear Address (only used for type 0)
+} invpcid_desc_t;
+
+static inline void invpcid(unsigned long type, uint64_t pcid, uint64_t addr) {
+    invpcid_desc_t desc = {0};
+    desc.pcid           = pcid;
+    desc.addr           = addr;
+
+    asm volatile("invpcid %0, %1" : : "m"(desc), "r"(type) : "memory");
+}
+
+#endif
 #endif
