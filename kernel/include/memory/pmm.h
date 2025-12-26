@@ -10,12 +10,12 @@ typedef struct pmm_stats {
 } pmm_stats_t;
 
 void* pmm_alloc(size_t count);
-void* pmm_alloc_aligned(size_t count, size_t alignment);
+void* pmm_alloc_aligned(size_t alignment, size_t count);
 void* pmm_alloc_dma(size_t count, size_t alignment);
 
 void pmm_free(void* ptr, size_t count);
-pmm_stats_t pmm_get_stats();
+void pmm_get_stats(pmm_stats_t* stats);
 
-void pmm_init();
+void pmm_init(void);
 
 #endif

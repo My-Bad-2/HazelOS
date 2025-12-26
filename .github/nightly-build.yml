@@ -35,10 +35,10 @@ jobs:
             - name: Package Artifact
               run: |
                   mkdir release_dist
-                  cp build/x86_64-clang-release/noise.iso release_dist/
+                  cp build/x86_64-clang-release/Hazel.iso release_dist/
             - name: Generate Release Notes
               run: |
-                  ISO_HASH=$(sha256sum release_dist/noise.iso | cut -d ' ' -f 1)
+                  ISO_HASH=$(sha256sum release_dist/Hazel.iso | cut -d ' ' -f 1)
                   CHANGELOG=$(git log -n 5 --pretty=format:"- %h - %s")
                   cat <<EOF > release_notes.md
                   ## Nightly Build - ${{ env.DATE }}
@@ -53,7 +53,7 @@ jobs:
                   | **Built At** | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |
 
                   ### Verification (SHA256)
-                  Use this hash to verify the integrity of \`noise.iso\`:
+                  Use this hash to verify the integrity of \`Hazel.iso\`:
                   \`\`\`
                   $ISO_HASH
                   \`\`\`

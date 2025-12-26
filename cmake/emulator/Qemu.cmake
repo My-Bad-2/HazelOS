@@ -31,7 +31,6 @@ function(add_qemu_targets)
                 -drive if=pflash,format=raw,unit=1,file=${OVMF_VARS_BINARY_PATH}
                 ${ARG_COMMON_FLAGS}
                 ${ARG_DEBUG_FLAGS}
-                ${ARG_ACCEL_FLAGS}
         DEPENDS ${ARG_ISO_FILE}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Launching QEMU (Debug Mode - Waiting for GDB)..."

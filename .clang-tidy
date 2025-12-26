@@ -28,6 +28,7 @@ Checks: >
   -performance-noexcept-move-constructor,
   -bugprone-throw-keyword-missing,
   -bugprone-easily-swappable-parameters,
+  -performance-no-int-to-ptr,
   
   # Disable standard IO checks
   -cert-err33-c,

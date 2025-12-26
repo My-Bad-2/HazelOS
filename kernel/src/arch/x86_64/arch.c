@@ -1,21 +1,19 @@
 #include "arch.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "compiler.h"
 #include "drivers/uart.h"
 
-[[gnu::naked]]
 void arch_disable_interrupts(void) {
     asm volatile("cli");
 }
 
-[[gnu::naked]]
 void arch_enable_interrupts(void) {
     asm volatile("sti");
 }
 
-[[gnu::naked]]
 void arch_pause(void) {
     asm volatile("sti");
 }
@@ -48,8 +46,8 @@ size_t arch_save_flags(void) {
     size_t rflags = 0;
 
     asm volatile(
-        "pushfq\n\t"
-        "popq %0\n\t"
+        "pushfq;"
+        "popq %0"
         : "=r"(rflags)
     );
 
@@ -58,9 +56,14 @@ size_t arch_save_flags(void) {
 
 void arch_restore_flags(size_t flags) {
     asm volatile(
-        "pushq %0\n\t"
-        "popfq\n\t" ::"r"(flags)
+        "pushq %0;"
+        "popfq;" ::"r"(flags)
     );
+}
+
+uint32_t arch_get_core_idx(void) {
+    // Until SMP is initialized, we're running on BSP
+    return 0;
 }
 
 void arch_serial_init(void) {

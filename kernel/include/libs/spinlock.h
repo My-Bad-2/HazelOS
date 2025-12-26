@@ -18,9 +18,17 @@ void acquire_spinlock(spinlock_t* lock);
 void release_spinlock(spinlock_t* lock);
 bool test_spinlock(spinlock_t* lock);
 
+typedef struct irq_lock {
+    size_t flags;
+} irq_lock_t;
+
+void create_irq_lock(irq_lock_t* lock);
+void acquire_irq_lock(irq_lock_t* lock);
+void release_irq_lock(irq_lock_t* lock);
+
 typedef struct interrupt_lock {
     spinlock_t base_lock;
-    size_t flags;
+    irq_lock_t irq_lock;
 } interrupt_lock_t;
 
 void create_interrupt_lock(interrupt_lock_t* lock);

@@ -2,6 +2,7 @@
 #define KERNEL_ARCH_H 1
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,8 +12,11 @@ void arch_pause(void);
 void arch_disable_interrupts(void);
 void arch_enable_interrupts(void);
 [[noreturn]] void arch_halt(bool interrupts);
+
 size_t arch_save_flags(void);
 void arch_restore_flags(size_t flags);
+
+uint32_t arch_get_core_idx(void);
 
 void arch_write(const char* str);
 void arch_writec(char ch);

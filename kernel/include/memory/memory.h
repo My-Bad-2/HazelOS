@@ -5,6 +5,10 @@
 
 #include "boot/boot.h"
 
+#define PAGE_SIZE_SMALL  0x1000ul      // 4KB
+#define PAGE_SIZE_MEDIUM 0x200000ul    // 2MB
+#define PAGE_SIZE_LARGE  0x40000000ul  // 1GB
+
 #ifdef __cplusplus
 extern "C" {
 #endif
