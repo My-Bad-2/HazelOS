@@ -3,6 +3,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 static inline size_t align_down(size_t n, size_t a) {
     return n & ~(a - 1);
 }
@@ -18,5 +22,9 @@ static inline size_t div_roundup(size_t n, size_t a) {
 static inline bool is_aligned(size_t n, size_t a) {
     return (n & (a - 1)) == 0;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

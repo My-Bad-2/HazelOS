@@ -8,7 +8,15 @@
 #define COM_PORT3 0x3e8
 #define COM_PORT4 0x2e8
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void drivers_uart_writec(uint16_t port, uint8_t ch);
 void drivers_uart_init(uint16_t port, uint32_t baud_rate);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

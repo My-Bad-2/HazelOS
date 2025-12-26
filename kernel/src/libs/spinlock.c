@@ -1,9 +1,10 @@
+#include "libs/spinlock.h"
+
 #include <stdatomic.h>
 #include <stddef.h>
 
 #include "arch.h"
 #include "compiler.h"
-#include "libs/spinlock.h"
 
 void create_spinlock(spinlock_t* lock) {
     if (unlikely(!lock)) {
@@ -57,6 +58,7 @@ void acquire_interrupt_lock(interrupt_lock_t* lock) {
 
     lock->flags = arch_save_flags();
     acquire_spinlock(&lock->base_lock);
+    arch_disable_interrupts();
 }
 
 void release_interrupt_lock(interrupt_lock_t* lock) {
@@ -68,6 +70,8 @@ void release_interrupt_lock(interrupt_lock_t* lock) {
         return;
     }
 
-    arch_restore_flags(lock->flags);
     release_spinlock(&lock->base_lock);
+
+    // Restore the state exactly as it was before we acquired the lock
+    arch_restore_flags(lock->flags);
 }

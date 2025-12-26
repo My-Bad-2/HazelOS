@@ -1,8 +1,12 @@
 #ifndef KERNEL_LIBS_SPINLOCK_H
 #define KERNEL_LIBS_SPINLOCK_H 1
 
-#include <stddef.h>
 #include <stdatomic.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct spinlock {
     atomic_size_t next;
@@ -22,5 +26,9 @@ typedef struct interrupt_lock {
 void create_interrupt_lock(interrupt_lock_t* lock);
 void acquire_interrupt_lock(interrupt_lock_t* lock);
 void release_interrupt_lock(interrupt_lock_t* lock);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

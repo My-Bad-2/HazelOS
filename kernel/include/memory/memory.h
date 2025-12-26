@@ -5,6 +5,10 @@
 
 #include "boot/boot.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 static inline bool is_higer_half(uintptr_t addr) {
     return addr >= hhdm_request.response->offset;
 }
@@ -18,5 +22,9 @@ static inline uintptr_t from_higher_half(uintptr_t addr) {
 }
 
 void memory_init();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

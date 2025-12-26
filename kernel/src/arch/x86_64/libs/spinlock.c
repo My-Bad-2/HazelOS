@@ -1,6 +1,7 @@
+#include "libs/spinlock.h"
+
 #include "compiler.h"
 #include "cpu/registers.h"
-#include "libs/spinlock.h"
 
 void create_interrupt_lock(interrupt_lock_t* lock) {
     if (unlikely(!lock)) {

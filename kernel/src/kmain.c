@@ -1,13 +1,10 @@
-#include <string.h>
-
 #include "arch.h"
+#include "libs/log.h"
 
 void kmain() {
     arch_serial_init();
 
-    const char* msg = "Hello, World!\n";
-    size_t len      = strlen(msg);
-    arch_write(msg, len);
+    KLOG_INFO("Hello, World!\n");
 
     arch_halt(true);
 }

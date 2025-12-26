@@ -1,6 +1,7 @@
+#include "arch.h"
+
 #include <stddef.h>
 
-#include "arch.h"
 #include "compiler.h"
 #include "drivers/uart.h"
 
@@ -19,12 +20,12 @@ void arch_pause(void) {
     asm volatile("sti");
 }
 
-void arch_write(const char* str, size_t len) {
+void arch_write(const char* str) {
     if (unlikely(!str)) {
         return;
     }
 
-    for (size_t i = 0; i < len; ++i) {
+    for (size_t i = 0; str[i] != '\0'; ++i) {
         drivers_uart_writec(COM_PORT1, str[i]);
     }
 }
