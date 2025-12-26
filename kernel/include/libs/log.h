@@ -16,7 +16,9 @@ typedef enum {
 } log_level_t;
 
 // Set this to control what gets filtered out
+#ifndef LOG_LEVEL_THRESHOLD
 #define LOG_LEVEL_THRESHOLD LOG_TRACE
+#endif
 
 void kernel_log(log_level_t level, const char* file, int line, const char* fmt, ...);
 [[noreturn]] void kernel_panic(const char* file, int line, const char* fmt, ...);

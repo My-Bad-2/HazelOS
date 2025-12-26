@@ -1,6 +1,12 @@
 #ifndef KERNEL_TESTS_RUNNER_H
 #define KERNEL_TESTS_RUNNER_H 1
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#if KERNEL_TEST
+
 typedef void (*test_func_t)(void);
 
 typedef struct test_case {
@@ -25,5 +31,16 @@ typedef struct test_case {
 
 void kernel_test_report_fail(const char* expr, const char* file, int line);
 void kernel_run_tests(void);
+
+#else
+
+#define TEST(x, d)
+#define TEST_ASSERT(x)
+
+#endif
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

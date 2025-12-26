@@ -2,6 +2,8 @@
 
 #include "libs/log.h"
 
+#if KERNEL_TEST
+
 extern const test_case_t __start_tests[];
 extern const test_case_t __stop_tests[];
 
@@ -56,3 +58,5 @@ void kernel_run_tests(void) {
     }
     KLOG_INFO("========================================\n");
 }
+
+#endif

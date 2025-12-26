@@ -6,6 +6,8 @@
 #include "memory/memory.h"
 #include "tests/runner.h"
 
+#if KERNEL_TEST
+
 TEST(pmm_alloc_basic, "Basic Page Allocation") {
     // Single page
     void* p1 = pmm_alloc(1);
@@ -204,7 +206,8 @@ TEST(pmm_out_of_bounds_free, "Out of Bounds Free") {
     // This ensures the allocator bounds-checks the address against total_pages
     // before trying to access the bitmap.
 
-    void* invalid_addr = (void*)0xFFFFFFFFFFFFF000ULL;  // High canonical, way out of phys RAM range
+    // High canonical, way out of phys RAM range
+    void* invalid_addr = (void*)0xFFFFFFFFFFFFF000ULL;
     pmm_free(invalid_addr, 1);
     // Assertion is that we didn't Page Fault or Panic.
 }
@@ -229,3 +232,5 @@ TEST(pmm_summary_consistency, "Summary Bitmap Consistency") {
 
     pmm_free(chunk2, count);
 }
+
+#endif
