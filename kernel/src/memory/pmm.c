@@ -289,8 +289,10 @@ static void cache_flush(per_cpu_cache_t* cache) {
         }
 
         // Clear the bit in the local copy
-        curr_word_val &= ~mask;
-        pmm_state.used_pages--;
+        if (curr_word_val & mask) {
+            curr_word_val &= ~mask;
+            pmm_state.used_pages--;
+        }
 
         if (page_idx < pmm_state.free_idx_hint) {
             pmm_state.free_idx_hint = page_idx;
@@ -394,6 +396,7 @@ static void* pmm_alloc_from_bitmap(size_t count) {
         }
     }
 
+    release_interrupt_lock(&pmm_state.lock);
     return pmm_alloc_aligned(PAGE_SIZE_SMALL, count);
 }
 
@@ -523,7 +526,7 @@ void* pmm_alloc_aligned(size_t alignment, size_t count) {
     return res;
 }
 
-void* pmm_alloc_dma(size_t count, size_t alignment) {
+void* pmm_alloc_dma(size_t alignment, size_t count) {
     if ((count == 0) || (alignment == 0) || !is_aligned(alignment, PAGE_SIZE_SMALL)) {
         return nullptr;
     }
@@ -649,6 +652,13 @@ void pmm_free(void* ptr, size_t count) {
                 acquire_interrupt_lock(&pmm_state.lock);
                 cache_flush(cache);
                 release_interrupt_lock(&pmm_state.lock);
+            }
+
+            // Prevent Double-free in local cache
+            for (size_t i = 0; i < cache->count; ++i) {
+                if (cache->stack[i] == (uintptr_t)ptr) {
+                    return;
+                }
             }
 
             cache->stack[cache->count++] = (uintptr_t)ptr;

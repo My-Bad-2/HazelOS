@@ -33,18 +33,11 @@ SECTIONS
     .rodata : {
         *(.rodata .rodata.*)
         
-        /* Place Constructors here to ensure they are Read-Only */
+        /* Unit Test Section */
         . = ALIGN(8);
-        PROVIDE_HIDDEN(__init_array_start = .);
-        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
-        KEEP(*(.init_array .ctors))
-        PROVIDE_HIDDEN(__init_array_end = .);
-
-        . = ALIGN(8);
-        PROVIDE_HIDDEN(__fini_array_start = .);
-        KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*) SORT_BY_INIT_PRIORITY(.dtors.*)))
-        KEEP(*(.fini_array .dtors))
-        PROVIDE_HIDDEN(__fini_array_end = .);
+        __start_tests = .;
+        KEEP(*(.tests))
+        __stop_tests  = .;        
     } :rodata
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));

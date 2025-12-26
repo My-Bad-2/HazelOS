@@ -11,7 +11,7 @@ typedef struct pmm_stats {
 
 void* pmm_alloc(size_t count);
 void* pmm_alloc_aligned(size_t alignment, size_t count);
-void* pmm_alloc_dma(size_t count, size_t alignment);
+void* pmm_alloc_dma(size_t alignment, size_t count);
 
 void pmm_free(void* ptr, size_t count);
 void pmm_get_stats(pmm_stats_t* stats);
