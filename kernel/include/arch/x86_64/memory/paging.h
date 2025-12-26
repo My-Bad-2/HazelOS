@@ -1,0 +1,33 @@
+#ifndef KERNEL_MEMORY_PAGING_H
+#define KERNEL_MEMORY_PAGING_H 1
+
+// Section 5.4 AMD64 Architecture Programmer's Manual (Volumes 1-5) [UNIFIED] Pg 608
+#define X86_PAGE_FLAG_PRESENT       0x01ul
+#define X86_PAGE_FLAG_WRITE         0x02ul
+#define X86_PAGE_FLAG_USER          0x04ul
+#define X86_PAGE_FLAG_WRITE_THROUGH 0x08ul
+#define x86_PAGE_FLAG_CACHE_DISABLE 0x10ul
+#define X86_PAGE_FLAG_ACCESSED      0x20ul
+#define X86_PAGE_FLAG_DIRTY         0x40ul
+#define X86_PAGE_FLAG_HUGE          0x80ul
+#define X86_PAGE_FLAG_GLOBAL        0x100ul
+#define X86_PAGE_FLAG_NX            0x8000000000000000ul
+
+#define X86_NEW_PAGE_TABLE_FLAGS (X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_WRITE | X86_PAGE_FLAG_USER)
+
+#define X86_PAGE_FLAG_PAT       0x80ul
+#define X86_PAGE_FLAG_LARGE_PAT 0x1000ul
+
+#define X86_PAGE_ADDRESS_MASK 0x000ffffffffff000ul
+#define X86_PAGE_PRESERVED_BITS \
+    (X86_PAGE_ADDRESS_MASK | X86_PAGE_FLAG_ACCESSED | X86_PAGE_FLAG_DIRTY | X86_PAGE_FLAG_HUGE)
+
+// Table 7.9 AMD64 Architecture Programmer's Manual (Volumes 1-5) [UNIFIED] Pg 683
+#define X86_PAT_TYPE_UNCACHEABLE       0x00ul
+#define X86_PAT_TYPE_WRITE_COMBINING   0x01ul
+#define x86_PAT_TYPE_WRITE_THROUGH     0x04ul
+#define X86_PAT_TYPE_WRITE_PROTECT     0x05ul
+#define X86_PAT_TYPE_WRITE_BACK        0x06ul
+#define x86_PAT_TYPE_UNCACHEABLE_MINUS 0x07ul
+
+#endif

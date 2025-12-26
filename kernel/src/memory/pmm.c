@@ -1,5 +1,6 @@
 #include "memory/pmm.h"
 
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -454,6 +455,7 @@ static void* try_alloc_aligned(size_t start, size_t end, size_t count, size_t al
 
 void* pmm_alloc(size_t count) {
     if (count == 0) {
+        errno = EINVAL;
         return nullptr;
     }
 
@@ -485,6 +487,7 @@ void* pmm_alloc(size_t count) {
     void* addr = pmm_alloc_from_bitmap(count);
 
     if (!addr) {
+        errno = ENOMEM;
         KLOG_WARN("PMM alloc failed count=%zu\n", count);
     }
 
@@ -494,6 +497,7 @@ void* pmm_alloc(size_t count) {
 
 void* pmm_alloc_aligned(size_t alignment, size_t count) {
     if ((count == 0) || (alignment == 0) || !is_aligned(alignment, PAGE_SIZE_SMALL)) {
+        errno = EINVAL;
         return nullptr;
     }
 
@@ -519,6 +523,7 @@ void* pmm_alloc_aligned(size_t alignment, size_t count) {
     }
 
     if (!res) {
+        errno = ENOMEM;
         KLOG_WARN("PMM alloc_aligned failed count=%zu align=0x%zx\n", count, alignment);
     }
 
@@ -528,6 +533,7 @@ void* pmm_alloc_aligned(size_t alignment, size_t count) {
 
 void* pmm_alloc_dma(size_t alignment, size_t count) {
     if ((count == 0) || (alignment == 0) || !is_aligned(alignment, PAGE_SIZE_SMALL)) {
+        errno = EINVAL;
         return nullptr;
     }
 
@@ -577,6 +583,7 @@ void* pmm_alloc_dma(size_t alignment, size_t count) {
     }
 
     release_interrupt_lock(&pmm_state.lock);
+    errno = ENOMEM;
     return nullptr;
 }
 

@@ -304,7 +304,7 @@ DEFINE_DR_ACCESSOR(3)
 DEFINE_DR_ACCESSOR(6)
 DEFINE_DR_ACCESSOR(7)
 
-static inline void invlpg(void* addr) {
+static inline void invlpg(const void* addr) {
     asm volatile("invlpg (%0)" : : "r"(addr) : "memory");
 }
 

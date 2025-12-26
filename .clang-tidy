@@ -29,6 +29,8 @@ Checks: >
   -bugprone-throw-keyword-missing,
   -bugprone-easily-swappable-parameters,
   -performance-no-int-to-ptr,
+  -misc-include-cleaner,
+  -misc-no-recursion,
   
   # Disable standard IO checks
   -cert-err33-c,
