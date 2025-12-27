@@ -520,7 +520,7 @@ uintptr_t pagemap_translate(pagemap_t* map, uintptr_t virt_addr) {
 
     // Level 2 (PD)
     table = (pagetable_t*)to_higher_half(phys_curr);
-    entry = table->entries[i3];
+    entry = table->entries[i2];
 
     if (!(entry & X86_PAGE_FLAG_PRESENT)) {
         goto not_found;
@@ -535,7 +535,7 @@ uintptr_t pagemap_translate(pagemap_t* map, uintptr_t virt_addr) {
 
     // Level 1 (PT)
     table = (pagetable_t*)to_higher_half(phys_curr);
-    entry = table->entries[i3];
+    entry = table->entries[i1];
 
     if (!(entry & X86_PAGE_FLAG_PRESENT)) {
         goto not_found;
@@ -607,7 +607,7 @@ void pagemap_protect(pagemap_t* map, pagemap_protect_args_t args) {
 
     // Level 2 (PD)
     table = (pagetable_t*)to_higher_half(phys_curr);
-    entry = table->entries[i3];
+    entry = table->entries[i2];
 
     if (!(entry & X86_PAGE_FLAG_PRESENT)) {
         goto cleanup;
@@ -623,7 +623,7 @@ void pagemap_protect(pagemap_t* map, pagemap_protect_args_t args) {
 
     // Level 1 (PT)
     table = (pagetable_t*)to_higher_half(phys_curr);
-    entry = table->entries[i3];
+    entry = table->entries[i1];
 
     if (!(entry & X86_PAGE_FLAG_PRESENT)) {
         goto cleanup;
@@ -856,7 +856,7 @@ size_t pagemap_get_flags(pagemap_t* map, uintptr_t virt_addr) {
 
     // Level 2 (PD)
     table = (pagetable_t*)to_higher_half(phys_curr);
-    entry = table->entries[i3];
+    entry = table->entries[i2];
 
     if (!(entry & X86_PAGE_FLAG_PRESENT)) {
         goto not_found;
@@ -870,7 +870,7 @@ size_t pagemap_get_flags(pagemap_t* map, uintptr_t virt_addr) {
 
     // Level 1 (PT)
     table = (pagetable_t*)to_higher_half(phys_curr);
-    entry = table->entries[i3];
+    entry = table->entries[i1];
 
     if (!(entry & X86_PAGE_FLAG_PRESENT)) {
         goto not_found;

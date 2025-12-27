@@ -29,7 +29,7 @@ TEST(pmm_alloc_aligned, "Aligned Allocation (2MB)") {
     // Attempt 2MB alloc
     void* huge_page = pmm_alloc_aligned(align_2mb, 1);
 
-    // It's valid to return null if OOM/Fragmented, but if we get a pointer, check align
+    // It's valid to return nullptr if OOM/Fragmented, but if we get a pointer, check align
     if (huge_page) {
         TEST_ASSERT(((uintptr_t)huge_page % align_2mb) == 0);
         pmm_free(huge_page, 1);

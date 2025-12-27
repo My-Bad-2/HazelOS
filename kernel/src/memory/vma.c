@@ -422,7 +422,7 @@ vm_area_t* vmm_find_vma(vm_space_t* space, uintptr_t addr) {
             current = current->rb_right;
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 static uintptr_t find_free_region(vm_space_t* space, size_t size, size_t alignment) {
@@ -561,12 +561,14 @@ void* vmm_alloc(
                 if (errno == 0) {
                     errno = EFAULT;
                 }
+
                 KLOG_WARN(
                     "VMM: zero-page map failed virt=0x%lx len=0x%zx errno=%d\n",
                     curr,
                     alignment,
                     errno
                 );
+
                 for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
                     pagemap_unmap_args_t uargs = {
                         .virt_addr = (void*)cleanup,
@@ -597,6 +599,7 @@ void* vmm_alloc(
                     alignment,
                     alignment
                 );
+
                 for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
                     uintptr_t p = pagemap_translate(space->map, cleanup);
 
@@ -631,6 +634,7 @@ void* vmm_alloc(
                 if (errno == 0) {
                     errno = EFAULT;
                 }
+
                 KLOG_WARN(
                     "VMM: map failed virt=0x%lx phys=%p len=0x%zx errno=%d\n",
                     curr,
@@ -638,6 +642,7 @@ void* vmm_alloc(
                     alignment,
                     errno
                 );
+
                 pmm_free(phys, frames_per_page);
 
                 for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
@@ -681,7 +686,7 @@ void vmm_free(vm_space_t* space, void* ptr) {
     }
 
     if (space->cached_vma == vma) {
-        space->cached_vma = NULL;
+        space->cached_vma = nullptr;
     }
 
     // Remove from Tree
