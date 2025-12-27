@@ -71,4 +71,6 @@ void pagemap_load(pagemap_t* map);
 void pagemap_release(pagemap_t* map);
 void pagemap_sync_kernel(pagemap_t* target_map);
 
+void pagemap_global_init();
+
 #endif

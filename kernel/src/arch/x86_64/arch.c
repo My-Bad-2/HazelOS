@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "compiler.h"
+#include "cpu/cpu.h"
 #include "drivers/uart.h"
 
 void arch_disable_interrupts(void) {
@@ -68,6 +69,7 @@ uint32_t arch_get_core_idx(void) {
 
 void arch_serial_init(void) {
     drivers_uart_init(COM_PORT1, 115200);
+    cpu_read_features();
 }
 
 void arch_init(void) {}

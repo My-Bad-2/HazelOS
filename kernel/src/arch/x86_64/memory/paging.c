@@ -1,8 +1,10 @@
 #include "memory/paging.h"
 
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 
+#include "cpu/cpu.h"
 #include "cpu/registers.h"
 #include "libs/log.h"
 #include "libs/math.h"
@@ -14,9 +16,9 @@
 
 #define MAX_PAGE_TABLE_ENTRIES 512
 
-static int paging_max_levels     = 4;
-static bool nx_supported         = false;
-static bool huge_pages_supported = false;
+static int paging_max_levels = 4;
+static bool nx_supported     = false;
+static bool pml3_translation = false;
 
 typedef struct {
     uint64_t entries[MAX_PAGE_TABLE_ENTRIES];
@@ -135,6 +137,8 @@ get_page_table_entry(pagemap_t* map, uintptr_t virt_addr, int target_lvl, bool a
         if (entry & X86_PAGE_FLAG_HUGE) {
             // Refuse to split an existing huge-page mapping implicitly;
             // callers must explicitly tear it down if they want finer granularity.
+            errno = EBUSY;
+            KLOG_WARN("Paging: refusing to split huge mapping virt=0x%lx level=%d\n", virt_addr, l);
             return nullptr;
         }
 
@@ -146,7 +150,8 @@ get_page_table_entry(pagemap_t* map, uintptr_t virt_addr, int target_lvl, bool a
             void* table_phys = pmm_alloc(1);
 
             if (!table_phys) {
-                KLOG_ERROR("Failed to allocate page table at level=%d", l);
+                errno = ENOMEM;
+                KLOG_ERROR("Paging: failed to allocate page table at level=%d\n", l);
                 return nullptr;
             }
 
@@ -167,7 +172,7 @@ get_page_table_entry(pagemap_t* map, uintptr_t virt_addr, int target_lvl, bool a
 }
 
 bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
-    if (args.page_size == PAGE_SIZE_LARGE && !huge_pages_supported) {
+    if (args.page_size == PAGE_SIZE_LARGE && !pml3_translation) {
         args.page_size = PAGE_SIZE_MEDIUM;
     }
 
@@ -178,6 +183,8 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
     size_t flags  = convert_generic_flags(args.flags, args.cache, args.page_size);
 
     if (length == 0) {
+        errno = EINVAL;
+        KLOG_WARN("Paging: map zero length requested virt=0x%lx\n", virt_start);
         return false;
     }
 
@@ -188,11 +195,23 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
     bool allocated_locally = false;
 
     if (!is_aligned(virt_start, page_size)) {
+        errno = EINVAL;
+        KLOG_WARN(
+            "Paging: map virt addr not aligned virt=0x%lx page_size=0x%zx\n",
+            virt_start,
+            page_size
+        );
         return false;
     }
 
     // If mapping specific phys memory, it must be aligned too.
     if (!is_aligned(phys_addr, page_size) && phys_addr) {
+        errno = EINVAL;
+        KLOG_WARN(
+            "Paging: map phys addr not aligned phys=0x%lx page_size=0x%zx\n",
+            phys_addr,
+            page_size
+        );
         return false;
     }
 
@@ -217,6 +236,12 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
             void* p = pmm_alloc_aligned(page_size, page_size / PAGE_SIZE_SMALL);
 
             if (!p) {
+                errno = ENOMEM;
+                KLOG_ERROR(
+                    "Paging: map failed to allocate phys page virt=0x%lx size=0x%zx\n",
+                    curr_virt,
+                    page_size
+                );
                 success = false;
                 // Go to Rollback
                 break;
@@ -233,6 +258,16 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
                 pmm_free((void*)curr_phys, page_size / PAGE_SIZE_SMALL);
             }
 
+            if (errno == 0) {
+                errno = EFAULT;
+            }
+
+            KLOG_WARN(
+                "Paging: map failed to get PTE virt=0x%lx level=%d errno=%d\n",
+                curr_virt,
+                target_level,
+                errno
+            );
             success = false;
             // Go to Rollback
             break;
@@ -277,6 +312,18 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
             // remain from the partial attempt.
             reload_mapping(map);
             release_interrupt_lock(&map->lock);
+
+            if (errno == 0) {
+                errno = EFAULT;
+            }
+
+            KLOG_WARN(
+                "Paging: map rollback after %zu pages mapped virt_start=0x%lx errno=%d\n",
+                pages_mapped,
+                virt_start,
+                errno
+            );
+
             return false;
         }
     }
@@ -362,11 +409,13 @@ static bool unmap_worker(
 
 void pagemap_unmap(pagemap_t* map, pagemap_unmap_args_t args) {
     if (args.length == 0) {
+        errno = EINVAL;
+        KLOG_WARN("Paging: unmap zero length request\n");
         return;
     }
 
     // Align to page boundaries
-    uintptr_t virt_start = align_down(virt_start, PAGE_SIZE_SMALL);
+    uintptr_t virt_start = align_down((uintptr_t)args.virt_addr, PAGE_SIZE_SMALL);
     uintptr_t virt_end   = align_up(virt_start + args.length, PAGE_SIZE_SMALL);
 
     if (virt_end < virt_start) {
@@ -581,6 +630,8 @@ bool pagemap_shatter(pagemap_t* map, uintptr_t virt_addr) {
     pagetable_t* table  = (pagetable_t*)to_higher_half(phys_curr);
     uint64_t entry      = 0;
 
+    int err = 0;
+
     // We need to track where we are to update the entry later.
     uint64_t* entry_ptr = 0;
     int level           = 0;
@@ -598,6 +649,7 @@ bool pagemap_shatter(pagemap_t* map, uintptr_t virt_addr) {
         entry = table->entries[i5];
 
         if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+            err = ENOENT;
             goto cleanup;
         }
 
@@ -621,6 +673,7 @@ bool pagemap_shatter(pagemap_t* map, uintptr_t virt_addr) {
     entry     = *entry_ptr;
 
     if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        err = ENOENT;
         goto cleanup;
     }
 
@@ -638,6 +691,7 @@ bool pagemap_shatter(pagemap_t* map, uintptr_t virt_addr) {
     entry     = *entry_ptr;
 
     if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        err = ENOENT;
         goto cleanup;
     }
 
@@ -652,6 +706,10 @@ bool pagemap_shatter(pagemap_t* map, uintptr_t virt_addr) {
     // If we are here, it's already a 4K page (Level 1), so nothing to shatter.
 cleanup:
     release_interrupt_lock(&map->lock);
+    if (err != 0) {
+        errno = err;
+        KLOG_WARN("Paging: shatter failed virt=0x%lx errno=%d\n", virt_addr, err);
+    }
     return false;
 do_shatter:
     // Allocate a new Page Table frame.
@@ -659,7 +717,14 @@ do_shatter:
     void* new_table_ptr = pmm_alloc_aligned(PAGE_SIZE_SMALL, 1);
 
     if (!new_table_ptr) {
+        err = ENOMEM;
         release_interrupt_lock(&map->lock);
+        errno = err;
+        KLOG_ERROR(
+            "Paging: shatter failed to allocate table virt=0x%lx errno=%d\n",
+            virt_addr,
+            err
+        );
         return false;
     }
 
@@ -1049,9 +1114,12 @@ cleanup:
 bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr) {
     // Virt_addr must be 2MB aligned
     if (!is_aligned(virt_addr, PAGE_SIZE_MEDIUM)) {
+        errno = EINVAL;
+        KLOG_WARN("Paging: collapse virt=0x%lx is not 2MB aligned\n", virt_addr);
         return false;
     }
 
+    int err = 0;
     acquire_interrupt_lock(&map->lock);
 
     // Walk to the Page directory (Level 2)
@@ -1059,6 +1127,7 @@ bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr) {
     bool success  = false;
 
     if (!pde || !(*pde & X86_PAGE_FLAG_PRESENT)) {
+        err = ENOENT;
         goto cleanup;
     }
 
@@ -1072,6 +1141,7 @@ bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr) {
     pagetable_t* pt   = (pagetable_t*)to_higher_half(pt_phys);
 
     if (!(pt->entries[0] & X86_PAGE_FLAG_PRESENT)) {
+        err = ENOENT;
         goto cleanup;
     }
 
@@ -1079,6 +1149,7 @@ bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr) {
     size_t expected_flags = pt->entries[0] & ~X86_PAGE_ADDRESS_MASK;
 
     if (!is_aligned(base_phys, PAGE_SIZE_MEDIUM)) {
+        err = EINVAL;
         goto cleanup;
     }
 
@@ -1086,14 +1157,17 @@ bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr) {
         uint64_t entry = pt->entries[i];
 
         if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+            err = ENOENT;
             goto cleanup;
         }
 
         if ((entry & ~X86_PAGE_ADDRESS_MASK) != expected_flags) {
+            err = EINVAL;
             goto cleanup;
         }
 
         if ((entry & X86_PAGE_ADDRESS_MASK) != (base_phys + (i * PAGE_SIZE_SMALL))) {
+            err = EINVAL;
             goto cleanup;
         }
     }
@@ -1106,6 +1180,10 @@ bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr) {
     success = true;
 cleanup:
     release_interrupt_lock(&map->lock);
+    if (!success && err != 0) {
+        errno = err;
+        KLOG_WARN("Paging: collapse failed virt=0x%lx errno=%d\n", virt_addr, err);
+    }
     return success;
 }
 
@@ -1113,7 +1191,7 @@ void pagemap_create(pagemap_t* map) {
     void* root_frame = pmm_alloc(1);
 
     if (!root_frame) {
-        PANIC("Out of Memory");
+        PANIC("Out of Memory\n");
         map->phys_root = 0;
         return;
     }
@@ -1132,4 +1210,73 @@ void pagemap_create(pagemap_t* map) {
     }
 
     create_interrupt_lock(&map->lock);
+}
+
+void pagemap_global_init() {
+    bool has_pge  = cpu_has_feature(FEATURE_PGE);
+    bool has_la57 = cpu_has_feature(FEATURE_LA57);
+
+    bool has_smep = cpu_has_feature(FEATURE_SMEP);
+    bool has_smap = cpu_has_feature(FEATURE_SMAP);
+    bool has_pku  = cpu_has_feature(FEATURE_PKU);
+
+    nx_supported     = cpu_has_feature(FEATURE_XD);
+    pml3_translation = cpu_has_feature(FEATURE_PDPE1GB);
+
+    KLOG_INFO(
+        "Paging: features PGE=%d LA57=%d SMEP=%d SMAP=%d PKU=%d NX=%d 1G=%d\n",
+        has_pge,
+        has_la57,
+        has_smep,
+        has_smap,
+        has_pku,
+        nx_supported,
+        pml3_translation
+    );
+
+    if (nx_supported) {
+        uint64_t efer = read_msr(X86_MSR_IA32_EFER);
+        efer |= X86_EFER_NXE;
+        write_msr(X86_MSR_IA32_EFER, efer);
+        KLOG_INFO("Paging: NXE enabled in EFER\n");
+    }
+
+    uint64_t cr4 = read_cr4();
+    if (has_pge) {
+        cr4 |= X86_CR4_PGE;
+    }
+
+    if (has_smep) {
+        cr4 |= X86_CR4_SMEP;
+    }
+
+    if (has_pku) {
+        cr4 |= X86_CR4_PKE;
+    }
+
+    if (has_la57) {
+        if (cr4 & X86_CR4_LA57) {
+            paging_max_levels = 5;
+        } else {
+            paging_max_levels = 4;
+        }
+    }
+
+    KLOG_INFO(
+        "Paging: CR4 set PGE=%d SMEP=%d PKE=%d LA57=%d (levels=%d)\n",
+        !!(cr4 & X86_CR4_PGE),
+        !!(cr4 & X86_CR4_SMEP),
+        !!(cr4 & X86_CR4_PKE),
+        !!(cr4 & X86_CR4_LA57),
+        paging_max_levels
+    );
+
+    write_cr4(cr4);
+
+    uint64_t cr0 = read_cr0();
+    cr0 |= X86_CR0_WP;
+    cr0 |= X86_CR0_PG;
+    write_cr0(cr0);
+
+    KLOG_INFO("Paging: CR0 paging+WP enabled (cr0=0x%lx)\n", cr0);
 }

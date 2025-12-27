@@ -1,5 +1,6 @@
 #include "memory/vmm.h"
 
+#include <errno.h>
 #include <string.h>
 
 #include "libs/elf.h"
@@ -32,7 +33,8 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
     // 1. Validate ELF Magic
     if (ehdr->e_ident[EI_MAG0] != ELFMAG0 || ehdr->e_ident[EI_MAG1] != ELFMAG1 ||
         ehdr->e_ident[EI_MAG2] != ELFMAG2 || ehdr->e_ident[EI_MAG3] != ELFMAG3) {
-        PANIC("Invalid Kernel ELF File");
+        errno = ENOEXEC;
+        PANIC("VMM: invalid kernel ELF header\n");
         return;
     }
 
@@ -61,6 +63,15 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
 
         uint32_t map_flags = vmm_get_segment_flags(segment->p_flags);
 
+        KLOG_DEBUG(
+            "VMM: map kernel segment idx=%d virt=0x%lx phys=0x%lx len=0x%zx flags=0x%x\n",
+            i,
+            aligned_virt_start,
+            aligned_phys_start,
+            aligned_len,
+            map_flags
+        );
+
         pagemap_map_args_t args = {
             .virt_addr  = (void*)aligned_virt_start,
             .phys_addr  = (void*)aligned_phys_start,
@@ -78,7 +89,17 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
         }
 
         if (!pagemap_map(map, args)) {
-            PANIC("Failed to map kernel segment!\n");
+            int err = errno ? errno : ENOMEM;
+            errno   = err;
+            PANIC(
+                "VMM: failed to map kernel segment idx=%d virt=0x%lx phys=0x%lx len=0x%zx "
+                "errno=%d\n",
+                i,
+                aligned_virt_start,
+                aligned_phys_start,
+                aligned_len,
+                err
+            );
             return;
         }
     }

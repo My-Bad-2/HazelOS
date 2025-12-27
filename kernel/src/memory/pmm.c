@@ -488,7 +488,7 @@ void* pmm_alloc(size_t count) {
 
     if (!addr) {
         errno = ENOMEM;
-        KLOG_WARN("PMM alloc failed count=%zu\n", count);
+        KLOG_WARN("PMM: alloc failed count=%zu\n", count);
     }
 
     release_interrupt_lock(&pmm_state.lock);
@@ -524,7 +524,7 @@ void* pmm_alloc_aligned(size_t alignment, size_t count) {
 
     if (!res) {
         errno = ENOMEM;
-        KLOG_WARN("PMM alloc_aligned failed count=%zu align=0x%zx\n", count, alignment);
+        KLOG_WARN("PMM: alloc_aligned failed count=%zu align=0x%zx\n", count, alignment);
     }
 
     release_interrupt_lock(&pmm_state.lock);
