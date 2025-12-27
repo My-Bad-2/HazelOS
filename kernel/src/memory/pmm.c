@@ -17,7 +17,7 @@
 #include "memory/memory.h"
 
 // Page is currently sitting in a per-cpu cache stack
-#define PAGE_FLAG_CACHE_RESIDENT 0x0001
+#define PAGE_FLAG_CACHE_RESIDENT 0x01
 
 #define CACHE_SIZE 512  // 2MB cache per CPU
 #define BATCH_SIZE 256  // Transfer 1MB at a time between Global Bitmap <-> Local CPU Cache
@@ -827,6 +827,35 @@ void pmm_free(void* ptr, size_t count) {
         if (pmm_dec_ref(page_addr) == 0) {
             pmm_release_page(page_addr, 1);
         }
+    }
+}
+
+void pmm_force_free(void* phys_addr, size_t count) {
+    if (!phys_addr) {
+        return;
+    }
+
+    uintptr_t addr = (uintptr_t)phys_addr;
+
+    for (size_t i = 0; i < count; ++i) {
+        uintptr_t curr = addr + (i * PAGE_SIZE_SMALL);
+        size_t pfn     = curr / PAGE_SIZE_SMALL;
+
+        if (pfn >= pmm_state.total_pages) {
+            continue;
+        }
+
+        __atomic_store_n(&pmm_state.page_metadata[pfn].ref_count, 0, memory_order_relaxed);
+
+        // If the page was somehow stuck in a cache and saturated (corruption), we clear the flag so
+        // release_pages() accepts it. This might cause a double-entry if it really is in stack, but
+        // this function is "unsafe" by definition.
+        __atomic_and_fetch(
+            &pmm_state.page_metadata[pfn].flags,
+            ~PAGE_FLAG_CACHE_RESIDENT,
+            memory_order_relaxed
+        );
+        pmm_release_page((void*)curr, 1);
     }
 }
 

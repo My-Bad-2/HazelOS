@@ -331,4 +331,33 @@ TEST(pmm_ref_manual_dec_consistency, "Ref-Count Manual Dec -> Free Interaction")
     pmm_free(p2, 1);
 }
 
+TEST(pmm_force_recover, "Recover Saturated Page") {
+    void* p = pmm_alloc(1);
+
+    for (int i = 0; i < 70000; i++) {
+        pmm_inc_ref(p);
+    }
+
+    TEST_ASSERT(pmm_get_ref(p) == 0xFFFF);
+
+    pmm_stats_t s1;
+    pmm_get_stats(&s1);
+    pmm_free(p, 1);
+    pmm_stats_t s2;
+    pmm_get_stats(&s2);
+    TEST_ASSERT(s1.free_memory == s2.free_memory);  // Still leaked
+
+    pmm_force_free(p, 1);
+
+    pmm_stats_t s3;
+    pmm_get_stats(&s3);
+    TEST_ASSERT(s3.free_memory == s1.free_memory + PAGE_SIZE_SMALL);  // Recovered!
+
+    void* p2 = pmm_alloc(1);
+    TEST_ASSERT(p == p2);               // Should come back from LIFO cache
+    TEST_ASSERT(pmm_get_ref(p2) == 1);  // Refcount should be reset to 1
+
+    pmm_free(p2, 1);
+}
+
 #endif
