@@ -7,6 +7,7 @@
 
 #include "arch.h"
 #include "libs/spinlock.h"
+#include "libs/symbols.h"
 
 #define LOG_BUF_SIZE 1024  // 1KB buffer on stack
 
@@ -126,6 +127,11 @@ void kernel_panic(const char* file, int line, const char* fmt, ...) {
     va_end(args);
 
     arch_write(msg_buf);
+
+#if KERNEL_TEST
+    dump_stacktrace();
+#endif
+
     arch_write("\nSystem Halted.\n");
 
     arch_halt(false);
