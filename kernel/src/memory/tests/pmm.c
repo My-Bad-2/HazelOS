@@ -233,4 +233,102 @@ TEST(pmm_summary_consistency, "Summary Bitmap Consistency") {
     pmm_free(chunk2, count);
 }
 
+TEST(pmm_ref_basic, "Ref-Count Basic Increment/Decrement") {
+    void* p = pmm_alloc(1);
+    TEST_ASSERT(p != nullptr);
+
+    uint32_t initial_ref = pmm_get_ref(p);
+    TEST_ASSERT(initial_ref == 1);
+
+    uint32_t r1 = pmm_inc_ref(p);
+    TEST_ASSERT(r1 == 2);
+    TEST_ASSERT(pmm_get_ref(p) == 2);
+
+    uint32_t r2 = pmm_dec_ref(p);
+    TEST_ASSERT(r2 == 1);
+    TEST_ASSERT(pmm_get_ref(p) == 1);
+
+    pmm_free(p, 1);
+}
+
+TEST(pmm_ref_protection, "Ref-Count Prevents Premature Free") {
+    pmm_stats_t start_stats;
+    pmm_get_stats(&start_stats);
+
+    void* p = pmm_alloc(1);
+    TEST_ASSERT(p != nullptr);
+
+    pmm_inc_ref(p);  // Ref=2
+    TEST_ASSERT(pmm_get_ref(p) == 2);
+
+    pmm_free(p, 1);
+
+    TEST_ASSERT(pmm_get_ref(p) == 1);
+
+    pmm_stats_t mid_stats;
+    pmm_get_stats(&mid_stats);
+
+    TEST_ASSERT(mid_stats.free_memory == start_stats.free_memory - PAGE_SIZE_SMALL);
+    pmm_free(p, 1);
+
+    pmm_stats_t end_stats;
+    pmm_get_stats(&end_stats);
+
+    TEST_ASSERT(end_stats.free_memory == start_stats.free_memory);
+}
+
+TEST(pmm_ref_saturation, "Ref-Count Saturation (Sticky 0xFFFF)") {
+    void* p = pmm_alloc(1);
+    TEST_ASSERT(p != nullptr);
+
+    for (int i = 0; i < 65534; i++) {
+        pmm_inc_ref(p);
+    }
+
+    TEST_ASSERT(pmm_get_ref(p) == 0xFFFF);
+
+    // Attempt to overflow
+    uint32_t val = pmm_inc_ref(p);
+    TEST_ASSERT(val == 0xFFFF);
+    TEST_ASSERT(pmm_get_ref(p) == 0xFFFF);
+
+    // Attempt to free (decrement)
+    uint32_t dec_val = pmm_dec_ref(p);
+    TEST_ASSERT(dec_val == 0xFFFF);  // Should still be max
+    TEST_ASSERT(pmm_get_ref(p) == 0xFFFF);
+
+    // Verify free() doesn't reclaim it
+    pmm_stats_t before_free;
+    pmm_get_stats(&before_free);
+
+    pmm_free(p, 1);
+    pmm_stats_t after_free;
+    pmm_get_stats(&after_free);
+
+    TEST_ASSERT(before_free.free_memory == after_free.free_memory);
+
+    // Note: We cannot clean this page up now via standard API. It is leaked by design.
+    // This is acceptable for the test page.
+}
+
+TEST(pmm_ref_manual_dec_consistency, "Ref-Count Manual Dec -> Free Interaction") {
+    void* p = pmm_alloc(1);
+
+    // This leaves the page in a zombie state: Ref=0, but Bitmap=Used.
+    uint32_t ref = pmm_dec_ref(p);
+    TEST_ASSERT(ref == 0);
+
+    // This should successfully clean up the zombie page.
+    pmm_free(p, 1);
+
+    // Verify it was actually freed by checking if we can alloc it again (LIFO cache)
+    // or by stats.
+    void* p2 = pmm_alloc(1);
+
+    // Should get same address from hot cache
+    TEST_ASSERT(p2 == p);
+
+    pmm_free(p2, 1);
+}
+
 #endif
