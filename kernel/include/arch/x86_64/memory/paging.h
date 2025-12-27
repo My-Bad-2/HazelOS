@@ -6,7 +6,7 @@
 #define X86_PAGE_FLAG_WRITE         0x02ul
 #define X86_PAGE_FLAG_USER          0x04ul
 #define X86_PAGE_FLAG_WRITE_THROUGH 0x08ul
-#define x86_PAGE_FLAG_CACHE_DISABLE 0x10ul
+#define X86_PAGE_FLAG_CACHE_DISABLE 0x10ul
 #define X86_PAGE_FLAG_ACCESSED      0x20ul
 #define X86_PAGE_FLAG_DIRTY         0x40ul
 #define X86_PAGE_FLAG_HUGE          0x80ul
@@ -25,9 +25,9 @@
 // Table 7.9 AMD64 Architecture Programmer's Manual (Volumes 1-5) [UNIFIED] Pg 683
 #define X86_PAT_TYPE_UNCACHEABLE       0x00ul
 #define X86_PAT_TYPE_WRITE_COMBINING   0x01ul
-#define x86_PAT_TYPE_WRITE_THROUGH     0x04ul
+#define X86_PAT_TYPE_WRITE_THROUGH     0x04ul
 #define X86_PAT_TYPE_WRITE_PROTECT     0x05ul
 #define X86_PAT_TYPE_WRITE_BACK        0x06ul
-#define x86_PAT_TYPE_UNCACHEABLE_MINUS 0x07ul
+#define X86_PAT_TYPE_UNCACHEABLE_MINUS 0x07ul
 
 #endif

@@ -265,10 +265,16 @@
         asm volatile("mov %0, %%cr" #n : : "r"(val) : "memory"); \
     }
 
-DEFINE_CR_ACCESSOR(0)
-DEFINE_CR_ACCESSOR(2)
-DEFINE_CR_ACCESSOR(3)
-DEFINE_CR_ACCESSOR(4)
+#define DEFINE_DR_ACCESSOR(n)                                    \
+    static inline uint64_t read_dr##n(void) {                    \
+        uint64_t val;                                            \
+        asm volatile("mov %%dr" #n ", %0" : "=r"(val));          \
+        return val;                                              \
+    }                                                            \
+                                                                 \
+    static inline void write_dr##n(uint64_t val) {               \
+        asm volatile("mov %0, %%dr" #n : : "r"(val) : "memory"); \
+    }
 
 static inline uint64_t read_msr(uint64_t address) {
     uint32_t low, high;
@@ -282,27 +288,6 @@ static inline void write_msr(uint64_t address, uint64_t value) {
 
     asm volatile("wrmsr" ::"a"(low), "d"(high), "c"(address));
 }
-
-#define DEFINE_DR_ACCESSOR(n)                                    \
-    static inline uint64_t read_dr##n(void) {                    \
-        uint64_t val;                                            \
-        asm volatile("mov %%dr" #n ", %0" : "=r"(val));          \
-        return val;                                              \
-    }                                                            \
-                                                                 \
-    static inline void write_dr##n(uint64_t val) {               \
-        asm volatile("mov %0, %%dr" #n : : "r"(val) : "memory"); \
-    }
-
-// Define accessors for the Breakpoint Address Registers
-DEFINE_DR_ACCESSOR(0)
-DEFINE_DR_ACCESSOR(1)
-DEFINE_DR_ACCESSOR(2)
-DEFINE_DR_ACCESSOR(3)
-
-// Define accessors for Status (DR6) and Control (DR7)
-DEFINE_DR_ACCESSOR(6)
-DEFINE_DR_ACCESSOR(7)
 
 static inline void invlpg(const void* addr) {
     asm volatile("invlpg (%0)" : : "r"(addr) : "memory");
@@ -322,6 +307,21 @@ static inline void invpcid(unsigned long type, uint64_t pcid, uint64_t addr) {
 
     asm volatile("invpcid %0, %1" : : "m"(desc), "r"(type) : "memory");
 }
+
+DEFINE_CR_ACCESSOR(0)
+DEFINE_CR_ACCESSOR(2)
+DEFINE_CR_ACCESSOR(3)
+DEFINE_CR_ACCESSOR(4)
+
+// Define accessors for the Breakpoint Address Registers
+DEFINE_DR_ACCESSOR(0)
+DEFINE_DR_ACCESSOR(1)
+DEFINE_DR_ACCESSOR(2)
+DEFINE_DR_ACCESSOR(3)
+
+// Define accessors for Status (DR6) and Control (DR7)
+DEFINE_DR_ACCESSOR(6)
+DEFINE_DR_ACCESSOR(7)
 
 #endif
 #endif

@@ -41,3 +41,17 @@ volatile struct limine_mp_request mp_request = {
     .flags = 0
 #endif
 };
+
+[[gnu::section(".requests")]]
+volatile struct limine_executable_address_request kernel_address_request = {
+    .id       = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+};
+
+[[gnu::section(".requests")]]
+volatile struct limine_executable_file_request kernel_file_request = {
+    .id       = LIMINE_EXECUTABLE_FILE_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+};

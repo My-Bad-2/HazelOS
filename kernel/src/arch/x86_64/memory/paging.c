@@ -10,10 +10,11 @@
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/pmm.h"
+#include "memory/vmm.h"
 
 #define MAX_PAGE_TABLE_ENTRIES 512
 
-static int paging_max_levels     = 0;
+static int paging_max_levels     = 4;
 static bool nx_supported         = false;
 static bool huge_pages_supported = false;
 
@@ -53,12 +54,16 @@ static inline bool is_table_empty(pagetable_t* table) {
     return true;
 }
 
-static inline void reload_mapping(pagemap_t* map) {
+static inline bool pagemap_is_active(pagemap_t* map) {
     uint64_t cr3 = read_cr3();
 
+    return (cr3 & X86_PAGE_ADDRESS_MASK) == (map->phys_root & X86_PAGE_ADDRESS_MASK);
+}
+
+static inline void reload_mapping(pagemap_t* map) {
     // Check if the modified map is the one currently loaded
-    if ((cr3 & X86_PAGE_ADDRESS_MASK) == (map->phys_root & X86_PAGE_ADDRESS_MASK)) {
-        write_cr3(cr3);
+    if (pagemap_is_active(map)) {
+        write_cr3(map->phys_root);
     }
 }
 
@@ -92,11 +97,11 @@ static inline size_t convert_generic_flags(uint32_t flags, cache_type_t cache, s
 
     switch (cache) {
         case CACHE_UNCACHEABLE:
-            ret |= x86_PAGE_FLAG_CACHE_DISABLE;
+            ret |= X86_PAGE_FLAG_CACHE_DISABLE;
             break;
         case CACHE_MMIO:
         case CACHE_DEVICE:
-            ret |= x86_PAGE_FLAG_CACHE_DISABLE | X86_PAGE_FLAG_WRITE_THROUGH;
+            ret |= X86_PAGE_FLAG_CACHE_DISABLE | X86_PAGE_FLAG_WRITE_THROUGH;
             break;
         case CACHE_WRITE_THROUGH:
             ret |= X86_PAGE_FLAG_WRITE_THROUGH;
@@ -123,7 +128,8 @@ get_page_table_entry(pagemap_t* map, uintptr_t virt_addr, int target_lvl, bool a
     int idx                   = 0;
 
     for (int l = paging_max_levels; l > target_lvl; --l) {
-        idx             = virt_addr_to_idx(virt_addr, l);
+        idx = virt_addr_to_idx(virt_addr, l);
+
         uintptr_t entry = table->entries[idx];
 
         if (entry & X86_PAGE_FLAG_HUGE) {
@@ -144,12 +150,12 @@ get_page_table_entry(pagemap_t* map, uintptr_t virt_addr, int target_lvl, bool a
                 return nullptr;
             }
 
-            pagetable_t* new_table = (pagetable_t*)to_higher_half((uintptr_t)virt_addr);
+            pagetable_t* new_table = (pagetable_t*)to_higher_half((uintptr_t)table_phys);
             memset(new_table, 0, sizeof(pagetable_t));
 
-            uint64_t new_entry      = (uintptr_t)table_phys | X86_NEW_PAGE_TABLE_FLAGS;
-            new_table->entries[idx] = new_entry;
-            entry                   = new_entry;
+            uint64_t new_entry  = (uintptr_t)table_phys | X86_NEW_PAGE_TABLE_FLAGS;
+            table->entries[idx] = new_entry;
+            entry               = new_entry;
         }
 
         curr_table_phys = entry & X86_PAGE_ADDRESS_MASK;
@@ -627,7 +633,6 @@ bool pagemap_shatter(pagemap_t* map, uintptr_t virt_addr) {
     phys_curr = entry & X86_PAGE_ADDRESS_MASK;
 
     // Level 2 (PD)
-    // Level 3 (PDP)
     table     = (pagetable_t*)to_higher_half(phys_curr);
     entry_ptr = &table->entries[i2];
     entry     = *entry_ptr;
@@ -699,7 +704,7 @@ do_shatter:
     // Instead of forcing permissive flags (RW | User), we inherit the access control bits from the
     // original huge page.
     const size_t access_mask = X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_WRITE | X86_PAGE_FLAG_USER |
-                               X86_PAGE_FLAG_WRITE_THROUGH | x86_PAGE_FLAG_CACHE_DISABLE |
+                               X86_PAGE_FLAG_WRITE_THROUGH | X86_PAGE_FLAG_CACHE_DISABLE |
                                X86_PAGE_FLAG_LARGE_PAT | X86_PAGE_FLAG_NX;
     size_t inherited_flags   = entry & access_mask;
 
@@ -712,4 +717,419 @@ do_shatter:
     reload_mapping(map);
     release_interrupt_lock(&map->lock);
     return true;
+}
+
+void pagemap_load(pagemap_t* map) {
+    if (!pagemap_is_active(map)) {
+        write_cr3(map->phys_root);
+    }
+}
+
+size_t pagemap_get_flags(pagemap_t* map, uintptr_t virt_addr) {
+    uintptr_t phys_curr = map->phys_root;
+    pagetable_t* table  = (pagetable_t*)to_higher_half(phys_curr);
+    uint64_t entry      = 0;
+
+    int i5 = virt_addr_to_idx(virt_addr, 5);
+    int i4 = virt_addr_to_idx(virt_addr, 4);
+    int i3 = virt_addr_to_idx(virt_addr, 3);
+    int i2 = virt_addr_to_idx(virt_addr, 2);
+    int i1 = virt_addr_to_idx(virt_addr, 1);
+
+    acquire_interrupt_lock(&map->lock);
+
+    // If we are in 5-level mode, the root is PML5. We must resolve it
+    // to get the physical address of the PML4 table.
+    if (paging_max_levels == 5) {
+        entry = table->entries[i5];
+
+        if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+            goto not_found;
+        }
+
+        // Extract the physical address of the next level (PML4)
+        phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+    }
+
+    // Level 4 (PML4)
+    table = (pagetable_t*)to_higher_half(phys_curr);
+    entry = table->entries[i4];
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto not_found;
+    }
+
+    phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+
+    // Level 3 (PDP)
+    table = (pagetable_t*)to_higher_half(phys_curr);
+    entry = table->entries[i3];
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto not_found;
+    }
+
+    if (entry & X86_PAGE_FLAG_HUGE) {
+        goto found;
+    }
+
+    phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+
+    // Level 2 (PD)
+    table = (pagetable_t*)to_higher_half(phys_curr);
+    entry = table->entries[i3];
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto not_found;
+    }
+
+    if (entry & X86_PAGE_FLAG_HUGE) {
+        goto found;
+    }
+
+    phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+
+    // Level 1 (PT)
+    table = (pagetable_t*)to_higher_half(phys_curr);
+    entry = table->entries[i3];
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto not_found;
+    }
+
+found:
+    release_interrupt_lock(&map->lock);
+    return entry & ~X86_PAGE_ADDRESS_MASK;
+not_found:
+    release_interrupt_lock(&map->lock);
+    return 0;
+}
+
+static void pagemap_release_worker(uintptr_t table_phys, int level, int target_level) {
+    pagetable_t* table = (pagetable_t*)to_higher_half(table_phys);
+
+    // If we are at the top PML, only iterate the lower half (User Space) entries (0 to 255) to
+    // avoid nuking kernel tables.
+    int max_idx = MAX_PAGE_TABLE_ENTRIES;
+
+    if (level == paging_max_levels) {
+        max_idx = MAX_PAGE_TABLE_ENTRIES / 2;
+    }
+
+    for (int i = 0; i < max_idx; ++i) {
+        uint64_t entry = table->entries[i];
+
+        if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+            continue;
+        }
+
+        uintptr_t child_phys = entry & X86_PAGE_ADDRESS_MASK;
+
+        // If not at the leaf, recurse first
+        if (level > target_level && !(entry & X86_PAGE_FLAG_HUGE)) {
+            pagemap_release_worker(child_phys, level - 1, target_level);
+        }
+
+        if (level > 1 && !(entry & X86_PAGE_FLAG_HUGE)) {
+            pmm_free((void*)child_phys, 1);
+        }
+    }
+}
+
+void pagemap_release(pagemap_t* map) {
+    // Switch to a safe pagemap if we are currently running on the map we are about t destroy.
+    if (pagemap_is_active(map)) {
+        pagemap_load(vmm_get_kernel_pagemap());
+    }
+
+    pagemap_release_worker(map->phys_root, paging_max_levels, 1);
+
+    pmm_free((void*)map->phys_root, 1);
+    map->phys_root = 0;
+}
+
+void pagemap_sync_kernel(pagemap_t* target_map) {
+    pagemap_t* kernel_map = vmm_get_kernel_pagemap();
+
+    pagetable_t* target_pml = (pagetable_t*)to_higher_half(target_map->phys_root);
+    pagetable_t* kernel_pml = (pagetable_t*)to_higher_half(kernel_map->phys_root);
+
+    // Copy the top half (Entries 256 to 511)
+    // This copies the pointers to the kernel PDPs.
+    // Since kernel PDPs are shared, any update inside them is visible globally.
+    memcpy(&target_pml->entries[256], &kernel_pml->entries[256], 256 * sizeof(uint64_t));
+}
+
+bool pagemap_test_and_clear_dirty(pagemap_t* map, uintptr_t virt_addr) {
+    uintptr_t phys_curr = map->phys_root;
+    pagetable_t* table  = (pagetable_t*)to_higher_half(phys_curr);
+    uint64_t entry      = 0;
+    bool is_dirty       = false;
+
+    // We need to track where we are to update the entry later.
+    uint64_t* entry_ptr = 0;
+
+    int i5 = virt_addr_to_idx(virt_addr, 5);
+    int i4 = virt_addr_to_idx(virt_addr, 4);
+    int i3 = virt_addr_to_idx(virt_addr, 3);
+    int i2 = virt_addr_to_idx(virt_addr, 2);
+    int i1 = virt_addr_to_idx(virt_addr, 1);
+
+    acquire_interrupt_lock(&map->lock);
+
+    // If we are in 5-level mode, the root is PML5. We must resolve it
+    // to get the physical address of the PML4 table.
+    if (paging_max_levels == 5) {
+        entry = table->entries[i5];
+
+        if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+            goto cleanup;
+        }
+
+        // Extract the physical address of the next level (PML4)
+        phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+    }
+
+    // Level 4 (PML4)
+    table = (pagetable_t*)to_higher_half(phys_curr);
+    entry = table->entries[i4];
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+    phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+
+    // Level 3 (PDP)
+    table     = (pagetable_t*)to_higher_half(phys_curr);
+    entry_ptr = &table->entries[i3];
+    entry     = *entry_ptr;
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+    if (entry & X86_PAGE_FLAG_HUGE) {
+        goto check_dirty;
+    }
+
+    phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+
+    // Level 2 (PD)
+    table     = (pagetable_t*)to_higher_half(phys_curr);
+    entry_ptr = &table->entries[i2];
+    entry     = *entry_ptr;
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+    if (entry & X86_PAGE_FLAG_HUGE) {
+        goto check_dirty;
+    }
+
+    phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+
+    table     = (pagetable_t*)to_higher_half(phys_curr);
+    entry_ptr = &table->entries[i1];
+    entry     = *entry_ptr;
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+check_dirty:
+    is_dirty = (entry & X86_PAGE_FLAG_DIRTY);
+
+    if (is_dirty) {
+        entry &= ~X86_PAGE_FLAG_DIRTY;
+        *entry_ptr = entry;
+
+        invlpg((void*)virt_addr);
+    }
+
+cleanup:
+    release_interrupt_lock(&map->lock);
+    return is_dirty;
+}
+
+bool pagemap_test_and_clear_accessed(pagemap_t* map, uintptr_t virt_addr) {
+    uintptr_t phys_curr = map->phys_root;
+    pagetable_t* table  = (pagetable_t*)to_higher_half(phys_curr);
+    uint64_t entry      = 0;
+    bool is_dirty       = false;
+
+    // We need to track where we are to update the entry later.
+    uint64_t* entry_ptr = 0;
+
+    int i5 = virt_addr_to_idx(virt_addr, 5);
+    int i4 = virt_addr_to_idx(virt_addr, 4);
+    int i3 = virt_addr_to_idx(virt_addr, 3);
+    int i2 = virt_addr_to_idx(virt_addr, 2);
+    int i1 = virt_addr_to_idx(virt_addr, 1);
+
+    acquire_interrupt_lock(&map->lock);
+
+    // If we are in 5-level mode, the root is PML5. We must resolve it
+    // to get the physical address of the PML4 table.
+    if (paging_max_levels == 5) {
+        entry = table->entries[i5];
+
+        if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+            goto cleanup;
+        }
+
+        // Extract the physical address of the next level (PML4)
+        phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+    }
+
+    // Level 4 (PML4)
+    table = (pagetable_t*)to_higher_half(phys_curr);
+    entry = table->entries[i4];
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+    phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+
+    // Level 3 (PDP)
+    table     = (pagetable_t*)to_higher_half(phys_curr);
+    entry_ptr = &table->entries[i3];
+    entry     = *entry_ptr;
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+    if (entry & X86_PAGE_FLAG_HUGE) {
+        goto check_accessed;
+    }
+
+    phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+
+    // Level 2 (PD)
+    table     = (pagetable_t*)to_higher_half(phys_curr);
+    entry_ptr = &table->entries[i2];
+    entry     = *entry_ptr;
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+    if (entry & X86_PAGE_FLAG_HUGE) {
+        goto check_accessed;
+    }
+
+    phys_curr = entry & X86_PAGE_ADDRESS_MASK;
+
+    table     = (pagetable_t*)to_higher_half(phys_curr);
+    entry_ptr = &table->entries[i1];
+    entry     = *entry_ptr;
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+check_accessed:
+    is_dirty = (entry & X86_PAGE_FLAG_ACCESSED);
+
+    if (is_dirty) {
+        entry &= ~X86_PAGE_FLAG_ACCESSED;
+        *entry_ptr = entry;
+
+        invlpg((void*)virt_addr);
+    }
+
+cleanup:
+    release_interrupt_lock(&map->lock);
+    return is_dirty;
+}
+
+bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr) {
+    // Virt_addr must be 2MB aligned
+    if (!is_aligned(virt_addr, PAGE_SIZE_MEDIUM)) {
+        return false;
+    }
+
+    acquire_interrupt_lock(&map->lock);
+
+    // Walk to the Page directory (Level 2)
+    uint64_t* pde = get_page_table_entry(map, virt_addr, 2, false);
+    bool success  = false;
+
+    if (!pde || !(*pde & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+    // If already huge, nothing to do
+    if (*pde & X86_PAGE_FLAG_HUGE) {
+        success = true;
+        goto cleanup;
+    }
+
+    uintptr_t pt_phys = *pde & X86_PAGE_ADDRESS_MASK;
+    pagetable_t* pt   = (pagetable_t*)to_higher_half(pt_phys);
+
+    if (!(pt->entries[0] & X86_PAGE_FLAG_PRESENT)) {
+        goto cleanup;
+    }
+
+    uintptr_t base_phys   = pt->entries[0] & X86_PAGE_ADDRESS_MASK;
+    size_t expected_flags = pt->entries[0] & ~X86_PAGE_ADDRESS_MASK;
+
+    if (!is_aligned(base_phys, PAGE_SIZE_MEDIUM)) {
+        goto cleanup;
+    }
+
+    for (size_t i = 1; i < MAX_PAGE_TABLE_ENTRIES; ++i) {
+        uint64_t entry = pt->entries[i];
+
+        if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+            goto cleanup;
+        }
+
+        if ((entry & ~X86_PAGE_ADDRESS_MASK) != expected_flags) {
+            goto cleanup;
+        }
+
+        if ((entry & X86_PAGE_ADDRESS_MASK) != (base_phys + (i * PAGE_SIZE_SMALL))) {
+            goto cleanup;
+        }
+    }
+
+    uint64_t new_pde = base_phys | expected_flags | X86_PAGE_FLAG_HUGE;
+
+    *pde = new_pde;
+    pmm_free((void*)pt_phys, 1);
+    invlpg((const void*)virt_addr);
+    success = true;
+cleanup:
+    release_interrupt_lock(&map->lock);
+    return success;
+}
+
+void pagemap_create(pagemap_t* map) {
+    void* root_frame = pmm_alloc(1);
+
+    if (!root_frame) {
+        PANIC("Out of Memory");
+        map->phys_root = 0;
+        return;
+    }
+
+    map->phys_root = (uintptr_t)root_frame;
+
+    pagetable_t* table = (pagetable_t*)to_higher_half(map->phys_root);
+
+    memset(table, 0, 256 * sizeof(uint64_t));
+    pagemap_t* kernel_map = vmm_get_kernel_pagemap();
+
+    if (kernel_map && kernel_map != map) {
+        pagemap_sync_kernel(map);
+    } else {
+        memset(&table->entries[256], 0, 256 * sizeof(uint64_t));
+    }
+
+    create_interrupt_lock(&map->lock);
 }
