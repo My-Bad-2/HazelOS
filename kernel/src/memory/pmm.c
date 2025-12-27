@@ -476,7 +476,7 @@ static void init_refs(void* ptr, size_t count) {
     }
 }
 
-uint32_t pmm_inc_ref(void* phys) {
+uint16_t pmm_inc_ref(void* phys) {
     if (!phys) {
         return 0;
     }
@@ -511,7 +511,7 @@ uint32_t pmm_inc_ref(void* phys) {
     }
 }
 
-uint32_t pmm_dec_ref(void* phys) {
+uint16_t pmm_dec_ref(void* phys) {
     if (!phys) {
         return 0;
     }
@@ -550,7 +550,7 @@ uint32_t pmm_dec_ref(void* phys) {
     }
 }
 
-uint32_t pmm_get_ref(void* phys) {
+uint16_t pmm_get_ref(void* phys) {
     if (!phys) {
         return 0;
     }
@@ -562,6 +562,20 @@ uint32_t pmm_get_ref(void* phys) {
     }
 
     return __atomic_load_n(&pmm_state.page_metadata[pfn].ref_count, memory_order_seq_cst);
+}
+
+void pmm_set_ref(void* phys, uint16_t ref) {
+    if (!phys) {
+        return;
+    }
+
+    size_t pfn = (uintptr_t)phys / PAGE_SIZE_SMALL;
+
+    if (pfn >= pmm_state.total_pages) {
+        return;
+    }
+
+    __atomic_store_n(&pmm_state.page_metadata[pfn].ref_count, ref, memory_order_relaxed);
 }
 
 void* pmm_alloc(size_t count) {

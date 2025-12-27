@@ -11,6 +11,9 @@
 #define X86_PAGE_FLAG_DIRTY         0x40ul
 #define X86_PAGE_FLAG_HUGE          0x80ul
 #define X86_PAGE_FLAG_GLOBAL        0x100ul
+#define X86_PAGE_FLAG_SHARED        0x200ul
+#define X86_PAGE_FLAG_PRIVATE       0x400ul
+#define X86_PAGE_FLAG_DEMAND        0x800ul
 #define X86_PAGE_FLAG_NX            0x8000000000000000ul
 
 #define X86_NEW_PAGE_TABLE_FLAGS (X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_WRITE | X86_PAGE_FLAG_USER)
@@ -29,5 +32,15 @@
 #define X86_PAT_TYPE_WRITE_PROTECT     0x05ul
 #define X86_PAT_TYPE_WRITE_BACK        0x06ul
 #define X86_PAT_TYPE_UNCACHEABLE_MINUS 0x07ul
+
+// AMD64 Architecture Programmer's Manual (Volumes 1-5) [UNIFIED] Pg 718
+#define X86_PAGE_FAULT_PRESENT           0x01u
+#define X86_PAGE_FAULT_WRITE             0x02u
+#define X86_PAGE_FAULT_USER              0x04u
+#define X86_PAGE_FAULT_RSVD              0x08u
+#define X86_PAGE_FAULT_INSTRUCTION_FETCH 0x10u
+#define X86_PAGE_FAULT_PROTECTION_KEY    0x20u
+#define X86_PAGE_FAULT_SHADOW_STACK      0x40u
+#define X86_PAGE_FAULT_RMP               0x80000000u
 
 #endif

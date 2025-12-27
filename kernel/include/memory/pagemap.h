@@ -6,12 +6,15 @@
 
 #include "libs/spinlock.h"
 
-#define VMM_FLAG_NONE    0x01
-#define VMM_FLAG_READ    0x02
-#define VMM_FLAG_WRITE   0x04
-#define VMM_FLAG_EXECUTE 0x08
-#define VMM_FLAG_USER    0x10
-#define VMM_FLAG_GLOBAL  0x20
+#define VMM_FLAG_NONE    0x01u
+#define VMM_FLAG_READ    0x02u
+#define VMM_FLAG_WRITE   0x04u
+#define VMM_FLAG_EXECUTE 0x08u
+#define VMM_FLAG_USER    0x10u
+#define VMM_FLAG_GLOBAL  0x20u
+#define VMM_FLAG_SHARED  0x40u
+#define VMM_FLAG_PRIVATE 0x80u
+#define VMM_FLAG_DEMAND  0x100u
 
 typedef enum {
     CACHE_UNCACHEABLE = 0,
@@ -70,6 +73,9 @@ void pagemap_create(pagemap_t* map);
 void pagemap_load(pagemap_t* map);
 void pagemap_release(pagemap_t* map);
 void pagemap_sync_kernel(pagemap_t* target_map);
+bool pagemap_clone(pagemap_t* dest, pagemap_t* src);
+
+size_t pagemap_walk(pagemap_t* map, char* buffer, size_t size);
 
 void pagemap_global_init();
 

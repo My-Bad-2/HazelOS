@@ -18,9 +18,10 @@ void pmm_free(void* ptr, size_t count);
 void pmm_force_free(void* phys_addr, size_t count);
 void pmm_get_stats(pmm_stats_t* stats);
 
-uint32_t pmm_inc_ref(void* ptr);
-uint32_t pmm_dec_ref(void* ptr);
-uint32_t pmm_get_ref(void* ptr);
+uint16_t pmm_inc_ref(void* ptr);
+uint16_t pmm_dec_ref(void* ptr);
+uint16_t pmm_get_ref(void* ptr);
+void pmm_set_ref(void* ptr, uint16_t ref);
 
 void pmm_init(void);
 

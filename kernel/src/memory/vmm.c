@@ -8,8 +8,12 @@
 #include "libs/math.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
+#include "memory/vma.h"
 
-pagemap_t kernel_pagemap;
+extern void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_delta);
+
+static pagemap_t kernel_pagemap;
+static uintptr_t highest_address = 0;
 
 pagemap_t* vmm_get_kernel_pagemap() {
     return &kernel_pagemap;
@@ -56,6 +60,10 @@ void vmm_map_memory(pagemap_t* map) {
 
         uintptr_t phys_start = entry->base;
         uintptr_t phys_end   = entry->base + entry->length;
+
+        if (highest_address < phys_end) {
+            highest_address = phys_end;
+        }
 
         uintptr_t curr = phys_start;
 
@@ -124,5 +132,16 @@ void vmm_init(void) {
     vmm_map_kernel(&kernel_pagemap, kernel_base, phys_delta);
     pagemap_load(&kernel_pagemap);
 
-    KLOG_INFO("VMM: kernel pagemap loaded\n");
+    uintptr_t vma_start = align_up(to_higher_half(highest_address), PAGE_SIZE_LARGE);
+    uintptr_t vma_end   = virt_base;
+
+    vmm_init_global();
+    vmm_init_space(&kernel_space, &kernel_pagemap, vma_start, vma_end);
+
+    KLOG_INFO(
+        "VMM: init complete pagemap loaded vma=[0x%lx,0x%lx) highest_phys=0x%lx\n",
+        vma_start,
+        vma_end,
+        highest_address
+    );
 }

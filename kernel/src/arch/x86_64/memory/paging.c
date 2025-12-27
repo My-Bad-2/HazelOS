@@ -1,7 +1,9 @@
 #include "memory/paging.h"
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "cpu/cpu.h"
@@ -69,7 +71,7 @@ static inline void reload_mapping(pagemap_t* map) {
     }
 }
 
-static inline size_t convert_generic_flags(uint32_t flags, cache_type_t cache, size_t page_size) {
+size_t convert_generic_flags(uint32_t flags, cache_type_t cache, size_t page_size) {
     size_t ret       = 0;
     const size_t pat = (page_size == PAGE_SIZE_SMALL) ? X86_PAGE_FLAG_PAT : X86_PAGE_FLAG_LARGE_PAT;
 
@@ -91,6 +93,18 @@ static inline size_t convert_generic_flags(uint32_t flags, cache_type_t cache, s
 
     if (!(flags & VMM_FLAG_EXECUTE) && nx_supported) {
         ret |= X86_PAGE_FLAG_NX;
+    }
+
+    if (flags & VMM_FLAG_SHARED) {
+        ret |= X86_PAGE_FLAG_SHARED;
+    }
+
+    if (flags & VMM_FLAG_DEMAND) {
+        ret |= X86_PAGE_FLAG_DEMAND;
+    }
+
+    if (flags & VMM_FLAG_PRIVATE) {
+        ret |= X86_PAGE_FLAG_PRIVATE;
     }
 
     if (page_size != PAGE_SIZE_SMALL) {
@@ -1279,4 +1293,199 @@ void pagemap_global_init() {
     write_cr0(cr0);
 
     KLOG_INFO("Paging: CR0 paging+WP enabled (cr0=0x%lx)\n", cr0);
+}
+
+typedef struct {
+    char* buffer;
+    size_t size;
+    size_t offset;
+    bool full;
+} walk_ctx_t;
+
+static void walk_printf(walk_ctx_t* ctx, const char* fmt, ...) {
+    if (ctx->full) {
+        return;
+    }
+
+    if (ctx->offset >= ctx->size - 1) {
+        ctx->full = true;
+        return;
+    }
+
+    size_t remaining = ctx->size - ctx->offset;
+
+    va_list args;
+    va_start(args, fmt);
+
+    int written = vsnprintf(ctx->buffer + ctx->offset, remaining, fmt, args);
+
+    va_end(args);
+
+    if (written < 0) {
+        ctx->full = true;
+    } else if ((size_t)written >= remaining) {
+        ctx->offset += remaining - 1;
+        ctx->full = true;
+    } else {
+        ctx->offset += (size_t)written;
+    }
+}
+
+static void walk_print_flags(walk_ctx_t* ctx, size_t entry) {
+    walk_printf(
+        ctx,
+        "[%c%c%c%c%c%c%c%c]",
+        (entry & X86_PAGE_FLAG_PRESENT) ? 'P' : '-',
+        (entry & X86_PAGE_FLAG_WRITE) ? 'W' : 'R',
+        (entry & X86_PAGE_FLAG_USER) ? 'U' : 'S',
+        (entry & X86_PAGE_FLAG_NX) ? 'X' : '-',
+        (entry & X86_PAGE_FLAG_ACCESSED) ? 'A' : '-',
+        (entry & X86_PAGE_FLAG_DIRTY) ? 'D' : '-',
+        (entry & X86_PAGE_FLAG_WRITE_THROUGH) ? 'T' : '-',
+        (entry & X86_PAGE_FLAG_CACHE_DISABLE) ? 'C' : '-'
+    );
+}
+
+static void
+walk_worker(pagemap_t* map, walk_ctx_t* ctx, uintptr_t table_phys, int level, uintptr_t virt_base) {
+    if (ctx->full) {
+        return;
+    }
+
+    pagetable_t* table = (pagetable_t*)to_higher_half(table_phys);
+    size_t level_size  = get_level_size(level);
+
+    for (size_t i = 0; i < MAX_PAGE_TABLE_ENTRIES; ++i) {
+        uint64_t entry = table->entries[i];
+
+        if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+            continue;
+        }
+
+        uintptr_t curr_virt  = virt_base + (i * level_size);
+        uintptr_t child_phys = entry & X86_PAGE_ADDRESS_MASK;
+        bool is_huge         = (entry & X86_PAGE_FLAG_HUGE);
+
+        if (level == 1 || is_huge) {
+            for (int j = 0; j < (paging_max_levels - level); j++) {
+                walk_printf(ctx, "  ");
+            }
+
+            const char* size_str = (level == 1) ? "4KB" : (level == 2 ? "2MB" : "1GB");
+
+            walk_printf(ctx, "V:%016lx -> P:%016lx | %s | ", curr_virt, child_phys, size_str);
+
+            walk_print_flags(ctx, entry);
+            walk_printf(ctx, "\n");
+        } else {
+            walk_worker(map, ctx, child_phys, level - 1, curr_virt);
+        }
+
+        if (ctx->full) {
+            return;
+        }
+    }
+}
+
+size_t pagemap_walk(pagemap_t* map, char* buffer, size_t size) {
+    if (!map || !buffer || size == 0) {
+        return 0;
+    }
+
+    walk_ctx_t ctx = {
+        .buffer = buffer,
+        .size   = size,
+        .offset = 0,
+        .full   = false,
+    };
+
+    walk_printf(&ctx, "Pagemap Root: %016lx (Level %d)\n", map->phys_root, paging_max_levels);
+
+    walk_worker(map, &ctx, map->phys_root, paging_max_levels, 0);
+
+    if (ctx.full) {
+        ctx.offset -= 4;
+        walk_printf(&ctx, "...\n");
+    }
+
+    return ctx.offset;
+}
+
+static bool
+clone_worker(pagemap_t* map, uintptr_t src_table_phys, uintptr_t dest_table_phys, int level) {
+    pagetable_t* src_table  = (pagetable_t*)to_higher_half(src_table_phys);
+    pagetable_t* dest_table = (pagetable_t*)to_higher_half(dest_table_phys);
+
+    // Limit iteration to user space only.
+    int max_idx =
+        (level == paging_max_levels) ? MAX_PAGE_TABLE_ENTRIES / 2 : MAX_PAGE_TABLE_ENTRIES;
+
+    for (size_t i = 0; i < max_idx; ++i) {
+        uint64_t entry = src_table->entries[i];
+
+        if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+            continue;
+        }
+
+        uintptr_t phys_addr = entry & X86_PAGE_ADDRESS_MASK;
+        size_t flags        = entry & ~X86_PAGE_ADDRESS_MASK;
+        bool is_huge        = (entry & X86_PAGE_FLAG_HUGE);
+
+        if (level == 1 || is_huge) {
+            if (flags & X86_PAGE_FLAG_WRITE) {
+                uint64_t new_flags    = (flags & ~X86_PAGE_FLAG_WRITE) | X86_PAGE_FLAG_PRIVATE;
+                src_table->entries[i] = phys_addr | new_flags;
+
+                // Child gets exact same flags (RO + Shared) and same phys address
+                dest_table->entries[i] = phys_addr | new_flags;
+            } else {
+                // Already Read-Onyl. Just link it.
+                dest_table->entries[i] = entry;
+            }
+
+            pmm_inc_ref((void*)phys_addr);
+        } else {
+            void* new_table_ptr = pmm_alloc(1);
+
+            if (!new_table_ptr) {
+                return false;
+            }
+
+            uintptr_t new_table_phys = (uintptr_t)new_table_ptr;
+
+            dest_table->entries[i] = new_table_phys | X86_NEW_PAGE_TABLE_FLAGS;
+
+            if (!clone_worker(map, phys_addr, new_table_phys, level - 1)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+// TODO: Implement PF handler
+bool pagemap_clone(pagemap_t* dest, pagemap_t* src) {
+    acquire_interrupt_lock(&src->lock);
+    acquire_interrupt_lock(&dest->lock);
+
+    pagemap_create(dest);
+
+    if (dest->phys_root == 0) {
+        release_interrupt_lock(&dest->lock);
+        release_interrupt_lock(&src->lock);
+
+        return false;
+    }
+
+    bool success = clone_worker(src, src->phys_root, dest->phys_root, paging_max_levels);
+
+    if (pagemap_is_active(src)) {
+        reload_mapping(src);
+    }
+
+    release_interrupt_lock(&dest->lock);
+    release_interrupt_lock(&src->lock);
+
+    return success;
 }
