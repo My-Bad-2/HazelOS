@@ -6,6 +6,7 @@
 
 #include "arch.h"
 #include "boot/boot.h"
+#include "compiler.h"
 #include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
@@ -17,6 +18,7 @@
 #define RB_RED   1
 
 #define VMA_CACHE_SIZE 64
+#define VMA_BATCH_SIZE 32
 
 vm_space_t kernel_space;
 uintptr_t shared_zero_page = 0;
@@ -77,63 +79,75 @@ void vmm_init_global(void) {
     shared_zero_page = (uintptr_t)ptr;
 }
 
-static vm_area_t* global_slab_alloc() {
+static int global_slab_alloc_bulk(vm_area_t** out, int count) {
+    ASSERT(out);
+
     acquire_interrupt_lock(&vma_slab.lock);
 
-    // Use existing free object
-    if (vma_slab.free_list) {
-        vm_area_t* obj     = vma_slab.free_list;
-        vma_slab.free_list = obj->next_free;
-        release_interrupt_lock(&vma_slab.lock);
-        return obj;
+    int gathered = 0;
+
+    while (gathered < count) {
+        if (likely(vma_slab.free_list)) {
+            out[gathered++]    = vma_slab.free_list;
+            vma_slab.free_list = vma_slab.free_list->next_free;
+            continue;
+        }
+
+        void* p = pmm_alloc(1);
+
+        if (!p) {
+            errno = ENOMEM;
+            KLOG_ERROR("VMM: failed to allocate VMA slab page\n");
+            break;
+        }
+
+        uintptr_t page = to_higher_half((uintptr_t)p);
+
+        // Setup Page header
+        vma_slab_page_t* header = (vma_slab_page_t*)page;
+        header->next            = vma_slab.pages;
+        vma_slab.pages          = header;
+
+        // Slice the page into objects
+        uintptr_t start = (uintptr_t)page + sizeof(vma_slab_page_t);
+        uintptr_t end   = (uintptr_t)page + PAGE_SIZE_SMALL;
+
+        if (!is_aligned(start, _Alignof(vm_area_t)) != 0) {
+            start = align_down(start, _Alignof(vm_area_t));
+        }
+
+        vm_area_t* curr = (vm_area_t*)start;
+        vm_area_t* prev = nullptr;
+
+        // Link them all together
+        while ((uintptr_t)curr + sizeof(vm_area_t) <= end) {
+            if (prev) {
+                prev->next_free = curr;
+            }
+
+            prev = curr;
+            curr = (vm_area_t*)((uintptr_t)curr + sizeof(vm_area_t));
+        }
+
+        if (prev) {
+            // Attach this new chain to the global free list
+            prev->next_free    = vma_slab.free_list;
+            vma_slab.free_list = (vm_area_t*)start;
+        }
     }
-
-    // Allocate new page from PMM
-    void* p = pmm_alloc(1);
-    if (!p) {
-        errno = ENOMEM;
-        KLOG_ERROR("VMM: failed to allocate VMA slab page\n");
-        release_interrupt_lock(&vma_slab.lock);
-        return nullptr;
-    }
-
-    void* page = (void*)to_higher_half((uintptr_t)p);
-
-    // Add to page tracker
-    vma_slab_page_t* header = (vma_slab_page_t*)page;
-    header->next            = vma_slab.pages;
-    vma_slab.pages          = header;
-
-    // Slice the rest of the page into vm_area_t
-    // Start after the header
-    uintptr_t cursor = (uintptr_t)page + sizeof(vma_slab_page_t);
-    uintptr_t end    = (uintptr_t)page + PAGE_SIZE_SMALL;
-
-    vm_area_t* first = (vm_area_t*)cursor;
-    vm_area_t* curr  = first;
-
-    cursor += sizeof(vm_area_t);
-
-    while (cursor + sizeof(vm_area_t) <= end) {
-        vm_area_t* next = (vm_area_t*)cursor;
-        curr->next_free = next;
-        curr            = next;
-
-        cursor += sizeof(vm_area_t);
-    }
-
-    curr->next_free = nullptr;
-
-    vma_slab.free_list = first->next_free;
 
     release_interrupt_lock(&vma_slab.lock);
-    return first;
+    return gathered;
 }
 
-static void global_slab_free(vm_area_t* ptr) {
+static void global_slab_free_bulk(vm_area_t** ptrs, int count) {
     acquire_interrupt_lock(&vma_slab.lock);
-    ptr->next_free     = vma_slab.free_list;
-    vma_slab.free_list = ptr;
+
+    for (int i = 0; i < count; ++i) {
+        ptrs[i]->next_free = vma_slab.free_list;
+        vma_slab.free_list = ptrs[i];
+    }
+
     release_interrupt_lock(&vma_slab.lock);
 }
 
@@ -144,21 +158,65 @@ static vm_area_t* alloc_vm_area_struct() {
     vma_cpu_cache_t* cache = &vma_cache[cpu];
     vm_area_t* obj         = nullptr;
 
-    if (cache->count > 0) {
+    if (likely(cache->count > 0)) {
         cache->count--;
         obj = cache->objects[cache->count];
         release_irq_lock(&irq_lock);
-
         return obj;
     }
 
     release_irq_lock(&irq_lock);
 
-    obj = global_slab_alloc();
+    vm_area_t* batch[VMA_BATCH_SIZE];
+
+    int fetched = global_slab_alloc_bulk(batch, VMA_BATCH_SIZE);
+
+    if (fetched == 0) {
+        return nullptr;
+    }
+
+    acquire_irq_lock(&irq_lock);
+
+    // Refresh CPU ID
+    cpu   = arch_get_core_idx();
+    cache = &vma_cache[cpu];
+
+    // Something for the user
+    obj = batch[0];
+
+    int items_to_cache = fetched - 1;
+    int start_idx      = 1;
+
+    int available_slots = VMA_CACHE_SIZE - cache->count;
+    int fill_count      = (items_to_cache > available_slots) ? available_slots : items_to_cache;
+
+    // Fill all the available slots
+    for (int i = 1; i < fill_count; ++i) {
+        cache->objects[cache->count++] = batch[start_idx + i];
+    }
+
+    int leftovers = items_to_cache - fill_count;
+
+    if (unlikely(leftovers > 0)) {
+        // Since we own these pointers but have nowhere to put them locally. We must return them to
+        // the global slab immediately.
+        vm_area_t** leftover_ptrs = &batch[start_idx + fill_count];
+        release_irq_lock(&irq_lock);
+
+        // Return excess back to the global pool
+        global_slab_free_bulk(leftover_ptrs, leftovers);
+    } else {
+        release_irq_lock(&irq_lock);
+    }
+
     return obj;
 }
 
 static void free_vm_area_struct(vm_area_t* ptr) {
+    if (!ptr) {
+        return;
+    }
+
     acquire_irq_lock(&irq_lock);
 
     uint32_t cpu           = arch_get_core_idx();
@@ -166,37 +224,25 @@ static void free_vm_area_struct(vm_area_t* ptr) {
     vm_area_t* obj         = nullptr;
 
     // Check if Cache is full
-    if (cache->count < VMA_CACHE_SIZE) {
-        cache->objects[cache->count] = ptr;
-        cache->count++;
+    if (likely(cache->count < VMA_CACHE_SIZE)) {
+        cache->objects[cache->count++] = ptr;
         release_irq_lock(&irq_lock);
         return;
     }
 
-    int flush_count = VMA_CACHE_SIZE / 2;
-    vm_area_t* to_flush[VMA_CACHE_SIZE / 2];
-
-    // Pop the bottom half
-    for (int i = 0; i < flush_count; ++i) {
-        cache->count--;
-        to_flush[i] = cache->objects[cache->count];
-    }
-
-    // Add the new pointer to the now-available slot
-    cache->objects[cache->count] = ptr;
-    cache->count++;
-
-    release_irq_lock(&irq_lock);
-
-    acquire_interrupt_lock(&vma_slab.lock);
+    // Cache is full
+    vm_area_t* batch_to_flush[VMA_BATCH_SIZE];
 
     // Return flushed items to Global Slab
-    for (int i = 0; i < flush_count; ++i) {
-        to_flush[i]->next_free = vma_slab.free_list;
-        vma_slab.free_list     = to_flush[i];
+    for (int i = 0; i < VMA_BATCH_SIZE; ++i) {
+        cache->count--;
+        batch_to_flush[i] = cache->objects[cache->count];
     }
 
-    release_interrupt_lock(&vma_slab.lock);
+    cache->objects[cache->count++] = ptr;
+
+    release_irq_lock(&irq_lock);
+    global_slab_free_bulk(batch_to_flush, VMA_BATCH_SIZE);
 }
 
 static void rb_rotate_left(vm_space_t* space, vm_area_t* x) {
