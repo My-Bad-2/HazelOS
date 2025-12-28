@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct pmm_stats {
     size_t total_memory;
     size_t used_memory;
@@ -24,5 +28,9 @@ uint16_t pmm_get_ref(void* ptr);
 void pmm_set_ref(void* ptr, uint16_t ref);
 
 void pmm_init(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

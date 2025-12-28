@@ -1,9 +1,12 @@
-
-#include "libs/spinlock.h"
 #ifndef KERNEL_MEMORY_VMA_H
 #define KERNEL_MEMORY_VMA_H 1
 
+#include "libs/spinlock.h"
 #include "memory/pagemap.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct vm_area {
     uintptr_t start;
@@ -51,5 +54,9 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t addr, uint32_t error_code);
 vm_area_t* vmm_find_vma(vm_space_t* space, uintptr_t addr);
 
 extern vm_space_t kernel_space;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

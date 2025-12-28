@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint64_t addr;
     const char* name;
@@ -14,5 +18,9 @@ extern const size_t kernel_symbol_count;
 
 const char* resolve_symbol(uintptr_t address, uintptr_t* offset);
 void dump_stacktrace(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

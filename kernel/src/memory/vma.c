@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "arch.h"
+#include "boot/boot.h"
 #include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
@@ -14,12 +16,23 @@
 #define RB_BLACK 0
 #define RB_RED   1
 
+#define VMA_CACHE_SIZE 64
+
 vm_space_t kernel_space;
 uintptr_t shared_zero_page = 0;
 
 typedef struct vma_slab_page {
     struct vma_slab_page* next;
 } vma_slab_page_t;
+
+typedef struct {
+    vm_area_t* objects[VMA_CACHE_SIZE];
+    int count;
+} vma_cpu_cache_t;
+
+static vma_cpu_cache_t* vma_cache;
+static size_t cpu_count;
+static irq_lock_t irq_lock;
 
 static struct {
     vm_area_t* free_list;
@@ -32,7 +45,27 @@ void vmm_init_global(void) {
     vma_slab.pages     = nullptr;
     create_interrupt_lock(&vma_slab.lock);
 
-    void* ptr = pmm_alloc(1);
+    cpu_count        = mp_request.response->cpu_count;
+    size_t num_pages = div_roundup(cpu_count * sizeof(vma_cpu_cache_t), PAGE_SIZE_SMALL);
+
+    void* ptr = pmm_alloc(num_pages);
+
+    if (!ptr) {
+        errno = ENOMEM;
+        KLOG_ERROR("VMM: failed to allocate cpu cache\n");
+        return;
+    }
+
+    vma_cache = (vma_cpu_cache_t*)to_higher_half((uintptr_t)ptr);
+
+    for (size_t i = 0; i < cpu_count; ++i) {
+        vma_cache[i].count = 0;
+
+        memset((void*)vma_cache->objects, 0, VMA_CACHE_SIZE * sizeof(vm_area_t*));
+    }
+
+    ptr = pmm_alloc(1);
+
     if (!ptr) {
         errno = ENOMEM;
         KLOG_ERROR("VMM: failed to allocate shared zero page\n");
@@ -44,7 +77,7 @@ void vmm_init_global(void) {
     shared_zero_page = (uintptr_t)ptr;
 }
 
-static vm_area_t* alloc_vm_area_struct() {
+static vm_area_t* global_slab_alloc() {
     acquire_interrupt_lock(&vma_slab.lock);
 
     // Use existing free object
@@ -97,10 +130,72 @@ static vm_area_t* alloc_vm_area_struct() {
     return first;
 }
 
-static void free_vm_area_struct(vm_area_t* ptr) {
+static void global_slab_free(vm_area_t* ptr) {
     acquire_interrupt_lock(&vma_slab.lock);
     ptr->next_free     = vma_slab.free_list;
     vma_slab.free_list = ptr;
+    release_interrupt_lock(&vma_slab.lock);
+}
+
+static vm_area_t* alloc_vm_area_struct() {
+    acquire_irq_lock(&irq_lock);
+
+    uint32_t cpu           = arch_get_core_idx();
+    vma_cpu_cache_t* cache = &vma_cache[cpu];
+    vm_area_t* obj         = nullptr;
+
+    if (cache->count > 0) {
+        cache->count--;
+        obj = cache->objects[cache->count];
+        release_irq_lock(&irq_lock);
+
+        return obj;
+    }
+
+    release_irq_lock(&irq_lock);
+
+    obj = global_slab_alloc();
+    return obj;
+}
+
+static void free_vm_area_struct(vm_area_t* ptr) {
+    acquire_irq_lock(&irq_lock);
+
+    uint32_t cpu           = arch_get_core_idx();
+    vma_cpu_cache_t* cache = &vma_cache[cpu];
+    vm_area_t* obj         = nullptr;
+
+    // Check if Cache is full
+    if (cache->count < VMA_CACHE_SIZE) {
+        cache->objects[cache->count] = ptr;
+        cache->count++;
+        release_irq_lock(&irq_lock);
+        return;
+    }
+
+    int flush_count = VMA_CACHE_SIZE / 2;
+    vm_area_t* to_flush[VMA_CACHE_SIZE / 2];
+
+    // Pop the bottom half
+    for (int i = 0; i < flush_count; ++i) {
+        cache->count--;
+        to_flush[i] = cache->objects[cache->count];
+    }
+
+    // Add the new pointer to the now-available slot
+    cache->objects[cache->count] = ptr;
+    cache->count++;
+
+    release_irq_lock(&irq_lock);
+
+    acquire_interrupt_lock(&vma_slab.lock);
+
+    // Return flushed items to Global Slab
+    for (int i = 0; i < flush_count; ++i) {
+        to_flush[i]->next_free = vma_slab.free_list;
+        vma_slab.free_list     = to_flush[i];
+    }
+
     release_interrupt_lock(&vma_slab.lock);
 }
 
