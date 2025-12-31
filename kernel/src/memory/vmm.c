@@ -39,15 +39,18 @@ void vmm_map_memory(pagemap_t* map) {
             case LIMINE_MEMMAP_USABLE:
             case LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE:
             case LIMINE_MEMMAP_EXECUTABLE_AND_MODULES:
+                should_map = true;
+                cache      = CACHE_WRITE_BACK;
+                break;
             case LIMINE_MEMMAP_ACPI_RECLAIMABLE:
             case LIMINE_MEMMAP_ACPI_NVS:
             case LIMINE_MEMMAP_ACPI_TABLES:
                 should_map = true;
-                cache      = CACHE_WRITE_BACK;
+                cache      = CACHE_ROM;
                 break;
             case LIMINE_MEMMAP_FRAMEBUFFER:
                 should_map = true;
-                cache      = CACHE_WRITE_COMBINING;
+                cache      = CACHE_FRAMEBUFFER;
                 break;
             default:
                 should_map = false;

@@ -640,10 +640,49 @@ void* vmm_alloc(
         size = align_up(size, alignment);
     }
 
-    uintptr_t addr = find_free_region(space, size, alignment);
+    uintptr_t addr = 0;
+
+    if (flags & VMM_FLAG_STACK) {
+        // We start seaching at the top of the address space
+        uintptr_t candidate = space->end_limit;
+
+        // Initial Alignment (Round down to page align)
+        if (!is_aligned(candidate, alignment)) {
+            candidate = align_down(candidate, alignment);
+        }
+
+        // Adjust for size
+        candidate -= size;
+
+        while (candidate >= space->start_limit) {
+            // Check for collision
+            vm_area_t* overlap = vmm_find_vma(space, candidate);
+
+            if (!overlap) {
+                overlap = vmm_find_vma(space, candidate + size - 1);
+            }
+
+            // Found a valid hole
+            if (!overlap) {
+                addr = candidate;
+                break;
+            }
+
+            candidate = overlap->start;
+
+            if (!is_aligned(candidate, alignment)) {
+                candidate = align_down(candidate, alignment);
+            }
+
+            candidate -= size;
+        }
+    } else {
+        addr = find_free_region(space, size, alignment);
+    }
 
     if (!addr) {
         errno = ENOMEM;
+
         KLOG_WARN(
             "VMM: no free region size=0x%zx align=0x%zx in [%lx,%lx)\n",
             size,
@@ -651,6 +690,7 @@ void* vmm_alloc(
             space->start_limit,
             space->end_limit
         );
+
         goto cleanup;
     }
 
@@ -659,6 +699,7 @@ void* vmm_alloc(
         if (errno == 0) {
             errno = ENOMEM;
         }
+
         KLOG_ERROR("VMM: failed to allocate VMA struct\n");
         goto cleanup;
     }
@@ -666,13 +707,27 @@ void* vmm_alloc(
     vma->start     = addr;
     vma->end       = addr + size;
     vma->size      = size;
-    vma->flags     = flags;
+    vma->flags     = (flags & VMM_FLAG_MMIO) ? VMM_FLAG_NONE : flags;
     vma->cache     = cache;
     vma->page_size = alignment;
 
     rb_insert(space, vma);
 
-    if (flags & VMM_FLAG_DEMAND) {
+    if (flags & VMM_FLAG_STACK) {
+        // Create a separate VMA for the guard page (Do not map it to the pagemap)
+        uintptr_t guard_addr = addr - PAGE_SIZE_SMALL;
+
+        vm_area_t* guard = alloc_vm_area_struct();
+        guard->start     = guard_addr;
+        guard->end       = addr;
+        guard->size      = PAGE_SIZE_SMALL;
+        guard->flags     = VMM_FLAG_NONE;  // No Read, No Write -> Segfault on access
+
+        rb_insert(space, guard);
+    }
+
+    // MMIO pages must be explicitly mapped by the user
+    if ((flags & VMM_FLAG_DEMAND) || (flags & VMM_FLAG_MMIO)) {
         ret = (void*)addr;
         goto cleanup;
     }

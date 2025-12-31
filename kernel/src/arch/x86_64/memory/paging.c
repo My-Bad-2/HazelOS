@@ -75,6 +75,10 @@ size_t convert_generic_flags(uint32_t flags, cache_type_t cache, size_t page_siz
     size_t ret       = 0;
     const size_t pat = (page_size == PAGE_SIZE_SMALL) ? X86_PAGE_FLAG_PAT : X86_PAGE_FLAG_LARGE_PAT;
 
+    if (flags & VMM_FLAG_NONE) {
+        return 0;
+    }
+
     if (flags & VMM_FLAG_READ) {
         ret |= X86_PAGE_FLAG_PRESENT;
     }
@@ -128,6 +132,11 @@ size_t convert_generic_flags(uint32_t flags, cache_type_t cache, size_t page_siz
         case CACHE_WRITE_COMBINING:
             ret |= pat | X86_PAGE_FLAG_WRITE_THROUGH;
             break;
+        case CACHE_FRAMEBUFFER:
+            ret |= pat | X86_PAGE_FLAG_CACHE_DISABLE;
+            break;
+        case CACHE_ROM:
+            ret |= pat | X86_PAGE_FLAG_CACHE_DISABLE | X86_PAGE_FLAG_WRITE_THROUGH;
         case CACHE_WRITE_BACK:
         default:
             break;
@@ -1293,6 +1302,38 @@ void pagemap_global_init() {
     write_cr0(cr0);
 
     KLOG_INFO("Paging: CR0 paging+WP enabled (cr0=0x%lx)\n", cr0);
+
+    uint64_t pat = 0;
+
+    // Index 0: PWT=0, PCD=0 -> WB (Write Back) - Default
+    pat |= (uint64_t)X86_PAT_TYPE_WRITE_BACK << 0;
+
+    // Index 1: PWT=1, PCD=0 -> WT (Write Through)
+    pat |= (uint64_t)X86_PAT_TYPE_WRITE_THROUGH << 8;
+
+    // Index 2: PWT=0, PCD=1 -> UC- (Uncacheable Minus)
+    // We use UC- (0x07) here so MTRRs can override it if necessary.
+    pat |= (uint64_t)X86_PAT_TYPE_UNCACHEABLE_MINUS << 16;
+
+    // Index 3: PWT=1, PCD=1 -> UC (String Uncacheable) - MMIO/Device
+    pat |= (uint64_t)X86_PAT_TYPE_UNCACHEABLE << 24;
+
+    // Index 4: PAT=1, PWT=0, PCD=0 -> WP (Write Proctected)
+    pat |= (uint64_t)X86_PAT_TYPE_WRITE_PROTECT << 32;
+
+    // Index 5: PAT=1, PWT=1, PCD=0 -> WC (Write Combining)
+    pat |= (uint64_t)X86_PAT_TYPE_WRITE_COMBINING << 40;
+
+    // Index 6: PAT=1, PWT=0, PCD=1 -> WC - Framebuffer (useful for debugging)
+    // Turn this to X86_PAT_TYPE_UNCACHEABLE for debugging visual artifacts
+    pat |= (uint64_t)X86_PAT_TYPE_WRITE_COMBINING << 48;
+
+    // Index 7: PAT=1, PWT=1, PCD=1 -> WP - ACPI Tables
+    pat |= (uint64_t)X86_PAT_TYPE_WRITE_PROTECT << 56;
+
+    write_msr(X86_MSR_IA32_PAT, pat);
+
+    KLOG_INFO("Paging: PAT initialized (pat=0x%lx)\n", pat);
 }
 
 typedef struct {

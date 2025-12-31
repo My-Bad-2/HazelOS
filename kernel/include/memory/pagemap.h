@@ -10,14 +10,17 @@
 extern "C" {
 #endif
 
-#define VMM_FLAG_READ    0x01u
-#define VMM_FLAG_WRITE   0x02u
-#define VMM_FLAG_EXECUTE 0x04u
-#define VMM_FLAG_USER    0x08u
-#define VMM_FLAG_GLOBAL  0x10u
-#define VMM_FLAG_SHARED  0x20u
-#define VMM_FLAG_PRIVATE 0x40u
-#define VMM_FLAG_DEMAND  0x80u
+#define VMM_FLAG_NONE    0x001u
+#define VMM_FLAG_READ    0x002u
+#define VMM_FLAG_WRITE   0x004u
+#define VMM_FLAG_EXECUTE 0x008u
+#define VMM_FLAG_USER    0x010u
+#define VMM_FLAG_GLOBAL  0x020u
+#define VMM_FLAG_SHARED  0x040u
+#define VMM_FLAG_PRIVATE 0x080u
+#define VMM_FLAG_DEMAND  0x100u
+#define VMM_FLAG_STACK   0x200u
+#define VMM_FLAG_MMIO    0x400u
 
 typedef enum {
     CACHE_UNCACHEABLE = 0,
@@ -27,6 +30,8 @@ typedef enum {
     CACHE_WRITE_COMBINING,
     CACHE_WRITE_BACK,
     CACHE_DEVICE,
+    CACHE_FRAMEBUFFER,
+    CACHE_ROM,
 } cache_type_t;
 
 // Per Process
