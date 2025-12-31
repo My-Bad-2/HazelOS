@@ -551,6 +551,60 @@ static bool vmm_is_range_free(vm_space_t* space, uintptr_t start, uintptr_t end)
     return true;
 }
 
+static bool can_merge_vmas(vm_area_t* left, vm_area_t* right) {
+    if (!left || !right) {
+        return false;
+    }
+
+    if (left->end != right->start) {
+        return false;
+    }
+
+    if (left->flags != right->flags) {
+        return false;
+    }
+
+    if (left->cache != right->cache) {
+        return false;
+    }
+
+    if (left->page_size != right->page_size) {
+        return false;
+    }
+
+    return true;
+}
+
+static void vmm_attempt_merge(vm_space_t* space, vm_area_t* vma) {
+    if (vma == nullptr) {
+        return;
+    }
+
+    vm_area_t* prev = vmm_find_vma(space, vma->start - 1);
+
+    if (can_merge_vmas(prev, vma)) {
+        prev->end = vma->end;
+        prev->size += vma->size;
+
+        // Remove `vma` since it's now absorbed
+        rb_delete(space, vma);
+        free_vm_area_struct(vma);
+
+        vma = prev;
+    }
+
+    vm_area_t* next = vmm_find_vma(space, vma->end);
+
+    if (can_merge_vmas(prev, vma)) {
+        vma->end = next->end;
+        vma->size += next->size;
+
+        // Remove `vma` since it's now absorbed
+        rb_delete(space, next);
+        free_vm_area_struct(next);
+    }
+}
+
 void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_t end) {
     space->root        = nullptr;
     space->map         = map;
@@ -579,6 +633,7 @@ vm_area_t* vmm_find_vma(vm_space_t* space, uintptr_t addr) {
             current = current->rb_right;
         }
     }
+
     return nullptr;
 }
 
@@ -885,6 +940,7 @@ void* vmm_alloc(
 
     ret = (void*)addr;
 cleanup:
+    vmm_attempt_merge(space, vma);
     release_interrupt_lock(&space->lock);
     return ret;
 }
@@ -1102,15 +1158,29 @@ cleanup:
     return ret;
 }
 
-void vmm_free(vm_space_t* space, void* ptr) {
+void vmm_free(vm_space_t* space, void* ptr, size_t size) {
     acquire_interrupt_lock(&space->lock);
-    uintptr_t addr = (uintptr_t)ptr;
+    uintptr_t start = (uintptr_t)ptr;
+    uintptr_t end   = start + size;
 
-    vm_area_t* vma = vmm_find_vma(space, addr);
+    bool free_vma = false;
 
-    if (!vma || vma->start != addr) {
+    vm_area_t* vma = vmm_find_vma(space, start);
+
+    if (!vma || start < vma->start || end > vma->end) {
         errno = EINVAL;
-        KLOG_WARN("VMM: free invalid addr=0x%lx\n", addr);
+        KLOG_WARN("VMM: free invalid addr=0x%lx\n", start);
+        goto cleanup;
+    }
+
+    if (!is_aligned(start, vma->page_size) || !is_aligned(size, vma->page_size)) {
+        errno = EINVAL;
+        KLOG_WARN(
+            "VMM: free unaligned start=0x%lx size=0x%lx page_size=0x%lx\n",
+            start,
+            size,
+            vma->page_size
+        );
         goto cleanup;
     }
 
@@ -1118,11 +1188,48 @@ void vmm_free(vm_space_t* space, void* ptr) {
         space->cached_vma = nullptr;
     }
 
-    // Remove from Tree
-    rb_delete(space, vma);
+    if (start == vma->start && end == vma->end) {
+        // Freeing the entire VMA
+        rb_delete(space, vma);
+        free_vma = true;
+    } else if (start == vma->start) {
+        // Freeing the head (shrink from start)
+        rb_delete(space, vma);
+
+        vma->start = end;
+        vma->size  = vma->end - vma->start;
+
+        rb_insert(space, vma);
+    } else if (end == vma->end) {
+        // Freeing the tail
+        vma->end  = start;
+        vma->size = vma->end - vma->start;
+        rb_insert_fixup(space, vma);
+    } else {
+        // Split the VMA into two
+        vm_area_t* right = alloc_vm_area_struct();
+
+        if (!right) {
+            errno = ENOMEM;
+            goto cleanup;
+        }
+
+        // Copy properties to right split
+        *right         = *vma;
+        right->start   = end;
+        right->end     = vma->end;
+        right->size    = right->end - right->start;
+        right->rb_left = right->rb_right = right->rb_parent = nullptr;
+
+        // Shrink current VMA to be the left split
+        vma->end  = start;
+        vma->size = vma->end - vma->start;
+
+        rb_insert(space, right);
+    }
 
     // Unmap Physical Pages
-    for (uintptr_t virt = vma->start; virt < vma->end; virt += vma->page_size) {
+    for (uintptr_t virt = start; virt < end; virt += vma->page_size) {
         uintptr_t phys = pagemap_translate(space->map, virt);
 
         if (phys) {
@@ -1139,7 +1246,9 @@ void vmm_free(vm_space_t* space, void* ptr) {
         }
     }
 
-    free_vm_area_struct(vma);
+    if (free_vma) {
+        free_vm_area_struct(vma);
+    }
 cleanup:
     release_interrupt_lock(&space->lock);
 }

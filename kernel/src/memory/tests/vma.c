@@ -44,8 +44,8 @@ TEST(vmm_basic_alloc, "VMM: Basic Allocation & Alignment Checks") {
 
     TEST_ASSERT(vmm_find_vma(&test_space, 0x11000) == nullptr);
 
-    vmm_free(&test_space, ptr1);
-    vmm_free(&test_space, ptr2);
+    vmm_free(&test_space, ptr1, PAGE_SIZE_SMALL);
+    vmm_free(&test_space, ptr2, PAGE_SIZE_MEDIUM);
 }
 
 TEST(vmm_gap_fill, "VMM: Gap Search (Best Fit / First Fit)") {
@@ -79,7 +79,7 @@ TEST(vmm_gap_fill, "VMM: Gap Search (Best Fit / First Fit)") {
     TEST_ASSERT((uintptr_t)p2 == 0x11000);
     TEST_ASSERT((uintptr_t)p3 == 0x12000);
 
-    vmm_free(&test_space, p2);
+    vmm_free(&test_space, p2, PAGE_SIZE_SMALL);
     TEST_ASSERT(vmm_find_vma(&test_space, 0x11000) == nullptr);
 
     test_space.alloc_hint = test_space.start_limit;
@@ -112,7 +112,7 @@ TEST(vmm_free_logic, "VMM: Freeing Resources") {
     void* ptr = vmm_alloc(&test_space, 0x2000, VMM_FLAG_READ, CACHE_WRITE_BACK, PAGE_SIZE_SMALL);
     TEST_ASSERT(ptr != nullptr);
 
-    vmm_free(&test_space, ptr);
+    vmm_free(&test_space, ptr, PAGE_SIZE_SMALL);
 
     TEST_ASSERT(vmm_find_vma(&test_space, (uintptr_t)ptr) == nullptr);
 }

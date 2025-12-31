@@ -40,8 +40,8 @@ typedef struct {
 } vm_space_t;
 
 void vmm_init_global(void);
-
 void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_t end);
+
 void* vmm_alloc(
     vm_space_t* space,
     size_t size,
@@ -59,7 +59,7 @@ void* vmm_alloc_at(
     size_t alignment
 );
 
-void vmm_free(vm_space_t* space, void* ptr);
+void vmm_free(vm_space_t* space, void* ptr, size_t size);
 bool vmm_handle_fault(vm_space_t* space, uintptr_t addr, uint32_t error_code);
 vm_area_t* vmm_find_vma(vm_space_t* space, uintptr_t addr);
 
