@@ -1306,30 +1306,30 @@ void pagemap_global_init() {
     uint64_t pat = 0;
 
     // Index 0: PWT=0, PCD=0 -> WB (Write Back) - Default
-    pat |= (uint64_t)X86_PAT_TYPE_WRITE_BACK << 0;
+    pat |= X86_PAT_TYPE_WRITE_BACK << 0;
 
     // Index 1: PWT=1, PCD=0 -> WT (Write Through)
-    pat |= (uint64_t)X86_PAT_TYPE_WRITE_THROUGH << 8;
+    pat |= X86_PAT_TYPE_WRITE_THROUGH << 8;
 
     // Index 2: PWT=0, PCD=1 -> UC- (Uncacheable Minus)
     // We use UC- (0x07) here so MTRRs can override it if necessary.
-    pat |= (uint64_t)X86_PAT_TYPE_UNCACHEABLE_MINUS << 16;
+    pat |= X86_PAT_TYPE_UNCACHEABLE_MINUS << 16;
 
     // Index 3: PWT=1, PCD=1 -> UC (String Uncacheable) - MMIO/Device
-    pat |= (uint64_t)X86_PAT_TYPE_UNCACHEABLE << 24;
+    pat |= X86_PAT_TYPE_UNCACHEABLE << 24;
 
     // Index 4: PAT=1, PWT=0, PCD=0 -> WP (Write Proctected)
-    pat |= (uint64_t)X86_PAT_TYPE_WRITE_PROTECT << 32;
+    pat |= X86_PAT_TYPE_WRITE_PROTECT << 32;
 
     // Index 5: PAT=1, PWT=1, PCD=0 -> WC (Write Combining)
-    pat |= (uint64_t)X86_PAT_TYPE_WRITE_COMBINING << 40;
+    pat |= X86_PAT_TYPE_WRITE_COMBINING << 40;
 
     // Index 6: PAT=1, PWT=0, PCD=1 -> WC - Framebuffer (useful for debugging)
     // Turn this to X86_PAT_TYPE_UNCACHEABLE for debugging visual artifacts
-    pat |= (uint64_t)X86_PAT_TYPE_WRITE_COMBINING << 48;
+    pat |= X86_PAT_TYPE_WRITE_COMBINING << 48;
 
     // Index 7: PAT=1, PWT=1, PCD=1 -> WP - ACPI Tables
-    pat |= (uint64_t)X86_PAT_TYPE_WRITE_PROTECT << 56;
+    pat |= X86_PAT_TYPE_WRITE_PROTECT << 56;
 
     write_msr(X86_MSR_IA32_PAT, pat);
 

@@ -49,6 +49,16 @@ void* vmm_alloc(
     cache_type_t cache,
     size_t alignment
 );
+
+void* vmm_alloc_at(
+    vm_space_t* space,
+    void* addr,
+    size_t size,
+    uint32_t flags,
+    cache_type_t cache,
+    size_t alignment
+);
+
 void vmm_free(vm_space_t* space, void* ptr);
 bool vmm_handle_fault(vm_space_t* space, uintptr_t addr, uint32_t error_code);
 vm_area_t* vmm_find_vma(vm_space_t* space, uintptr_t addr);

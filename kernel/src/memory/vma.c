@@ -535,6 +535,22 @@ static void rb_delete(vm_space_t* space, vm_area_t* z) {
     }
 }
 
+static bool vmm_is_range_free(vm_space_t* space, uintptr_t start, uintptr_t end) {
+    vm_area_t* curr = space->root;
+
+    while (curr) {
+        if (start >= curr->end) {
+            curr = curr->rb_right;
+        } else if (end <= curr->start) {
+            curr = curr->rb_left;
+        } else {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_t end) {
     space->root        = nullptr;
     space->map         = map;
@@ -631,6 +647,10 @@ void* vmm_alloc(
     void* ret = nullptr;
 
     acquire_interrupt_lock(&space->lock);
+
+    if (size == 0) {
+        goto cleanup;
+    }
 
     if (alignment == 0) {
         alignment = PAGE_SIZE_SMALL;
@@ -864,6 +884,219 @@ void* vmm_alloc(
     }
 
     ret = (void*)addr;
+cleanup:
+    release_interrupt_lock(&space->lock);
+    return ret;
+}
+
+void* vmm_alloc_at(
+    vm_space_t* space,
+    void* ptr,
+    size_t size,
+    uint32_t flags,
+    cache_type_t cache,
+    size_t alignment
+) {
+    uintptr_t addr = (uintptr_t)ptr;
+    void* ret      = nullptr;
+
+    acquire_interrupt_lock(&space->lock);
+
+    if (size == 0) {
+        goto cleanup;
+    }
+
+    if (alignment == 0) {
+        alignment = PAGE_SIZE_SMALL;
+    }
+
+    if (!is_aligned(size, alignment)) {
+        size = align_up(size, alignment);
+    }
+
+    uintptr_t end_addr = addr + size;
+
+    if (addr < space->start_limit || end_addr > space->end_limit) {
+        goto cleanup;
+    }
+
+    if (!vmm_is_range_free(space, addr, end_addr)) {
+        goto cleanup;
+    }
+
+    vm_area_t* vma = alloc_vm_area_struct();
+
+    if (!vma) {
+        if (errno == 0) {
+            errno = ENOMEM;
+        }
+
+        KLOG_ERROR("VMM: failed to allocate VMA struct\n");
+        goto cleanup;
+    }
+
+    vma->start     = addr;
+    vma->end       = end_addr;
+    vma->size      = size;
+    vma->flags     = (flags & VMM_FLAG_MMIO) ? VMM_FLAG_NONE : flags;
+    vma->cache     = cache;
+    vma->page_size = alignment;
+    vma->next_free = nullptr;
+
+    rb_insert(space, vma);
+
+    if (flags & VMM_FLAG_STACK) {
+        // Create a separate VMA for the guard page (Do not map it to the pagemap)
+        uintptr_t guard_addr = addr - PAGE_SIZE_SMALL;
+
+        vm_area_t* guard = alloc_vm_area_struct();
+        guard->start     = guard_addr;
+        guard->end       = addr;
+        guard->size      = PAGE_SIZE_SMALL;
+        guard->flags     = VMM_FLAG_NONE;  // No Read, No Write -> Segfault on access
+
+        rb_insert(space, guard);
+    }
+
+    // MMIO pages must be explicitly mapped by the user
+    if ((flags & VMM_FLAG_DEMAND) || (flags & VMM_FLAG_MMIO)) {
+        ret = (void*)addr;
+        goto cleanup;
+    }
+
+    size_t frames_per_page = alignment / PAGE_SIZE_SMALL;
+
+    // If the new allocation is not Shared, Standard 4K page, and Zero page is initialized then, map
+    // everything to the single shared zero page as Read-Only.
+    bool zero_page =
+        (flags & VMM_FLAG_PRIVATE) && (alignment == PAGE_SIZE_SMALL) && (shared_zero_page != 0);
+
+    if (zero_page) {
+        flags &= ~VMM_FLAG_WRITE;
+
+        for (uintptr_t curr = addr; curr < (addr + size); curr += alignment) {
+            pagemap_map_args_t margs = {
+                .virt_addr  = (void*)curr,
+                .phys_addr  = (void*)shared_zero_page,
+                .length     = alignment,
+                .flags      = flags,
+                .cache      = cache,
+                .page_size  = (uint32_t)alignment,
+                .skip_flush = false,
+            };
+
+            if (!pagemap_map(space->map, margs)) {
+                if (errno == 0) {
+                    errno = EFAULT;
+                }
+
+                KLOG_WARN(
+                    "VMM: zero-page map failed virt=0x%lx len=0x%zx errno=%d\n",
+                    curr,
+                    alignment,
+                    errno
+                );
+
+                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
+                    pagemap_unmap_args_t uargs = {
+                        .virt_addr = (void*)cleanup,
+                        .length    = alignment,
+                    };
+
+                    pagemap_unmap(space->map, uargs);
+                    pmm_dec_ref((void*)shared_zero_page);
+                }
+
+                rb_delete(space, vma);
+                free_vm_area_struct(vma);
+                release_interrupt_lock(&space->lock);
+                return nullptr;
+            }
+
+            pmm_inc_ref((void*)shared_zero_page);
+        }
+    } else {
+        for (uintptr_t curr = addr; curr < (addr + size); curr += alignment) {
+            void* phys = pmm_alloc_aligned(alignment, frames_per_page);
+
+            if (!phys) {
+                errno = ENOMEM;
+                KLOG_WARN(
+                    "VMM: alloc phys failed virt=0x%lx size=0x%zx align=0x%zx\n",
+                    curr,
+                    alignment,
+                    alignment
+                );
+
+                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
+                    uintptr_t p = pagemap_translate(space->map, cleanup);
+
+                    if (p) {
+                        pagemap_unmap_args_t uargs = {
+                            .virt_addr = (void*)cleanup,
+                            .length    = alignment,
+                        };
+
+                        pagemap_unmap(space->map, uargs);
+                        pmm_free((void*)p, frames_per_page);
+                    }
+                }
+
+                rb_delete(space, vma);
+                free_vm_area_struct(vma);
+                release_interrupt_lock(&space->lock);
+                return nullptr;
+            }
+
+            pagemap_map_args_t margs = {
+                .virt_addr  = (void*)curr,
+                .phys_addr  = phys,
+                .length     = alignment,
+                .flags      = flags,
+                .cache      = cache,
+                .page_size  = (uint32_t)alignment,
+                .skip_flush = false,
+            };
+
+            if (!pagemap_map(space->map, margs)) {
+                if (errno == 0) {
+                    errno = EFAULT;
+                }
+
+                KLOG_WARN(
+                    "VMM: map failed virt=0x%lx phys=%p len=0x%zx errno=%d\n",
+                    curr,
+                    phys,
+                    alignment,
+                    errno
+                );
+
+                pmm_free(phys, frames_per_page);
+
+                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
+                    uintptr_t p = pagemap_translate(space->map, cleanup);
+
+                    if (p) {
+                        pagemap_unmap_args_t uargs = {
+                            .virt_addr = (void*)cleanup,
+                            .length    = alignment,
+                        };
+
+                        pagemap_unmap(space->map, uargs);
+                        pmm_free((void*)p, frames_per_page);
+                    }
+                }
+
+                rb_delete(space, vma);
+                free_vm_area_struct(vma);
+                release_interrupt_lock(&space->lock);
+                return nullptr;
+            }
+        }
+    }
+
+    ret = (void*)addr;
+
 cleanup:
     release_interrupt_lock(&space->lock);
     return ret;
