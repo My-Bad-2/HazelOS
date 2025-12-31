@@ -245,6 +245,38 @@ static void free_vm_area_struct(vm_area_t* ptr) {
     global_slab_free_bulk(batch_to_flush, VMA_BATCH_SIZE);
 }
 
+static void vmm_recalculate_max_gap(vm_area_t* node) {
+    if (!node) {
+        return;
+    }
+
+    size_t max = node->gap;
+
+    if (node->rb_left && node->rb_left->subtree_max_gap > max) {
+        max = node->rb_left->subtree_max_gap;
+    }
+
+    if (node->rb_right && node->rb_right->subtree_max_gap > max) {
+        max = node->rb_right->subtree_max_gap;
+    }
+
+    node->subtree_max_gap = max;
+}
+
+static void vmm_propagate_changes(vm_area_t* node) {
+    while (node) {
+        size_t old_max = node->subtree_max_gap;
+        vmm_recalculate_max_gap(node);
+
+        // If value didn't change, parents won't change either
+        if (node->subtree_max_gap == old_max) {
+            break;
+        }
+
+        node = node->rb_parent;
+    }
+}
+
 static void rb_rotate_left(vm_space_t* space, vm_area_t* x) {
     vm_area_t* y = x->rb_right;
     x->rb_right  = y->rb_left;
@@ -265,6 +297,10 @@ static void rb_rotate_left(vm_space_t* space, vm_area_t* x) {
 
     y->rb_left   = x;
     x->rb_parent = y;
+
+    // `x` is now a child of `y`, so update `x` first, then `y`
+    vmm_recalculate_max_gap(x);
+    vmm_recalculate_max_gap(y);
 }
 
 static void rb_rotate_right(vm_space_t* space, vm_area_t* y) {
@@ -287,6 +323,9 @@ static void rb_rotate_right(vm_space_t* space, vm_area_t* y) {
 
     x->rb_right  = y;
     y->rb_parent = x;
+
+    vmm_recalculate_max_gap(y);
+    vmm_recalculate_max_gap(x);
 }
 
 static void rb_insert_fixup(vm_space_t* space, vm_area_t* z) {
@@ -351,11 +390,51 @@ static void rb_insert(vm_space_t* space, vm_area_t* z) {
 
     if (y == nullptr) {
         space->root = z;
+        z->vm_prev = z->vm_next = nullptr;
     } else if (z->start < y->start) {
         y->rb_left = z;
+
+        // If `z` is the left child of `y`, then
+        // - y is the immediate successor
+        // - y's old predecessor is z's predecessor
+        z->vm_next = y;
+        z->vm_prev = y->vm_prev;
     } else {
         y->rb_right = z;
+
+        // If `z` is the right child of `y`, then
+        // - y is the immediate predecessor
+        // - y's old predecessor is z's successor
+        z->vm_prev = y;
+        z->vm_next = y->vm_next;
     }
+
+    if (z->vm_prev) {
+        z->vm_prev->vm_next = z;
+    }
+
+    if (z->vm_next) {
+        z->vm_next->vm_prev = z;
+    }
+
+    // Gap is the space between the previous VMA's end and z's start.
+    if (z->vm_prev) {
+        z->gap = z->start - z->vm_prev->end;
+    } else {
+        z->gap = z->start - space->start_limit;
+    }
+
+    // Because z is inserted before vm_next, vm_next's gap shrinks
+    if (z->vm_next) {
+        z->vm_next->gap = z->vm_next->start - z->end;
+        vmm_recalculate_max_gap(z->vm_next);
+        vmm_propagate_changes(z->vm_next->rb_parent);
+    }
+
+    vmm_recalculate_max_gap(z);
+
+    // Propagate z's changes up before rotations
+    vmm_propagate_changes(z->rb_parent);
 
     z->rb_left = z->rb_right = nullptr;
     z->rb_color              = RB_RED;
@@ -492,6 +571,22 @@ static void rb_delete_fixup(vm_space_t* space, vm_area_t* x, vm_area_t* x_parent
 
 // Removes node 'z' from the tree and restores balance.
 static void rb_delete(vm_space_t* space, vm_area_t* z) {
+    if (z->vm_prev) {
+        z->vm_prev->vm_next = z->vm_next;
+    }
+
+    if (z->vm_next) {
+        z->vm_next->vm_prev = z->vm_prev;
+    }
+
+    if (z->vm_next) {
+        if (z->vm_next->vm_prev) {
+            z->vm_next->gap = z->vm_next->start - z->vm_next->vm_prev->end;
+        } else {
+            z->vm_next->gap = z->vm_next->start - space->start_limit;
+        }
+    }
+
     vm_area_t* y = z;
     vm_area_t* x;
     vm_area_t* x_parent  = nullptr;
@@ -528,6 +623,21 @@ static void rb_delete(vm_space_t* space, vm_area_t* z) {
         y->rb_left            = z->rb_left;
         y->rb_left->rb_parent = y;
         y->rb_color           = z->rb_color;
+    }
+
+    if (x_parent) {
+        // The structure changed at `x_parent`. Propagate changes up.
+        vmm_propagate_changes(x_parent);
+    } else if (space->root) {
+        // Root changed and has no parent, just update the root
+        vmm_recalculate_max_gap(space->root);
+    }
+
+    // Earlier, the successor had its gap changed. We must ensure this value is propagated up the
+    // tree.
+    if (z->vm_next) {
+        vmm_recalculate_max_gap(z->vm_next);
+        vmm_propagate_changes(z->vm_next->rb_parent);
     }
 
     if (y_original_color == RB_BLACK) {
@@ -610,7 +720,6 @@ void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_
     space->map         = map;
     space->start_limit = start;
     space->end_limit   = end;
-    space->alloc_hint  = start;
 
     create_interrupt_lock(&space->lock);
 }
@@ -637,56 +746,76 @@ vm_area_t* vmm_find_vma(vm_space_t* space, uintptr_t addr) {
     return nullptr;
 }
 
+static uintptr_t search_gap(
+    vm_area_t* node,
+    size_t size,
+    size_t alignment,
+    uintptr_t start_limit,
+    uintptr_t end_limit
+) {
+    if (!node || node->subtree_max_gap < size) {
+        return 0;
+    }
+
+    // Try Left Subtree
+    uintptr_t result = search_gap(node->rb_left, size, alignment, start_limit, end_limit);
+    if (result != 0) return result;
+
+    uintptr_t gap_start = node->vm_prev ? node->vm_prev->end : start_limit;
+    uintptr_t gap_end   = node->start;
+
+    uintptr_t aligned_start = gap_start;
+    if (!is_aligned(aligned_start, alignment)) {
+        aligned_start = align_up(aligned_start, alignment);
+    }
+
+    // Check bounds and size
+    if (aligned_start >= gap_start && aligned_start + size <= gap_end &&
+        aligned_start + size <= end_limit) {
+        return aligned_start;
+    }
+
+    // Try Right Subtree
+    return search_gap(node->rb_right, size, alignment, start_limit, end_limit);
+}
+
 static uintptr_t find_free_region(vm_space_t* space, size_t size, size_t alignment) {
-    uintptr_t candidate = space->alloc_hint;
+    if (!space->root) {
+        uintptr_t candidate = space->start_limit;
 
-    // Clamp to start limit
-    if (candidate < space->start_limit) {
-        candidate = space->start_limit;
-    }
-
-    if (!is_aligned(candidate, alignment)) {
-        candidate = align_up(candidate, alignment);
-    }
-
-    int loop_count = 0;
-
-    while (true) {
-        if (candidate + size > space->end_limit) {
-            // Wrap around once
-            if (loop_count == 0) {
-                candidate = space->start_limit;
-
-                if (!is_aligned(candidate, alignment)) {
-                    candidate = align_up(candidate, alignment);
-                }
-
-                loop_count++;
-                continue;
-            }
-
-            return 0;
+        if (!is_aligned(candidate, alignment)) {
+            candidate = align_up(candidate, alignment);
         }
 
-        // Check for collision
-        vm_area_t* overlap = vmm_find_vma(space, candidate);
-
-        if (!overlap) {
-            overlap = vmm_find_vma(space, candidate + size - 1);
-        }
-
-        if (!overlap) {
-            // Valid gap found
-            space->alloc_hint = candidate + size;
+        if (candidate + size <= space->end_limit) {
             return candidate;
         }
 
-        // Collision: Jump over the VMA
-        candidate = overlap->end;
+        return 0;
+    }
 
-        if (!is_aligned(candidate, alignment)) {
-            candidate += (alignment - (candidate % alignment));
-        }
+    uintptr_t addr = search_gap(space->root, size, alignment, space->start_limit, space->end_limit);
+
+    if (addr) {
+        return addr;
+    }
+
+    // The tree search covers all gaps between nodes. It doesn't cover the space after the
+    // right-most node.
+    vm_area_t* last = space->root;
+
+    while (last->rb_right) {
+        last = last->rb_right;
+    }
+
+    uintptr_t tail_start = last->end;
+
+    if (!is_aligned(tail_start, alignment)) {
+        tail_start = align_up(tail_start, alignment);
+    }
+
+    if (tail_start + size <= space->end_limit) {
+        return tail_start;
     }
 
     return 0;
@@ -1154,6 +1283,7 @@ void* vmm_alloc_at(
     ret = (void*)addr;
 
 cleanup:
+    vmm_attempt_merge(space, vma);
     release_interrupt_lock(&space->lock);
     return ret;
 }
@@ -1249,6 +1379,8 @@ void vmm_free(vm_space_t* space, void* ptr, size_t size) {
     if (free_vma) {
         free_vm_area_struct(vma);
     }
+
+    vmm_propagate_changes(vma);
 cleanup:
     release_interrupt_lock(&space->lock);
 }

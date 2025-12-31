@@ -22,6 +22,12 @@ typedef struct vm_area {
     struct vm_area* rb_left;
     int rb_color;
 
+    struct vm_area* vm_next;  // Successor
+    struct vm_area* vm_prev;  // Predecessor
+
+    size_t gap;
+    size_t subtree_max_gap;
+
     struct vm_area* next_free;
 } vm_area_t;
 
@@ -35,7 +41,6 @@ typedef struct {
     uintptr_t start_limit;
     uintptr_t end_limit;
 
-    uintptr_t alloc_hint;
     vm_area_t* cached_vma;
 } vm_space_t;
 

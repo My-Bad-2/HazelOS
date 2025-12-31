@@ -48,7 +48,7 @@ TEST(vmm_basic_alloc, "VMM: Basic Allocation & Alignment Checks") {
     vmm_free(&test_space, ptr2, PAGE_SIZE_MEDIUM);
 }
 
-TEST(vmm_gap_fill, "VMM: Gap Search (Best Fit / First Fit)") {
+TEST(vmm_gap_fill, "VMM: Gap Search (Augmented Tree First-Fit)") {
     vmm_test_setup();
 
     void* p1 = vmm_alloc(
@@ -80,12 +80,13 @@ TEST(vmm_gap_fill, "VMM: Gap Search (Best Fit / First Fit)") {
     TEST_ASSERT((uintptr_t)p3 == 0x12000);
 
     vmm_free(&test_space, p2, PAGE_SIZE_SMALL);
+
     TEST_ASSERT(vmm_find_vma(&test_space, 0x11000) == nullptr);
 
-    test_space.alloc_hint = test_space.start_limit;
-
     void* p_new = vmm_alloc(&test_space, 0x1000, VMM_FLAG_READ, CACHE_WRITE_BACK, PAGE_SIZE_SMALL);
+
     TEST_ASSERT((uintptr_t)p_new == 0x11000);
+    TEST_ASSERT(vmm_find_vma(&test_space, 0x11000) != nullptr);
 }
 
 TEST(vmm_demand_vs_immediate, "VMM: Demand Paging Flag Behavior") {
