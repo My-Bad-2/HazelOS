@@ -64,6 +64,9 @@ void vmm_map_memory(pagemap_t* map) {
         uintptr_t phys_start = entry->base;
         uintptr_t phys_end   = entry->base + entry->length;
 
+        phys_start = align_down(phys_start, PAGE_SIZE_SMALL);
+        phys_end   = align_up(phys_end, PAGE_SIZE_SMALL);
+
         if (highest_address < phys_end) {
             highest_address = phys_end;
         }
@@ -72,11 +75,8 @@ void vmm_map_memory(pagemap_t* map) {
 
         while (curr < phys_end) {
             uintptr_t remaining = phys_end - curr;
-            uintptr_t virt      = to_higher_half(curr);
 
             pagemap_map_args_t args = {
-                .virt_addr  = (void*)virt,
-                .phys_addr  = (void*)curr,
                 .flags      = VMM_FLAG_READ | VMM_FLAG_WRITE,
                 .cache      = cache,
                 .pkey       = 0,
@@ -92,6 +92,16 @@ void vmm_map_memory(pagemap_t* map) {
             } else {
                 args.page_size = PAGE_SIZE_SMALL;
                 args.length    = PAGE_SIZE_SMALL;
+            }
+
+            curr           = align_down(curr, args.page_size);
+            uintptr_t virt = to_higher_half(curr);
+
+            args.phys_addr = (void*)curr;
+            args.virt_addr = (void*)virt;
+
+            if (!is_aligned(phys_end, args.page_size)) {
+                phys_end = align_up(phys_end, args.page_size);
             }
 
             if (!pagemap_map(map, args)) {

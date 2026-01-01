@@ -26,6 +26,16 @@
 #define ctz(x)
 #endif
 
+#if __has_builtin(__builtin_clz)
+#define clz(x)                                                                                                                                                   \
+    _Generic((x), unsigned long: __builtin_clzl, unsigned long long: __builtin_clzll, long: __builtin_clzl, long long: __builtin_clzll, default: __builtin_clz)( \
+        x                                                                                                                                                        \
+    )
+#else
+// TODO: Implement it
+#define ctz(x)
+#endif
+
 #if __has_builtin(__builtin_popcount)
 #define popcount(x)                                                                                                                                                                       \
     _Generic((x), unsigned long: __builtin_popcountl, unsigned long long: __builtin_popcountll, long: __builtin_popcountl, long long: __builtin_popcountll, default: __builtin_popcount)( \
