@@ -1,7 +1,5 @@
-#include "memory/heap.h"
-
-#include "libs/log.h"
 #include "libs/math.h"
+#include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
@@ -21,7 +19,9 @@ static bool pattern_check(void* ptr, size_t size, uint8_t seed) {
     uint8_t* p = (uint8_t*)ptr;
 
     for (size_t i = 0; i < size; i++) {
-        if (p[i] != (uint8_t)(seed + i)) return false;
+        if (p[i] != (uint8_t)(seed + i)) {
+            return false;
+        }
     }
 
     return true;
@@ -94,7 +94,7 @@ TEST(heap_edge_cases, "Heap: Zero size and invalid alignment inputs") {
     void* p1 = kmalloc(0);
     TEST_ASSERT(p1 == NULL);
 
-    void* p2 = aligned_kalloc(33, 64);  // 33 is not power of 2
+    void* p2 = aligned_kalloc(33, 64);
     TEST_ASSERT(p2 == NULL);
 
     void* p3 = aligned_kalloc(512, 16);

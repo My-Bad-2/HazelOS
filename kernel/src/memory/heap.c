@@ -25,8 +25,8 @@
 
 typedef struct superblock {
     size_t magic;
-    size_t object_size;
-    size_t used_objects;
+    uint32_t object_size;
+    uint32_t used_objects;
     size_t total_objects;
 
     void* free_list;
@@ -143,7 +143,7 @@ static superblock_t* allocate_superblock(size_t size) {
     }
 
     sb->magic        = SUPERBLOCK_MAGIC;
-    sb->object_size  = size;
+    sb->object_size  = (uint32_t)size;
     sb->used_objects = 0;
     sb->free_list    = nullptr;
     sb->next = sb->prev = nullptr;
