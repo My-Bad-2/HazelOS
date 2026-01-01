@@ -112,6 +112,7 @@ if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
         -mno-x87
         -mcmodel=kernel
 		-mstack-alignment=8
+		-mrdrnd
 	)
 
 	list(

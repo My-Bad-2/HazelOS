@@ -826,7 +826,7 @@ void* vmm_alloc(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t alignment
+    size_t page_size
 ) {
     void* ret = nullptr;
 
@@ -836,12 +836,12 @@ void* vmm_alloc(
         goto cleanup;
     }
 
-    if (alignment == 0) {
-        alignment = PAGE_SIZE_SMALL;
+    if (page_size == 0) {
+        page_size = PAGE_SIZE_SMALL;
     }
 
-    if (!is_aligned(size, alignment)) {
-        size = align_up(size, alignment);
+    if (!is_aligned(size, page_size)) {
+        size = align_up(size, page_size);
     }
 
     uintptr_t addr = 0;
@@ -851,8 +851,8 @@ void* vmm_alloc(
         uintptr_t candidate = space->end_limit;
 
         // Initial Alignment (Round down to page align)
-        if (!is_aligned(candidate, alignment)) {
-            candidate = align_down(candidate, alignment);
+        if (!is_aligned(candidate, page_size)) {
+            candidate = align_down(candidate, page_size);
         }
 
         // Adjust for size
@@ -874,14 +874,14 @@ void* vmm_alloc(
 
             candidate = overlap->start;
 
-            if (!is_aligned(candidate, alignment)) {
-                candidate = align_down(candidate, alignment);
+            if (!is_aligned(candidate, page_size)) {
+                candidate = align_down(candidate, page_size);
             }
 
             candidate -= size;
         }
     } else {
-        addr = find_free_region(space, size, alignment);
+        addr = find_free_region(space, size, page_size);
     }
 
     if (!addr) {
@@ -890,7 +890,7 @@ void* vmm_alloc(
         KLOG_WARN(
             "VMM: no free region size=0x%zx align=0x%zx in [%lx,%lx)\n",
             size,
-            alignment,
+            page_size,
             space->start_limit,
             space->end_limit
         );
@@ -913,7 +913,7 @@ void* vmm_alloc(
     vma->size      = size;
     vma->flags     = (flags & VMM_FLAG_MMIO) ? VMM_FLAG_NONE : flags;
     vma->cache     = cache;
-    vma->page_size = alignment;
+    vma->page_size = page_size;
 
     rb_insert(space, vma);
 
@@ -936,24 +936,24 @@ void* vmm_alloc(
         goto cleanup;
     }
 
-    size_t frames_per_page = alignment / PAGE_SIZE_SMALL;
+    size_t frames_per_page = page_size / PAGE_SIZE_SMALL;
 
     // If the new allocation is not Shared, Standard 4K page, and Zero page is initialized then, map
     // everything to the single shared zero page as Read-Only.
     bool zero_page =
-        (flags & VMM_FLAG_PRIVATE) && (alignment == PAGE_SIZE_SMALL) && (shared_zero_page != 0);
+        (flags & VMM_FLAG_PRIVATE) && (page_size == PAGE_SIZE_SMALL) && (shared_zero_page != 0);
 
     if (zero_page) {
         flags &= ~VMM_FLAG_WRITE;
 
-        for (uintptr_t curr = addr; curr < (addr + size); curr += alignment) {
+        for (uintptr_t curr = addr; curr < (addr + size); curr += page_size) {
             pagemap_map_args_t margs = {
                 .virt_addr  = (void*)curr,
                 .phys_addr  = (void*)shared_zero_page,
-                .length     = alignment,
+                .length     = page_size,
                 .flags      = flags,
                 .cache      = cache,
-                .page_size  = (uint32_t)alignment,
+                .page_size  = (uint32_t)page_size,
                 .skip_flush = false,
             };
 
@@ -965,14 +965,14 @@ void* vmm_alloc(
                 KLOG_WARN(
                     "VMM: zero-page map failed virt=0x%lx len=0x%zx errno=%d\n",
                     curr,
-                    alignment,
+                    page_size,
                     errno
                 );
 
-                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
+                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += page_size) {
                     pagemap_unmap_args_t uargs = {
                         .virt_addr = (void*)cleanup,
-                        .length    = alignment,
+                        .length    = page_size,
                     };
 
                     pagemap_unmap(space->map, uargs);
@@ -988,25 +988,25 @@ void* vmm_alloc(
             pmm_inc_ref((void*)shared_zero_page);
         }
     } else {
-        for (uintptr_t curr = addr; curr < (addr + size); curr += alignment) {
-            void* phys = pmm_alloc_aligned(alignment, frames_per_page);
+        for (uintptr_t curr = addr; curr < (addr + size); curr += page_size) {
+            void* phys = pmm_alloc_aligned(page_size, frames_per_page);
 
             if (!phys) {
                 errno = ENOMEM;
                 KLOG_WARN(
                     "VMM: alloc phys failed virt=0x%lx size=0x%zx align=0x%zx\n",
                     curr,
-                    alignment,
-                    alignment
+                    page_size,
+                    page_size
                 );
 
-                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
+                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += page_size) {
                     uintptr_t p = pagemap_translate(space->map, cleanup);
 
                     if (p) {
                         pagemap_unmap_args_t uargs = {
                             .virt_addr = (void*)cleanup,
-                            .length    = alignment,
+                            .length    = page_size,
                         };
 
                         pagemap_unmap(space->map, uargs);
@@ -1023,10 +1023,10 @@ void* vmm_alloc(
             pagemap_map_args_t margs = {
                 .virt_addr  = (void*)curr,
                 .phys_addr  = phys,
-                .length     = alignment,
+                .length     = page_size,
                 .flags      = flags,
                 .cache      = cache,
-                .page_size  = (uint32_t)alignment,
+                .page_size  = (uint32_t)page_size,
                 .skip_flush = false,
             };
 
@@ -1039,19 +1039,19 @@ void* vmm_alloc(
                     "VMM: map failed virt=0x%lx phys=%p len=0x%zx errno=%d\n",
                     curr,
                     phys,
-                    alignment,
+                    page_size,
                     errno
                 );
 
                 pmm_free(phys, frames_per_page);
 
-                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
+                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += page_size) {
                     uintptr_t p = pagemap_translate(space->map, cleanup);
 
                     if (p) {
                         pagemap_unmap_args_t uargs = {
                             .virt_addr = (void*)cleanup,
-                            .length    = alignment,
+                            .length    = page_size,
                         };
 
                         pagemap_unmap(space->map, uargs);
@@ -1080,7 +1080,7 @@ void* vmm_alloc_at(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t alignment
+    size_t page_size
 ) {
     uintptr_t addr = (uintptr_t)ptr;
     void* ret      = nullptr;
@@ -1091,12 +1091,12 @@ void* vmm_alloc_at(
         goto cleanup;
     }
 
-    if (alignment == 0) {
-        alignment = PAGE_SIZE_SMALL;
+    if (page_size == 0) {
+        page_size = PAGE_SIZE_SMALL;
     }
 
-    if (!is_aligned(size, alignment)) {
-        size = align_up(size, alignment);
+    if (!is_aligned(size, page_size)) {
+        size = align_up(size, page_size);
     }
 
     uintptr_t end_addr = addr + size;
@@ -1125,7 +1125,7 @@ void* vmm_alloc_at(
     vma->size      = size;
     vma->flags     = (flags & VMM_FLAG_MMIO) ? VMM_FLAG_NONE : flags;
     vma->cache     = cache;
-    vma->page_size = alignment;
+    vma->page_size = page_size;
     vma->next_free = nullptr;
 
     rb_insert(space, vma);
@@ -1149,24 +1149,24 @@ void* vmm_alloc_at(
         goto cleanup;
     }
 
-    size_t frames_per_page = alignment / PAGE_SIZE_SMALL;
+    size_t frames_per_page = page_size / PAGE_SIZE_SMALL;
 
     // If the new allocation is not Shared, Standard 4K page, and Zero page is initialized then, map
     // everything to the single shared zero page as Read-Only.
     bool zero_page =
-        (flags & VMM_FLAG_PRIVATE) && (alignment == PAGE_SIZE_SMALL) && (shared_zero_page != 0);
+        (flags & VMM_FLAG_PRIVATE) && (page_size == PAGE_SIZE_SMALL) && (shared_zero_page != 0);
 
     if (zero_page) {
         flags &= ~VMM_FLAG_WRITE;
 
-        for (uintptr_t curr = addr; curr < (addr + size); curr += alignment) {
+        for (uintptr_t curr = addr; curr < (addr + size); curr += page_size) {
             pagemap_map_args_t margs = {
                 .virt_addr  = (void*)curr,
                 .phys_addr  = (void*)shared_zero_page,
-                .length     = alignment,
+                .length     = page_size,
                 .flags      = flags,
                 .cache      = cache,
-                .page_size  = (uint32_t)alignment,
+                .page_size  = (uint32_t)page_size,
                 .skip_flush = false,
             };
 
@@ -1178,14 +1178,14 @@ void* vmm_alloc_at(
                 KLOG_WARN(
                     "VMM: zero-page map failed virt=0x%lx len=0x%zx errno=%d\n",
                     curr,
-                    alignment,
+                    page_size,
                     errno
                 );
 
-                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
+                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += page_size) {
                     pagemap_unmap_args_t uargs = {
                         .virt_addr = (void*)cleanup,
-                        .length    = alignment,
+                        .length    = page_size,
                     };
 
                     pagemap_unmap(space->map, uargs);
@@ -1201,25 +1201,25 @@ void* vmm_alloc_at(
             pmm_inc_ref((void*)shared_zero_page);
         }
     } else {
-        for (uintptr_t curr = addr; curr < (addr + size); curr += alignment) {
-            void* phys = pmm_alloc_aligned(alignment, frames_per_page);
+        for (uintptr_t curr = addr; curr < (addr + size); curr += page_size) {
+            void* phys = pmm_alloc_aligned(page_size, frames_per_page);
 
             if (!phys) {
                 errno = ENOMEM;
                 KLOG_WARN(
                     "VMM: alloc phys failed virt=0x%lx size=0x%zx align=0x%zx\n",
                     curr,
-                    alignment,
-                    alignment
+                    page_size,
+                    page_size
                 );
 
-                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
+                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += page_size) {
                     uintptr_t p = pagemap_translate(space->map, cleanup);
 
                     if (p) {
                         pagemap_unmap_args_t uargs = {
                             .virt_addr = (void*)cleanup,
-                            .length    = alignment,
+                            .length    = page_size,
                         };
 
                         pagemap_unmap(space->map, uargs);
@@ -1236,10 +1236,10 @@ void* vmm_alloc_at(
             pagemap_map_args_t margs = {
                 .virt_addr  = (void*)curr,
                 .phys_addr  = phys,
-                .length     = alignment,
+                .length     = page_size,
                 .flags      = flags,
                 .cache      = cache,
-                .page_size  = (uint32_t)alignment,
+                .page_size  = (uint32_t)page_size,
                 .skip_flush = false,
             };
 
@@ -1252,19 +1252,19 @@ void* vmm_alloc_at(
                     "VMM: map failed virt=0x%lx phys=%p len=0x%zx errno=%d\n",
                     curr,
                     phys,
-                    alignment,
+                    page_size,
                     errno
                 );
 
                 pmm_free(phys, frames_per_page);
 
-                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += alignment) {
+                for (uintptr_t cleanup = addr; cleanup < curr; cleanup += page_size) {
                     uintptr_t p = pagemap_translate(space->map, cleanup);
 
                     if (p) {
                         pagemap_unmap_args_t uargs = {
                             .virt_addr = (void*)cleanup,
-                            .length    = alignment,
+                            .length    = page_size,
                         };
 
                         pagemap_unmap(space->map, uargs);

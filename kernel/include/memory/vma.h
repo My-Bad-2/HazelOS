@@ -52,7 +52,7 @@ void* vmm_alloc(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t alignment
+    size_t page_size
 );
 
 void* vmm_alloc_at(
@@ -61,7 +61,7 @@ void* vmm_alloc_at(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t alignment
+    size_t page_size
 );
 
 void vmm_free(vm_space_t* space, void* ptr, size_t size);
