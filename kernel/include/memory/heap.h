@@ -10,7 +10,8 @@ extern "C" {
 void* kmalloc(size_t size);
 void* aligned_kalloc(size_t alignment, size_t size);
 
-void kfree(void* ptr, size_t size);
+void kfree(void* ptr);
+void aligned_kfree(void* ptr);
 
 void kheap_init(void);
 
