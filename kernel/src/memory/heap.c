@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "arch.h"
 #include "boot/boot.h"
@@ -42,14 +43,17 @@ typedef struct {
 } magazine_t;
 
 typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
-    magazine_t bins[BIN_COUNT];
     irq_lock_t lock;
+    magazine_t bins[BIN_COUNT];
 } cpu_heap_t;
 
 typedef struct {
     interrupt_lock_t lock;
     superblock_t* active;
     superblock_t* partial;
+
+    uint32_t color_next;
+    uint32_t color_range;
 } global_bin_t;
 
 static uintptr_t heap_secret = 0;
@@ -83,6 +87,14 @@ static int get_bin_idx(size_t size) {
     return (idx < 0) ? 0 : idx;
 }
 
+static size_t get_bin_size(int idx) {
+    if (idx == -1) {
+        return 0;
+    }
+
+    return 1ul << (idx + 4);
+}
+
 static inline superblock_t* get_superblock(void* ptr) {
     return (superblock_t*)align_down((uintptr_t)ptr, SUPERBLOCK_SIZE);
 }
@@ -96,6 +108,9 @@ static inline size_t power_of_two_ceil(size_t x) {
 }
 
 static superblock_t* allocate_superblock(size_t size) {
+    int idx           = get_bin_idx(size);
+    global_bin_t* bin = &global_bins[idx];
+
     void* ptr = vmm_alloc(
         &kernel_space,
         SUPERBLOCK_SIZE,
@@ -108,11 +123,24 @@ static superblock_t* allocate_superblock(size_t size) {
         if (errno == 0) {
             errno = ENOMEM;
         }
+
         KLOG_ERROR("Heap: superblock alloc failed size=0x%zx errno=%d\n", size, errno);
         return nullptr;
     }
 
     superblock_t* sb = (superblock_t*)ptr;
+
+    size_t col_offset = 0;
+
+    if (bin->color_range > 0) {
+        col_offset = bin->color_next * (size_t)CACHE_LINE_SIZE;
+
+        bin->color_next++;
+
+        if (bin->color_next >= bin->color_range) {
+            bin->color_next = 0;
+        }
+    }
 
     sb->magic        = SUPERBLOCK_MAGIC;
     sb->object_size  = size;
@@ -120,8 +148,7 @@ static superblock_t* allocate_superblock(size_t size) {
     sb->free_list    = nullptr;
     sb->next = sb->prev = nullptr;
 
-    size_t color_offset = (get_random_secret() & 0x7) * CACHE_LINE_SIZE;
-    uintptr_t start     = (uintptr_t)ptr + sizeof(superblock_t) + color_offset;
+    uintptr_t start = (uintptr_t)ptr + sizeof(superblock_t) + col_offset;
 
     size_t padding = (size - (start & (size - 1))) & (size - 1);
 
@@ -161,6 +188,7 @@ static int refill_magazines(int idx, void** dest, int count) {
                     if (errno == 0) {
                         errno = ENOMEM;
                     }
+
                     KLOG_WARN(
                         "Heap: refill superblock alloc failed idx=%d size=0x%zx errno=%d\n",
                         idx,
@@ -254,6 +282,26 @@ void kheap_init(void) {
     heap_secret = get_random_secret() ^ (get_random_secret() << 32);
 
     for (int i = 0; i < BIN_COUNT; ++i) {
+        size_t obj_size = get_bin_size(i);
+        obj_size        = align_up(obj_size, 0x10);
+
+        size_t overhead  = sizeof(superblock_t);
+        size_t available = SUPERBLOCK_SIZE - heap_secret;
+
+        size_t num_objs   = available / obj_size;
+        size_t total_used = num_objs * obj_size;
+        size_t waste      = available - total_used;
+
+        // Calculate how many cache-line shifts we can perform inside this wasted space.
+        if (waste >= CACHE_LINE_SIZE) {
+            global_bins[i].color_range = (uint32_t)waste / CACHE_LINE_SIZE;
+        } else {
+            // No enough easte to shift even one cache line.
+            global_bins[i].color_range = 0;
+        }
+
+        global_bins[i].color_next = 0;
+
         create_interrupt_lock(&global_bins[i].lock);
         global_bins[i].active  = nullptr;
         global_bins[i].partial = nullptr;
@@ -329,6 +377,13 @@ void* aligned_kalloc(size_t alignment, size_t size) {
 
             if (likely(mag->top > 0)) {
                 void* ptr = mag->rounds[--mag->top];
+
+                prefetch(ptr, 1, 3);
+
+                if (mag->top > 0) {
+                    prefetch(mag->rounds[mag->top - 1], 1, 3);
+                }
+
                 release_irq_lock(&cpu_heap->lock);
                 return ptr;
             }
@@ -355,6 +410,12 @@ void* aligned_kalloc(size_t alignment, size_t size) {
             mag->top = count;
 
             void* ptr = mag->rounds[--mag->top];
+
+            prefetch(ptr, 1, 3);
+
+            if (mag->top > 0) {
+                prefetch(mag->rounds[mag->top - 1], 1, 3);
+            }
 
             release_irq_lock(&cpu_heap->lock);
             return ptr;
@@ -402,8 +463,6 @@ void kfree(void* ptr, size_t size) {
     superblock_t* sb = get_superblock(ptr);
 
     if (sb->magic != SUPERBLOCK_MAGIC) {
-        errno = EINVAL;
-        KLOG_WARN("Heap: kfree invalid superblock ptr=%p size=0x%zx\n", ptr, size);
         vmm_free(&kernel_space, ptr, size);
         return;
     }
@@ -426,9 +485,11 @@ void kfree(void* ptr, size_t size) {
 
     int remaining = mag->top - BATCH_SIZE;
 
-    for (int i = 0; i < remaining; ++i) {
-        mag->rounds[i] = mag->rounds[BATCH_SIZE + i];
-    }
+    memmove(
+        (void*)&mag->rounds[0],
+        (void*)&mag->rounds[BATCH_SIZE],
+        (size_t)remaining * sizeof(void*)
+    );
 
     mag->top = remaining;
 
