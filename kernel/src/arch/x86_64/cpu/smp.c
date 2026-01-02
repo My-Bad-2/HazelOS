@@ -7,7 +7,7 @@
 void arch_init_cpu_state(per_cpu_data_t* cpu) {
     ASSERT(cpu);
 
-    tss_init(&cpu->tss);
+    tss_init(&cpu->tss, cpu->stack_top);
     gdt_init(&cpu->gdt, &cpu->tss);
 
     KLOG_DEBUG(

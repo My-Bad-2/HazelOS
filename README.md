@@ -1,5 +1,7 @@
 # Hazel
 
+![blazingly fast](https://blazingly.fast/api/badge.svg?repo=My-Bad-2/HazelOS)
+
 A Work-In-Progress kernel.
 
 ## Prerequisites

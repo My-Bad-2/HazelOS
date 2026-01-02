@@ -44,7 +44,7 @@ typedef struct [[gnu::packed]] {
     tss_descriptor_t tss;
 } gdt_table_t;
 
-void tss_init(tss_t* tss);
+void tss_init(tss_t* tss, uintptr_t rsp);
 void gdt_init(gdt_table_t* entry, tss_t* tss);
 void gdt_load(gdt_table_t* entry);
 

@@ -24,8 +24,6 @@
 #define GDT_FLAG_LONG_MODE 0x20
 #define GDT_FLAG_PAGE_GRAN 0x80
 
-extern uint8_t bootstrap_stack[];
-
 static uint8_t* nmi_stack             = nullptr;
 static uint8_t* double_fault_stack    = nullptr;
 static uint8_t* machine_check_stack   = nullptr;
@@ -108,7 +106,7 @@ void gdt_init(gdt_table_t* gdt, tss_t* tss) {
     KLOG_DEBUG("GDT: table initialized tss_base=0x%lx limit=0x%x\n", tss_base, tss_limit);
 }
 
-void tss_init(tss_t* tss) {
+void tss_init(tss_t* tss, uintptr_t rsp) {
     ASSERT(tss);
     memset(tss, 0, sizeof(tss_t));
 
@@ -159,7 +157,7 @@ void tss_init(tss_t* tss) {
         );
     }
 
-    tss->rsp[0] = (uintptr_t)bootstrap_stack + KSTACK_SIZE;
+    tss->rsp[0] = rsp;
 
     // if the kernel stack overflows, a double fault occurs.
     tss->ist[0] = (uintptr_t)double_fault_stack + PAGE_SIZE_SMALL;

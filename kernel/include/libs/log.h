@@ -33,10 +33,14 @@ void kernel_log(log_level_t level, const char* file, int line, const char* fmt, 
 
 #define PANIC(fmt, ...) kernel_panic(__FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
 
+#if KERNEL_TEST
 #define ASSERT(exp)                          \
     if (!(exp)) {                            \
         PANIC("Assertion failed: %s", #exp); \
     }
+#else
+#define ASSERT(exp) (void);
+#endif
 
 #ifdef __cplusplus
 }
