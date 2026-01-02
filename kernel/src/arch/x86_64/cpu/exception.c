@@ -196,12 +196,13 @@ static void print_trap_frame(char* buf, size_t size, interrupt_trapframe_t* tf) 
     if (vector == EXCEPTION_DOUBLE_FAULT ||
         (vector >= EXCEPTION_INVALID_TSS && vector <= EXCEPTION_PAGE_FAULT) ||
         (vector == EXCEPTION_ALIGNMENT_CHECK) || (vector == EXCEPTION_SECURITY)) {
-        buffer_append(&curr, &remaining, "ERROR CODE: 0x%lx", tf->error_code);
+        buffer_append(&curr, &remaining, "ERROR CODE: 0x%lx ", tf->error_code);
+
         if (vector == EXCEPTION_PAGE_FAULT) {
             buffer_append(
                 &curr,
                 &remaining,
-                "[ %c %c %c %c %c %c]",
+                "[%c%c%c%c%c%c]",
                 (tf->error_code & X86_PAGE_FAULT_PRESENT) ? 'P' : '-',
                 (tf->error_code & X86_PAGE_FAULT_WRITE) ? 'W' : '-',
                 (tf->error_code & X86_PAGE_FAULT_USER) ? 'U' : 'K',
@@ -209,7 +210,8 @@ static void print_trap_frame(char* buf, size_t size, interrupt_trapframe_t* tf) 
                 (tf->error_code & X86_PAGE_FAULT_INSTRUCTION_FETCH) ? 'I' : '-',
                 (tf->error_code & X86_PAGE_FAULT_PROTECTION_KEY) ? 'P' : '-'
             );
-            buffer_append(&curr, &remaining, "FAULT ADDR (CR2) : 0x%016lx\n", read_cr2());
+
+            buffer_append(&curr, &remaining, " FAULT ADDR (CR2) : 0x%016lx\n", read_cr2());
         } else {
             buffer_append(&curr, &remaining, "\n");
         }
@@ -250,8 +252,8 @@ static void print_trap_frame(char* buf, size_t size, interrupt_trapframe_t* tf) 
     buffer_append(
         &curr,
         &remaining,
-        "RIP: 0x%016llx  CS : 0x%04x\n"
-        "RSP: 0x%016llx  SS : 0x%04x\n"
+        "RIP   : 0x%016llx  CS: 0x%04x\n"
+        "RSP   : 0x%016llx  SS: 0x%04x\n"
         "RFLAGS: 0x%016llx\n",
         tf->rip,
         tf->cs,
@@ -264,7 +266,7 @@ static void print_trap_frame(char* buf, size_t size, interrupt_trapframe_t* tf) 
         buffer_append(
             &curr,
             &remaining,
-            "CR0: 0x%016llx\nCR3: 0x%016llx\nCR4: 0x%016llx\n",
+            "CR0   : 0x%016llx\nCR3   : 0x%016llx\nCR4   : 0x%016llx\n",
             read_cr0(),
             read_cr3(),
             read_cr4()
