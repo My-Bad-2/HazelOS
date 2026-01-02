@@ -1,4 +1,4 @@
-.section .text
+.section .text.isr
 
 .extern x86_exception_handler
 .type isr_common_stub, @function
@@ -30,7 +30,12 @@ isr_common_stub:
     jz 1f
     swapgs               # Switch GS to Kernel Per-CPU Data
 1:
+    pushq %rbp          # Save the RBP of the interrupted code
+    movq %rsp, %rbp     # Set RBP to current stack
+
     call x86_exception_handler
+
+    popq %rbp # Restore stack to just the Trap Frame
 
     movq 144(%rsp), %rax
     testb $3, %al

@@ -25,6 +25,10 @@ SECTIONS
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .text : {
+        PROVIDE(__isr_text_start = .);
+        *(.text.isr)
+        PROVIDE(__isr_text_end = .);
+
         *(.text .text.*)
     } :text
 
@@ -49,12 +53,6 @@ SECTIONS
     .bss : {
         *(.bss .bss.*)
         *(COMMON)
-    } :data
-
-    .stack (NOLOAD) : {
-        . = ALIGN(16);
-        *(.stack)
-        . = ALIGN(16);
     } :data
 
     /DISCARD/ : {
