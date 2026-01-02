@@ -1,7 +1,6 @@
 #include "arch.h"
 
 #include <stddef.h>
-#include <stdint.h>
 
 #include "compiler.h"
 #include "cpu/cpu.h"
@@ -60,11 +59,6 @@ void arch_restore_flags(size_t flags) {
         "pushq %0;"
         "popfq;" ::"r"(flags)
     );
-}
-
-uint32_t arch_get_core_idx(void) {
-    // Until SMP is initialized, we're running on BSP
-    return 0;
 }
 
 void arch_serial_init(void) {

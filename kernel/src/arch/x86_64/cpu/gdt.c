@@ -1,0 +1,206 @@
+#include "cpu/gdt.h"
+
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "libs/log.h"
+#include "memory/memory.h"
+#include "memory/pagemap.h"
+#include "memory/vma.h"
+
+#define GDT_ACCESS_TSS 0x09
+
+#define GDT_ACCESS_ACCESSED   0x01
+#define GDT_ACCESS_READWRITE  0x02
+#define GDT_ACCESS_CONFORMING 0x04
+#define GDT_ACCESS_EXECUTABLE 0x08
+#define GDT_ACCESS_SEGMENT    0x10
+#define GDT_ACCESS_RING0      0x00
+#define GDT_ACCESS_RING3      0x60
+#define GDT_ACCESS_PRESENT    0x80
+
+#define GDT_FLAG_LONG_MODE 0x20
+#define GDT_FLAG_PAGE_GRAN 0x80
+
+extern uint8_t bootstrap_stack[];
+
+static uint8_t* nmi_stack             = nullptr;
+static uint8_t* double_fault_stack    = nullptr;
+static uint8_t* machine_check_stack   = nullptr;
+static uint8_t* debug_exception_stack = nullptr;
+
+extern void flush_gdt(void* gdtr, uint16_t cs, uint16_t ss);
+extern void flush_tss(uint16_t offset);
+
+static inline void
+set_gdt_entry(gdt_entry_t* entry, uint64_t base, uint64_t limit, uint8_t access, uint8_t flags) {
+    ASSERT(entry);
+
+    entry->base_low    = (base & 0xffff);
+    entry->base_middle = (base >> 16) & 0xff;
+    entry->base_high   = (base >> 24) & 0xff;
+
+    entry->limit_low   = (limit & 0xffff);
+    entry->granularity = ((limit >> 16) & 0x0f) | (flags & 0xf0);
+    entry->access      = access;
+}
+
+static inline void set_tss_descriptor(tss_descriptor_t* desc, uintptr_t base, uint32_t limit) {
+    ASSERT(desc);
+
+    desc->base_low    = (base & 0xffff);
+    desc->base_middle = (base >> 16) & 0xff;
+    desc->base_high   = (base >> 24) & 0xff;
+    desc->base_upper  = (base >> 32) & 0xffffffff;
+
+    desc->limit_low   = (limit & 0xffff);
+    desc->granularity = ((limit >> 16) & 0x0f);
+
+    desc->access   = GDT_ACCESS_PRESENT | GDT_ACCESS_RING0 | GDT_ACCESS_TSS;
+    desc->reserved = 0;
+}
+
+void gdt_init(gdt_table_t* gdt, tss_t* tss) {
+    ASSERT(gdt);
+
+    set_gdt_entry(&gdt->entries[0], 0, 0, 0, 0);
+
+    set_gdt_entry(
+        &gdt->entries[1],
+        0,
+        0xfffff,
+        GDT_ACCESS_PRESENT | GDT_ACCESS_SEGMENT | GDT_ACCESS_EXECUTABLE | GDT_ACCESS_READWRITE,
+        GDT_FLAG_PAGE_GRAN | GDT_FLAG_LONG_MODE
+    );
+
+    set_gdt_entry(
+        &gdt->entries[2],
+        0,
+        0xfffff,
+        GDT_ACCESS_PRESENT | GDT_ACCESS_SEGMENT | GDT_ACCESS_READWRITE,
+        GDT_FLAG_PAGE_GRAN
+    );
+
+    set_gdt_entry(
+        &gdt->entries[3],
+        0,
+        0xfffff,
+        GDT_ACCESS_PRESENT | GDT_ACCESS_SEGMENT | GDT_ACCESS_READWRITE | GDT_ACCESS_RING3,
+        GDT_FLAG_PAGE_GRAN
+    );
+
+    set_gdt_entry(
+        &gdt->entries[4],
+        0,
+        0xfffff,
+        GDT_ACCESS_PRESENT | GDT_ACCESS_SEGMENT | GDT_ACCESS_READWRITE | GDT_ACCESS_EXECUTABLE |
+            GDT_ACCESS_RING3,
+        GDT_FLAG_LONG_MODE | GDT_FLAG_PAGE_GRAN
+    );
+
+    uintptr_t tss_base = (uintptr_t)tss;
+    uint32_t tss_limit = sizeof(tss_t) - 1;
+
+    set_tss_descriptor(&gdt->tss, tss_base, tss_limit);
+
+    KLOG_DEBUG("GDT: table initialized tss_base=0x%lx limit=0x%x\n", tss_base, tss_limit);
+}
+
+void tss_init(tss_t* tss) {
+    ASSERT(tss);
+    memset(tss, 0, sizeof(tss_t));
+
+    if (!nmi_stack && !double_fault_stack) {
+        nmi_stack = vmm_alloc(
+            &kernel_space,
+            PAGE_SIZE_SMALL,
+            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
+            CACHE_WRITE_BACK,
+            PAGE_SIZE_SMALL
+        );
+
+        double_fault_stack = vmm_alloc(
+            &kernel_space,
+            PAGE_SIZE_SMALL,
+            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
+            CACHE_WRITE_BACK,
+            PAGE_SIZE_SMALL
+        );
+
+        machine_check_stack = vmm_alloc(
+            &kernel_space,
+            PAGE_SIZE_SMALL,
+            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
+            CACHE_WRITE_BACK,
+            PAGE_SIZE_SMALL
+        );
+
+        debug_exception_stack = vmm_alloc(
+            &kernel_space,
+            PAGE_SIZE_SMALL,
+            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
+            CACHE_WRITE_BACK,
+            PAGE_SIZE_SMALL
+        );
+    }
+
+    if (!nmi_stack || !double_fault_stack || !machine_check_stack || !debug_exception_stack) {
+        errno = ENOMEM;
+
+        PANIC(
+            "GDT: failed to allocate IST stacks nmi=%p df=%p mc=%p dbg=%p errno=%d\n",
+            nmi_stack,
+            double_fault_stack,
+            machine_check_stack,
+            debug_exception_stack,
+            errno
+        );
+    }
+
+    tss->rsp[0] = (uintptr_t)bootstrap_stack + KSTACK_SIZE;
+
+    // if the kernel stack overflows, a double fault occurs.
+    tss->ist[0] = (uintptr_t)double_fault_stack + PAGE_SIZE_SMALL;
+    tss->ist[1] = (uintptr_t)nmi_stack + PAGE_SIZE_SMALL;
+    tss->ist[2] = (uintptr_t)machine_check_stack + PAGE_SIZE_SMALL;
+    tss->ist[3] = (uintptr_t)debug_exception_stack + PAGE_SIZE_SMALL;
+
+    tss->iomap_base = sizeof(tss_t);
+
+    KLOG_DEBUG(
+        "GDT: initialized TSS rsp0=0x%lx ist=[0x%lx,0x%lx,0x%lx,0x%lx]\n",
+        tss->rsp[0],
+        tss->ist[0],
+        tss->ist[1],
+        tss->ist[2],
+        tss->ist[3]
+    );
+}
+
+void gdt_load(gdt_table_t* entry) {
+    struct [[gnu::packed]] {
+        uint16_t limit;
+        uint64_t base;
+    } gdtr;
+
+    gdtr.base  = (uintptr_t)entry;
+    gdtr.limit = sizeof(gdt_table_t) - 1;
+
+    uint16_t cs         = offsetof(gdt_table_t, entries) + (1 * sizeof(gdt_entry_t));
+    uint16_t ss         = offsetof(gdt_table_t, entries) + (2 * sizeof(gdt_entry_t));
+    uint16_t tss_offset = offsetof(gdt_table_t, tss);
+
+    flush_gdt(&gdtr, cs, ss);
+    flush_tss(tss_offset);
+
+    KLOG_DEBUG(
+        "GDT: loaded gdtr[limit=0x%x base=0x%lx] cs=0x%x ss=0x%x tss=0x%x\n",
+        gdtr.limit,
+        gdtr.base,
+        cs,
+        ss,
+        tss_offset
+    );
+}

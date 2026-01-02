@@ -5,6 +5,7 @@
 .extern limine_base_revision
 .extern bootstrap_stack
 
+.type _start, @function
 _start:
     cli
 
