@@ -10,6 +10,7 @@ set(
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/arch/${${PROJECT_NAME}_ARCHITECTURE}"
     ${FREESTND_HDRS_DIR}
+    ${UACPI_INCLUDES}
 )
 
 collect_sources_filtered(
@@ -20,16 +21,13 @@ collect_sources_filtered(
     DEBUG OFF
 )
 
-add_library(kernel_uacpi STATIC ${UACPI_SOURCES})
-target_include_directories(kernel_uacpi PUBLIC ${UACPI_INCLUDES})
+add_library(kernel_objs OBJECT ${KERNEL_SOURCES} ${UACPI_SOURCES})
 
-# For now compile only barebones target for UACPI
-target_compile_definitions(kernel_uacpi PUBLIC UACPI_SIZED_FREES=1 UACPI_BAREBONES_MODE=1)
-
-add_library(kernel_objs OBJECT ${KERNEL_SOURCES})
-target_compile_options(kernel_objs PRIVATE -fno-omit-frame-pointer)
 target_include_directories(kernel_objs PRIVATE ${KERNEL_INCLUDE_DIR})
-target_link_libraries(kernel_objs PRIVATE llvm-libc kernel_uacpi)
+target_compile_options(kernel_objs PRIVATE -fno-omit-frame-pointer)
+target_compile_definitions(kernel_objs PUBLIC UACPI_SIZED_FREES=1 UACPI_BAREBONES_MODE=1)
+
+target_link_libraries(kernel_objs PRIVATE llvm-libc)
 
 target_apply_compile_settings(
     TARGET kernel_objs

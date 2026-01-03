@@ -7,6 +7,7 @@
 
 #include "arch.h"
 #include "boot/boot.h"
+#include "drivers/acpi.h"
 #include "libs/log.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
@@ -86,6 +87,8 @@ void smp_init(void) {
     }
 
     memset(cpu_datas, 0, num_cpus * sizeof(per_cpu_data_t));
+
+    acpi_early_init();
 
     for (uint32_t i = 0; i < num_cpus; ++i) {
         struct limine_mp_info* info = mp_request.response->cpus[i];
