@@ -2,10 +2,12 @@
 
 #include <errno.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "arch.h"
 #include "cpu/idt.h"
+#include "cpu/pic.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
 #include "libs/log.h"
@@ -59,6 +61,20 @@ static const char* const exception_messages[32] = {
     "Security Exception",
     "Reserved (31)"
 };
+
+static void send_eoi(uint8_t vector) {
+    if ((vector >= PLATFORM_INTERRUPT_BASE) && (vector <= PLATFORM_INTERRUPT_BASE + 16)) {
+        pic_send_eoi(vector);
+    }
+}
+
+static void
+configure_irq(uint8_t vector, irq_trigger_mode_t mode, irq_polarity_t polarity, bool mask) {
+    if ((vector >= PLATFORM_INTERRUPT_BASE) && (vector <= PLATFORM_INTERRUPT_BASE + 16)) {
+        (void)polarity;
+        pic_configure_irq(vector, mask, mode);
+    }
+}
 
 void init_isr_registry(void) {
     if (isr_registry != nullptr) {
@@ -123,8 +139,7 @@ int register_interrupt_handler(
         ctx
     );
 
-    // Unmask with IOAPIC
-    (void)irq_line;
+    configure_irq((uint8_t)vector, trigger, polarity, false);
 
     return 0;
 }
@@ -145,9 +160,12 @@ void deregister_interrupt_handler(uint8_t vector) {
     isr_registry[vector].handler = nullptr;
     isr_registry[vector].ctx     = nullptr;
 
-    KLOG_DEBUG("ISR: deregistered vector=%u\n", vector);
+    irq_trigger_mode_t trigger = isr_registry[vector].trigger;
+    irq_polarity_t polarity    = isr_registry[vector].polarity;
 
-    // Mask with IOAPIC
+    configure_irq((uint8_t)vector, trigger, polarity, true);
+
+    KLOG_DEBUG("ISR: deregistered vector=%u\n", vector);
 }
 
 static void buffer_append(char** buf, size_t* remaining, const char* fmt, ...) {
@@ -293,13 +311,19 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
     isr_handler_t handler = isr_registry[tf->vector].handler;
     void* ctx             = isr_registry[tf->vector].ctx;
 
+    irq_trigger_mode_t trigger = isr_registry[tf->vector].trigger;
+
+    if (trigger == IRQ_TRIGGER_EDGE) {
+        send_eoi((uint8_t)tf->vector);
+    }
+
     if (handler) {
         handler(tf, ctx);
     } else {
         handle_crash(tf);
     }
 
-    if (tf->vector >= 32) {
-        // Send EOI
+    if (trigger == IRQ_TRIGGER_LEVEl) {
+        send_eoi((uint8_t)tf->vector);
     }
 }

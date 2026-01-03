@@ -19,7 +19,7 @@ pagemap_t* vmm_get_kernel_pagemap() {
     return &kernel_pagemap;
 }
 
-void vmm_map_memory(pagemap_t* map) {
+static void vmm_map_memory(pagemap_t* map) {
     if (!memmap_request.response || !memmap_request.response->entries) {
         errno = ENODEV;
         KLOG_ERROR("VMM: Limine memory map is missing\n");

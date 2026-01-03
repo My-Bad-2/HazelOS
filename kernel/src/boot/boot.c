@@ -2,8 +2,6 @@
 
 #include <stdint.h>
 
-#include "boot/limine.h"
-
 [[gnu::used]]
 uint8_t bootstrap_stack[KSTACK_SIZE];
 

@@ -4,6 +4,7 @@
 #include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
+#include "cpu/pic.h"
 #include "cpu/registers.h"
 #include "libs/log.h"
 
@@ -29,6 +30,7 @@ void arch_commit_cpu_state(per_cpu_data_t* cpu) {
 
     gdt_load(&cpu->gdt);
     idt_load();
+    pic_init();
 
     uint64_t gs_val = (uint64_t)cpu;
     write_msr(X86_MSR_IA32_GS_BASE, gs_val);
