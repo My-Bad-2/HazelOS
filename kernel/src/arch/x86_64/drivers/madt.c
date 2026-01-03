@@ -295,3 +295,19 @@ void acpi_parse_tables(void) {
         acpi_info.lapic_nmi_count
     );
 }
+
+size_t acpi_get_ioapic_count(void) {
+    return acpi_info.ioapic_count;
+}
+
+size_t acpi_get_iso_count(void) {
+    return acpi_info.iso_count;
+}
+
+struct acpi_madt_ioapic* acpi_get_ioapics(void) {
+    return acpi_info.ioapics;
+}
+
+struct acpi_madt_interrupt_source_override* acpi_get_isos(void) {
+    return acpi_info.isos;
+}

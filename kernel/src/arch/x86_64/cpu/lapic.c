@@ -18,7 +18,7 @@
 
 #include "internal/lapic.h"
 
-static void* lapic_virt_base       = nullptr;
+static void* virt_base             = nullptr;
 static bool x2apic_enabled         = false;
 static bool tsc_deadline_supported = false;
 static interrupt_lock_t lock;
@@ -28,7 +28,7 @@ static uint32_t lapic_read(size_t offset) {
         return (uint32_t)read_msr(LAPIC_X2APIC_MSR_BASE + (offset >> 4));
     }
 
-    uintptr_t addr = (uintptr_t)lapic_virt_base + offset;
+    uintptr_t addr = (uintptr_t)virt_base + offset;
     return mmio_read32((void*)addr);
 }
 
@@ -36,7 +36,7 @@ static void lapic_write(size_t offset, uint32_t val) {
     if (x2apic_enabled) {
         write_msr(LAPIC_X2APIC_MSR_BASE + (offset >> 4), val);
     } else {
-        uintptr_t addr = (uintptr_t)lapic_virt_base + offset;
+        uintptr_t addr = (uintptr_t)virt_base + offset;
         mmio_write32((void*)addr, val);
     }
 }
@@ -57,40 +57,40 @@ static void apic_error_handler(interrupt_trapframe_t*, void*) {
     offset += (size_t)snprintf(
         buf + offset,
         buf_size + offset,
-        "[APIC ERROR] CPU %d ESR: 0x%08lx | Flags: ",
+        "\n[APIC ERROR] CPU %d ESR: 0x%08lx | Flags: ",
         arch_get_core_idx(),
         error_flags
     );
 
-    if (error_flags & APIC_ERR_SEND_CS_ERROR) {
+    if (error_flags & LAPIC_ERR_SEND_CS_ERROR) {
         offset += (size_t)snprintf(buf + offset, buf_size - offset, " [Send Checksum] ");
     }
 
-    if (error_flags & APIC_ERR_RECV_CS_ERROR) {
+    if (error_flags & LAPIC_ERR_RECV_CS_ERROR) {
         offset += (size_t)snprintf(buf + offset, buf_size - offset, " [Recv Checksum] ");
     }
 
-    if (error_flags & APIC_ERR_SEND_ACCEPT_ERROR) {
+    if (error_flags & LAPIC_ERR_SEND_ACCEPT_ERROR) {
         offset += (size_t)snprintf(buf + offset, buf_size - offset, " [Send Accept] ");
     }
 
-    if (error_flags & APIC_ERR_RECV_ACCEPT_ERROR) {
+    if (error_flags & LAPIC_ERR_RECV_ACCEPT_ERROR) {
         offset += (size_t)snprintf(buf + offset, buf_size - offset, " [Recv Accept] ");
     }
 
-    if (error_flags & APIC_ERR_REDIRECTABLE_IPI) {
+    if (error_flags & LAPIC_ERR_REDIRECTABLE_IPI) {
         offset += (size_t)snprintf(buf + offset, buf_size - offset, " [Redirectable IPI] ");
     }
 
-    if (error_flags & APIC_ERR_SEND_ILLEGAL_VECTOR) {
+    if (error_flags & LAPIC_ERR_SEND_ILLEGAL_VECTOR) {
         offset += (size_t)snprintf(buf + offset, buf_size - offset, " [Send Illegal Vec] ");
     }
 
-    if (error_flags & APIC_ERR_RECV_ILLEGAL_VECTOR) {
+    if (error_flags & LAPIC_ERR_RECV_ILLEGAL_VECTOR) {
         offset += (size_t)snprintf(buf + offset, buf_size - offset, " [Recv Illegal Vec] ");
     }
 
-    if (error_flags & APIC_ERR_ILLEGAL_REGISTER) {
+    if (error_flags & LAPIC_ERR_ILLEGAL_REGISTER) {
         offset += (size_t)snprintf(buf + offset, buf_size - offset, " [Illegal Reg Access] ");
     }
 
@@ -142,13 +142,13 @@ void lapic_init(void) {
         x2apic_enabled = true;
     }
 
-    if (!x2apic_enabled && !lapic_virt_base) {
+    if (!x2apic_enabled && !virt_base) {
         uintptr_t phys_base = apic_base_msr & X86_PAGE_ADDRESS_MASK;
+        size_t size         = PAGE_SIZE_SMALL;
 
-        lapic_virt_base =
-            vmm_alloc(&kernel_space, PAGE_SIZE_SMALL, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
+        virt_base = vmm_alloc(&kernel_space, size, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
 
-        if (!lapic_virt_base) {
+        if (!virt_base) {
             errno = ENOMEM;
             PANIC(
                 "LAPIC: failed to allocate MMIO page size=0x%lx errno=%d\n",
@@ -158,7 +158,7 @@ void lapic_init(void) {
         }
 
         pagemap_map_args_t args = {
-            .virt_addr = lapic_virt_base,
+            .virt_addr = virt_base,
             .phys_addr = (void*)phys_base,
             .length    = PAGE_SIZE_SMALL,
             .flags     = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
@@ -172,7 +172,7 @@ void lapic_init(void) {
             PANIC(
                 "LAPIC: failed to map MMIO base=0x%lx -> %p errno=%d\n",
                 phys_base,
-                lapic_virt_base,
+                virt_base,
                 errno
             );
         }
@@ -180,7 +180,7 @@ void lapic_init(void) {
         KLOG_DEBUG(
             "LAPIC: mapped MMIO base=0x%lx -> %p cache=%d flags=0x%x\n",
             phys_base,
-            lapic_virt_base,
+            virt_base,
             CACHE_MMIO,
             VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL
         );
@@ -202,7 +202,6 @@ void lapic_init(void) {
 
     int res = register_interrupt_handler(
         INTERRUPT_APIC_ERROR,
-        1,
         apic_error_handler,
         nullptr,
         IRQ_TRIGGER_EDGE,
@@ -214,11 +213,11 @@ void lapic_init(void) {
         PANIC("LAPIC: failed to register error handler errno=%d\n", err);
     }
 
-    KLOG_DEBUG(
+    KLOG_INFO(
         "LAPIC: initialized mode=%s phys=0x%lx virt=%p tsc_deadline=%d x2apic=%d\n",
         x2apic_enabled ? "x2APIC" : "xAPIC",
         apic_base_msr & X86_PAGE_ADDRESS_MASK,
-        lapic_virt_base,
+        virt_base,
         tsc_deadline_supported,
         x2apic_enabled
     );
@@ -241,7 +240,7 @@ static inline void lapic_wait_for_ipi_send(void) {
     }
 }
 
-void lapic_send_ipi(uint8_t vector, uint32_t dest_lapic_id, lapic_interrupt_delivery_mode_t mode) {
+void lapic_send_ipi(uint8_t vector, uint32_t dest_lapic_id, apic_interrupt_delivery_mode_t mode) {
     uint32_t req = ICR_LEVEL_ASSERT | ICR_DELIVERY_MODE(mode) | ICR_VECTOR(vector);
 
     if (x2apic_enabled) {
@@ -258,7 +257,7 @@ void lapic_send_ipi(uint8_t vector, uint32_t dest_lapic_id, lapic_interrupt_deli
     release_interrupt_lock(&lock);
 }
 
-void lapic_send_self_ipi(uint8_t vector, lapic_interrupt_delivery_mode_t mode) {
+void lapic_send_self_ipi(uint8_t vector, apic_interrupt_delivery_mode_t mode) {
     uint32_t req = ICR_LEVEL_ASSERT | ICR_DELIVERY_MODE(mode) | ICR_VECTOR(vector) | ICR_DST_SELF;
 
     if (x2apic_enabled) {
@@ -274,7 +273,7 @@ void lapic_send_self_ipi(uint8_t vector, lapic_interrupt_delivery_mode_t mode) {
     release_interrupt_lock(&lock);
 }
 
-void lapic_send_broadcast_self_ipi(uint8_t vector, lapic_interrupt_delivery_mode_t mode) {
+void lapic_send_broadcast_self_ipi(uint8_t vector, apic_interrupt_delivery_mode_t mode) {
     uint32_t req = ICR_LEVEL_ASSERT | ICR_DELIVERY_MODE(mode) | ICR_VECTOR(vector) | ICR_DST_ALL;
 
     if (x2apic_enabled) {
@@ -291,7 +290,7 @@ void lapic_send_broadcast_self_ipi(uint8_t vector, lapic_interrupt_delivery_mode
     release_interrupt_lock(&lock);
 }
 
-void lapic_send_broadcast_ipi(uint8_t vector, lapic_interrupt_delivery_mode_t mode) {
+void lapic_send_broadcast_ipi(uint8_t vector, apic_interrupt_delivery_mode_t mode) {
     uint32_t req = ICR_LEVEL_ASSERT | ICR_DELIVERY_MODE(mode) | ICR_VECTOR(vector);
     req |= ICR_DST_ALL_MINUS_SELF;
 

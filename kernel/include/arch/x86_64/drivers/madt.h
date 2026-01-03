@@ -1,3 +1,4 @@
+#include "uacpi/acpi.h"
 #ifndef KERNEL_DRIVERS_MADT_H
 #define KERNEL_DRIVERS_MADT_H 1
 
@@ -9,6 +10,12 @@ extern "C" {
 #endif
 
 void acpi_parse_tables(void);
+
+struct acpi_madt_ioapic* acpi_get_ioapics(void);
+struct acpi_madt_interrupt_source_override* acpi_get_isos(void);
+
+size_t acpi_get_ioapic_count(void);
+size_t acpi_get_iso_count(void);
 
 #ifdef __cplusplus
 }

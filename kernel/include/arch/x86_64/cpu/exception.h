@@ -3,6 +3,21 @@
 
 #include <stdint.h>
 
+#define GSI_NONE 0xffffffff
+
+typedef struct {
+    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
+    uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
+
+    uint64_t vector;
+    uint64_t error_code;
+    uint64_t rip;
+    uint64_t cs;
+    uint64_t rflags;
+    uint64_t rsp;
+    uint64_t ss;
+} interrupt_trapframe_t;
+
 enum {
     EXCEPTION_DIVIDE_BY_ZERO = 0,
     EXCEPTION_DEBUG,
@@ -41,19 +56,6 @@ enum {
     INTERRUPT_APIC_SPURIOUS,
 };
 
-typedef struct {
-    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
-    uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
-
-    uint64_t vector;
-    uint64_t error_code;
-    uint64_t rip;
-    uint64_t cs;
-    uint64_t rflags;
-    uint64_t rsp;
-    uint64_t ss;
-} interrupt_trapframe_t;
-
 typedef void (*isr_handler_t)(interrupt_trapframe_t* tf, void* ctx);
 
 typedef enum {
@@ -66,17 +68,44 @@ typedef enum {
     IRQ_POLARITY_LOW,
 } irq_polarity_t;
 
+typedef enum {
+    DELIVERY_MODE_FIXED = 0,
+    DELIVERY_MODE_LOWEST_PRIO,
+    DELIVERY_MODE_SMI,
+    DELIVERY_MODE_NMI,
+    DELIVERY_MODE_INIT,
+    DELIVERY_MODE_STARTUP,
+    DELIVERY_MODE_EXT_INT,
+} apic_interrupt_delivery_mode_t;
+
+typedef enum {
+    DESTMODE_PHYSICAL = 0,
+    DESTMODE_LOGICAL  = 1,
+} apic_interrupt_dest_mode_t;
+
 void init_isr_registry(void);
+
+int register_external_interrupt_handler(
+    uint8_t vector,
+    isr_handler_t handler,
+    void* ctx,
+    irq_trigger_mode_t trigger,
+    irq_polarity_t polarity,
+    apic_interrupt_delivery_mode_t delivery,
+    apic_interrupt_dest_mode_t dest,
+    uint32_t dest_apic,
+    uint32_t gsi
+);
 
 int register_interrupt_handler(
     uint8_t vector,
-    uint8_t irq_line,
     isr_handler_t handler,
     void* ctx,
     irq_trigger_mode_t trigger,
     irq_polarity_t polarity
 );
 
+void deregister_external_interrupt_handler(uint8_t vector);
 void deregister_interrupt_handler(uint8_t vector);
 
 #endif

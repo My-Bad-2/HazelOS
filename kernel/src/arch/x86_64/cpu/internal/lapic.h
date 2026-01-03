@@ -66,11 +66,11 @@
 #define LVT_MASKED                  (1u << 16)
 
 // Error Status Register (ESR) Bitmasks
-#define APIC_ERR_SEND_CS_ERROR       (1 << 0)  // Send Checksum Error
-#define APIC_ERR_RECV_CS_ERROR       (1 << 1)  // Receive Checksum Error
-#define APIC_ERR_SEND_ACCEPT_ERROR   (1 << 2)  // Send Accept Error
-#define APIC_ERR_RECV_ACCEPT_ERROR   (1 << 3)  // Receive Accept Error
-#define APIC_ERR_REDIRECTABLE_IPI    (1 << 4)  // Redirectable IPI
-#define APIC_ERR_SEND_ILLEGAL_VECTOR (1 << 5)  // Send Illegal Vector
-#define APIC_ERR_RECV_ILLEGAL_VECTOR (1 << 6)  // Receive Illegal Vector
-#define APIC_ERR_ILLEGAL_REGISTER    (1 << 7)  // Illegal Register Address
+#define LAPIC_ERR_SEND_CS_ERROR       (1 << 0)  // Send Checksum Error
+#define LAPIC_ERR_RECV_CS_ERROR       (1 << 1)  // Receive Checksum Error
+#define LAPIC_ERR_SEND_ACCEPT_ERROR   (1 << 2)  // Send Accept Error
+#define LAPIC_ERR_RECV_ACCEPT_ERROR   (1 << 3)  // Receive Accept Error
+#define LAPIC_ERR_REDIRECTABLE_IPI    (1 << 4)  // Redirectable IPI
+#define LAPIC_ERR_SEND_ILLEGAL_VECTOR (1 << 5)  // Send Illegal Vector
+#define LAPIC_ERR_RECV_ILLEGAL_VECTOR (1 << 6)  // Receive Illegal Vector
+#define LAPIC_ERR_ILLEGAL_REGISTER    (1 << 7)  // Illegal Register Address
