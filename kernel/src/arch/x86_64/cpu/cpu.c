@@ -19,7 +19,7 @@ void cpu_read_features(void) {
     leaves[FEATURE_LEAF6]    = call_cpuid(6, 0);
     leaves[FEATURE_LEAF7]    = call_cpuid(7, 0);
     leaves[FEATURE_LEAF8_01] = call_cpuid(0x80000001, 0);
-    leaves[FEATURE_LEAF1]    = call_cpuid(0x80000007, 0);
+    leaves[FEATURE_LEAF8_07] = call_cpuid(0x80000007, 0);
 }
 
 bool cpu_has_feature(struct cpu_features feat) {

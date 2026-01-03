@@ -4,6 +4,7 @@
 #include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
+#include "cpu/lapic.h"
 #include "cpu/pic.h"
 #include "cpu/registers.h"
 #include "libs/log.h"
@@ -16,6 +17,8 @@ void arch_init_cpu_state(per_cpu_data_t* cpu) {
     idt_init();
 
     init_isr_registry();
+
+    lapic_init();
 
     KLOG_DEBUG(
         "SMP: cpu=%u arch state initialized gdt=%p tss=%p\n",

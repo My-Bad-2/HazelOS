@@ -30,6 +30,15 @@ enum {
 
     PLATFORM_INTERRUPT_BASE = 32,
     PLATFORM_INTERRUPT_MAX  = 255,
+
+    INTERRUPT_IPI_GENERIC = 248,
+    INTERRUPT_IPI_RESCHEDULE,
+    INTERRUPT_IPI_INTERRUPT,
+    INTERRUPT_IPI_HALT,
+    INTERRUPT_APIC_TIMER,
+    INTERRUPT_APIC_ERROR,
+    INTERRUPT_APIC_PMI,
+    INTERRUPT_APIC_SPURIOUS,
 };
 
 typedef struct {
@@ -49,7 +58,7 @@ typedef void (*isr_handler_t)(interrupt_trapframe_t* tf, void* ctx);
 
 typedef enum {
     IRQ_TRIGGER_EDGE = 0,
-    IRQ_TRIGGER_LEVEl,
+    IRQ_TRIGGER_LEVEL,
 } irq_trigger_mode_t;
 
 typedef enum {

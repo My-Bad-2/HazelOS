@@ -34,7 +34,7 @@ static void pic_set_trigger_mode(uint8_t irq, irq_trigger_mode_t mode) {
     uint8_t bit   = (irq < 8) ? irq : (irq - 8);
 
     uint8_t val = io_read8(port);
-    if (mode == IRQ_TRIGGER_LEVEl) {
+    if (mode == IRQ_TRIGGER_LEVEL) {
         val |= (1 << bit);
     } else {
         val &= ~(1 << bit);
@@ -105,7 +105,7 @@ void pic_configure_irq(uint8_t irq, bool mask, irq_trigger_mode_t mode) {
     KLOG_DEBUG(
         "PIC: configuring legacy vector mask:%d trigger_mode:%c\n",
         !!(mask),
-        (mode == IRQ_TRIGGER_LEVEl) ? 'L' : 'E'
+        (mode == IRQ_TRIGGER_LEVEL) ? 'L' : 'E'
     );
 }
 

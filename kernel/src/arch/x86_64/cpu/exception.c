@@ -7,6 +7,7 @@
 
 #include "arch.h"
 #include "cpu/idt.h"
+#include "cpu/lapic.h"
 #include "cpu/pic.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
@@ -63,6 +64,11 @@ static const char* const exception_messages[32] = {
 };
 
 static void send_eoi(uint8_t vector) {
+    if (vector >= PLATFORM_INTERRUPT_BASE) {
+        lapic_send_eoi();
+        return;
+    }
+
     if ((vector >= PLATFORM_INTERRUPT_BASE) && (vector <= PLATFORM_INTERRUPT_BASE + 16)) {
         pic_send_eoi(vector);
     }
@@ -306,6 +312,11 @@ static void handle_crash(interrupt_trapframe_t* tf) {
 void x86_exception_handler(interrupt_trapframe_t* tf) {
     ASSERT(isr_registry);
 
+    // Ignore APIC spurious interrupt
+    if (tf->vector == INTERRUPT_APIC_SPURIOUS) {
+        return;
+    }
+
     per_cpu_data_t* cpu = smp_current_core();
 
     isr_handler_t handler = isr_registry[tf->vector].handler;
@@ -323,7 +334,7 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
         handle_crash(tf);
     }
 
-    if (trigger == IRQ_TRIGGER_LEVEl) {
+    if (trigger == IRQ_TRIGGER_LEVEL) {
         send_eoi((uint8_t)tf->vector);
     }
 }
