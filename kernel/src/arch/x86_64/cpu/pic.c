@@ -29,6 +29,7 @@
 #define PIC_ELCR2 0x4d1
 
 static void pic_set_trigger_mode(uint8_t irq, irq_trigger_mode_t mode) {
+    // only works for legacy hardwares
     uint16_t port = (irq < 8) ? PIC_ELCR1 : PIC_ELCR2;
     uint8_t bit   = (irq < 8) ? irq : (irq - 8);
 

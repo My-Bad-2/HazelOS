@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "boot/limine.h"
+
 [[gnu::used]]
 uint8_t bootstrap_stack[KSTACK_SIZE];
 
@@ -64,4 +66,11 @@ volatile struct limine_paging_mode_request paging_mode_request = {
     .max_mode = LIMINE_PAGING_MODE_X86_64_5LVL,
     .min_mode = LIMINE_PAGING_MODE_X86_64_4LVL,
 #endif
+};
+
+[[gnu::section(".requests")]]
+volatile struct limine_rsdp_request rsdp_request = {
+    .id       = LIMINE_RSDP_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
 };
