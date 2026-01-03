@@ -39,7 +39,7 @@ void kernel_log(log_level_t level, const char* file, int line, const char* fmt, 
         PANIC("Assertion failed: %s", #exp); \
     }
 #else
-#define ASSERT(exp) (void);
+#define ASSERT(exp) (void)0
 #endif
 
 #ifdef __cplusplus

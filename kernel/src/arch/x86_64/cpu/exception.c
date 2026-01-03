@@ -282,7 +282,7 @@ static void handle_crash(interrupt_trapframe_t* tf) {
     print_trap_frame(error_buffer, sizeof(error_buffer), tf);
     arch_write(error_buffer);
 
-    PANIC("Unhandled vector (%lu)", tf->error_code);
+    PANIC("Unhandled vector (%lu)", tf->vector);
 }
 
 void x86_exception_handler(interrupt_trapframe_t* tf) {

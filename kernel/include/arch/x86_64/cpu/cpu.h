@@ -108,7 +108,7 @@
 #define FEATURE_AVX512VNNI        (struct cpu_features){.leaf = FEATURE_LEAF7, .reg = 2, .bit = 11}
 #define FEATURE_AVX512BITALG      (struct cpu_features){.leaf = FEATURE_LEAF7, .reg = 2, .bit = 12}
 #define FEATURE_AVX512VPOPCNTDQ   (struct cpu_features){.leaf = FEATURE_LEAF7, .reg = 2, .bit = 14}
-#define FEATURE_LA57              (struct cpu_features){.leaf = FEATURE_LEAF7, .reg = 2, .bit = 17}
+#define FEATURE_LA57              (struct cpu_features){.leaf = FEATURE_LEAF7, .reg = 2, .bit = 16}
 #define FEATURE_RDPID             (struct cpu_features){.leaf = FEATURE_LEAF7, .reg = 2, .bit = 22}
 #define FEATURE_AVX512_4VNNIW     (struct cpu_features){.leaf = FEATURE_LEAF7, .reg = 3, .bit = 2}
 #define FEATURE_AVX512_4FMAPS     (struct cpu_features){.leaf = FEATURE_LEAF7, .reg = 3, .bit = 3}

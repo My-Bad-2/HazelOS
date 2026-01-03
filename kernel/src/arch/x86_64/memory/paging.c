@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "compiler.h"
 #include "cpu/cpu.h"
 #include "cpu/registers.h"
 #include "libs/log.h"
@@ -26,7 +27,7 @@ typedef struct {
     uint64_t entries[MAX_PAGE_TABLE_ENTRIES];
 } pagetable_t;
 
-static inline int virt_addr_to_idx(uintptr_t virt_addr, int level) {
+[[gnu::always_inline]] static inline int virt_addr_to_idx(uintptr_t virt_addr, int level) {
     int shift = 12 + (level - 1) * 9;
     return (int)((virt_addr >> shift) & (MAX_PAGE_TABLE_ENTRIES - 1));
 }
@@ -148,50 +149,170 @@ size_t convert_generic_flags(uint32_t flags, cache_type_t cache, size_t page_siz
 static uint64_t*
 get_page_table_entry(pagemap_t* map, uintptr_t virt_addr, int target_lvl, bool allocate) {
     ASSERT(map && virt_addr);
-    uintptr_t curr_table_phys = map->phys_root;
-    pagetable_t* table        = (pagetable_t*)to_higher_half(curr_table_phys);
-    int idx                   = 0;
+    uintptr_t curr_phys = map->phys_root;
+    pagetable_t* table  = (pagetable_t*)to_higher_half(curr_phys);
 
-    for (int l = paging_max_levels; l > target_lvl; --l) {
-        idx = virt_addr_to_idx(virt_addr, l);
+    uint64_t entry = 0;
 
-        uintptr_t entry = table->entries[idx];
+    int i5 = virt_addr_to_idx(virt_addr, 5);
+    int i4 = virt_addr_to_idx(virt_addr, 4);
+    int i3 = virt_addr_to_idx(virt_addr, 3);
+    int i2 = virt_addr_to_idx(virt_addr, 2);
+    int i1 = virt_addr_to_idx(virt_addr, 1);
 
-        if (entry & X86_PAGE_FLAG_HUGE) {
-            // Refuse to split an existing huge-page mapping implicitly;
-            // callers must explicitly tear it down if they want finer granularity.
-            errno = EBUSY;
-            KLOG_WARN("Paging: refusing to split huge mapping virt=0x%lx level=%d\n", virt_addr, l);
-            return nullptr;
+    if (paging_max_levels == 5) {
+        if (unlikely(target_lvl == 5)) {
+            return &table->entries[i5];
         }
+
+        entry = table->entries[i5];
 
         if (!(entry & X86_PAGE_FLAG_PRESENT)) {
             if (!allocate) {
                 return nullptr;
             }
 
-            void* table_phys = pmm_alloc(1);
+            void* new_table = pmm_alloc(1);
 
-            if (!table_phys) {
+            if (!new_table) {
                 errno = ENOMEM;
-                KLOG_ERROR("Paging: failed to allocate page table at level=%d\n", l);
+                KLOG_ERROR("Paging: Out of Memory at PML5\n");
                 return nullptr;
             }
 
-            pagetable_t* new_table = (pagetable_t*)to_higher_half((uintptr_t)table_phys);
-            memset(new_table, 0, sizeof(pagetable_t));
+            uintptr_t new_phys = (uintptr_t)new_table;
 
-            uint64_t new_entry  = (uintptr_t)table_phys | X86_NEW_PAGE_TABLE_FLAGS;
-            table->entries[idx] = new_entry;
-            entry               = new_entry;
+            memset((void*)to_higher_half(new_phys), 0, PAGE_SIZE_SMALL);
+
+            entry              = new_phys | X86_NEW_PAGE_TABLE_FLAGS;
+            table->entries[i5] = entry;
         }
 
-        curr_table_phys = entry & X86_PAGE_ADDRESS_MASK;
-        table           = (pagetable_t*)to_higher_half(curr_table_phys);
+        if (unlikely(entry & X86_PAGE_FLAG_HUGE)) {
+            errno = EBUSY;
+            KLOG_WARN("Paging: refusing to split huge mapping at PML4\n");
+            return nullptr;
+        }
+
+        curr_phys = entry & X86_PAGE_ADDRESS_MASK;
+        table     = (pagetable_t*)to_higher_half(curr_phys);
     }
 
-    idx = virt_addr_to_idx(virt_addr, target_lvl);
-    return &table->entries[idx];
+    if (target_lvl == 4) {
+        return &table->entries[i4];
+    }
+
+    if (unlikely(target_lvl == 5)) {
+        return &table->entries[i4];
+    }
+
+    entry = table->entries[i4];
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        if (!allocate) {
+            return nullptr;
+        }
+
+        void* new_table = pmm_alloc(1);
+
+        if (!new_table) {
+            errno = ENOMEM;
+            KLOG_ERROR("Paging: Out of Memory at PML4\n");
+            return nullptr;
+        }
+
+        uintptr_t new_phys = (uintptr_t)new_table;
+
+        memset((void*)to_higher_half(new_phys), 0, PAGE_SIZE_SMALL);
+
+        entry              = new_phys | X86_NEW_PAGE_TABLE_FLAGS;
+        table->entries[i4] = entry;
+    }
+
+    if (unlikely(entry & X86_PAGE_FLAG_HUGE)) {
+        errno = EBUSY;
+        KLOG_WARN("Paging: refusing to split huge mapping at PML4\n");
+        return nullptr;
+    }
+
+    // Advance to PML3
+    curr_phys = entry & X86_PAGE_ADDRESS_MASK;
+    table     = (pagetable_t*)to_higher_half(curr_phys);
+
+    if (target_lvl == 3) {
+        return &table->entries[i3];
+    }
+
+    entry = table->entries[i3];
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        if (!allocate) {
+            return nullptr;
+        }
+
+        void* new_table = pmm_alloc(1);
+
+        if (!new_table) {
+            errno = ENOMEM;
+            KLOG_ERROR("Paging: Out of Memory at PML3\n");
+            return nullptr;
+        }
+
+        uintptr_t new_phys = (uintptr_t)new_table;
+
+        memset((void*)to_higher_half(new_phys), 0, PAGE_SIZE_SMALL);
+
+        entry              = new_phys | X86_NEW_PAGE_TABLE_FLAGS;
+        table->entries[i3] = entry;
+    }
+
+    if (unlikely(entry & X86_PAGE_FLAG_HUGE)) {
+        errno = EBUSY;
+        KLOG_WARN("Paging: refusing to split huge mapping at PML3\n");
+        return nullptr;
+    }
+
+    // Advance to PML2
+    curr_phys = entry & X86_PAGE_ADDRESS_MASK;
+    table     = (pagetable_t*)to_higher_half(curr_phys);
+
+    if (target_lvl == 2) {
+        return &table->entries[i2];
+    }
+
+    entry = table->entries[i2];
+
+    if (!(entry & X86_PAGE_FLAG_PRESENT)) {
+        if (!allocate) {
+            return nullptr;
+        }
+
+        void* new_table = pmm_alloc(1);
+
+        if (!new_table) {
+            errno = ENOMEM;
+            KLOG_ERROR("Paging: Out of Memory at PML2\n");
+            return nullptr;
+        }
+
+        uintptr_t new_phys = (uintptr_t)new_table;
+
+        memset((void*)to_higher_half(new_phys), 0, PAGE_SIZE_SMALL);
+
+        entry              = new_phys | X86_NEW_PAGE_TABLE_FLAGS;
+        table->entries[i2] = entry;
+    }
+
+    if (unlikely(entry & X86_PAGE_FLAG_HUGE)) {
+        errno = EBUSY;
+        KLOG_WARN("Paging: refusing to split huge mapping at PML2\n");
+        return nullptr;
+    }
+
+    // Advance to PML1
+    curr_phys = entry & X86_PAGE_ADDRESS_MASK;
+    table     = (pagetable_t*)to_higher_half(curr_phys);
+    return &table->entries[i1];
 }
 
 bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
