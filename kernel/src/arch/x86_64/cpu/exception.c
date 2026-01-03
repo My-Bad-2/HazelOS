@@ -1,11 +1,10 @@
-#include "cpu/exception.h"
-
 #include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 
 #include "arch.h"
+#include "cpu/exception.h"
 #include "cpu/idt.h"
 #include "cpu/ioapic.h"
 #include "cpu/lapic.h"
@@ -25,8 +24,7 @@ typedef struct {
 
     irq_trigger_mode_t trigger;
     irq_polarity_t polarity;
-    apic_interrupt_delivery_mode_t delivery;
-    apic_interrupt_dest_mode_t dest;
+
     uint32_t dest_apic;
     uint32_t gsi;
 } isr_entry_t;
@@ -93,10 +91,10 @@ static void configure_irq(
 
     if (ioapic) {
         ioapic_configure_irq(gsi, trigger, polarity, delivery, dest, dest_apic, vector, mask);
+        return;
     }
 
     if ((vector >= PLATFORM_INTERRUPT_BASE) && (vector <= PLATFORM_INTERRUPT_BASE + 16)) {
-        (void)polarity;
         pic_configure_irq(vector, mask, trigger);
     }
 }
@@ -157,8 +155,6 @@ int register_external_interrupt_handler(
     isr_registry[vector].ctx       = ctx;
     isr_registry[vector].trigger   = trigger;
     isr_registry[vector].polarity  = polarity;
-    isr_registry[vector].delivery  = delivery;
-    isr_registry[vector].dest      = dest;
     isr_registry[vector].dest_apic = dest_apic;
     isr_registry[vector].gsi       = gsi;
 
@@ -238,14 +234,20 @@ void deregister_external_interrupt_handler(uint8_t vector) {
     irq_trigger_mode_t trigger = isr_registry[vector].trigger;
     irq_polarity_t polarity    = isr_registry[vector].polarity;
 
-    apic_interrupt_dest_mode_t dest         = isr_registry[vector].dest;
-    apic_interrupt_delivery_mode_t delivery = isr_registry[vector].delivery;
-
     uint32_t dest_apic = isr_registry[vector].dest_apic;
     uint32_t gsi       = isr_registry[vector].gsi;
     bool mask          = true;
 
-    configure_irq(vector, trigger, polarity, delivery, dest, dest_apic, mask, gsi);
+    configure_irq(
+        vector,
+        trigger,
+        polarity,
+        DELIVERY_MODE_FIXED,
+        DESTMODE_PHYSICAL,
+        dest_apic,
+        mask,
+        gsi
+    );
 
     KLOG_DEBUG("ISR: deregistered vector=%u\n", vector);
 }
