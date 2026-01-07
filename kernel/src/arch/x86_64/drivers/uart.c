@@ -4,7 +4,8 @@
 
 #include "arch.h"
 #include "cpu/io.h"
-#include "internals/uart.h"
+
+#include "internal/uart.h"
 
 static void uart_write(uint16_t port, uint16_t reg, uint8_t val) {
     io_write8(port + reg, val);

@@ -1,5 +1,6 @@
 #include "arch.h"
 #include "cpu/smp.h"
+#include "drivers/drivers.h"
 #include "libs/log.h"
 #include "memory/memory.h"
 #include "tests/runner.h"
@@ -9,6 +10,8 @@ void kmain(void) {
 
     memory_init();
     smp_init();
+
+    drivers_init();
 
 #if KERNEL_TEST
     kernel_run_tests();

@@ -46,6 +46,8 @@ enum {
     PLATFORM_INTERRUPT_BASE = 32,
     PLATFORM_INTERRUPT_MAX  = 255,
 
+    IRQ_TIMER = 32,
+
     INTERRUPT_IPI_GENERIC = 248,
     INTERRUPT_IPI_RESCHEDULE,
     INTERRUPT_IPI_INTERRUPT,
@@ -105,7 +107,17 @@ int register_interrupt_handler(
     irq_polarity_t polarity
 );
 
+int register_external_irq_handler(
+    uint8_t vector,
+    isr_handler_t handler,
+    void* ctx,
+    apic_interrupt_delivery_mode_t delivery,
+    apic_interrupt_dest_mode_t dest,
+    uint32_t dest_apic
+);
+
 void deregister_external_interrupt_handler(uint8_t vector);
 void deregister_interrupt_handler(uint8_t vector);
+void deregister_external_irq_handler(uint8_t vector);
 
 #endif

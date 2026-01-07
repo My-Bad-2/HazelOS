@@ -5,6 +5,7 @@
 #include <uacpi/acpi.h>
 
 #include "cpu/exception.h"
+#include "cpu/io.h"
 #include "drivers/madt.h"
 #include "libs/log.h"
 #include "libs/math.h"
@@ -19,6 +20,12 @@
 #include "internal/ioapic.h"
 
 #define NUM_IRQS 16
+
+#define PORT_ADDRESS 0x22
+#define PORT_DATA    0x23
+
+#define IMCR_PORT_ADDRESS      0x70
+#define IMCR_PASS_THROUGH_APIC 0x01
 
 typedef struct {
     struct acpi_madt_ioapic desc;
@@ -39,6 +46,12 @@ static struct iso_override {
 } overrides[NUM_IRQS];
 
 static interrupt_lock_t lock;
+
+// https://pdos.csail.mit.edu/6.828/2008/readings/ia32/MPspec.pdf Pg 3-8
+static inline void imcr_connect_to_ioapic(void) {
+    io_write8(PORT_ADDRESS, IMCR_PORT_ADDRESS);
+    io_write8(PORT_DATA, IMCR_PASS_THROUGH_APIC);
+}
 
 static void map_ioapic_mmio(ioapic_t* ioapic, size_t index) {
     uintptr_t phys_base = align_down((uintptr_t)ioapic->desc.address, PAGE_SIZE_SMALL);
@@ -277,6 +290,8 @@ void ioapic_init(void) {
     struct acpi_madt_interrupt_source_override* isos = acpi_get_isos();
     size_t iso_count                                 = acpi_get_iso_count();
 
+    imcr_connect_to_ioapic();
+
     for (size_t i = 0; i < ioapic_count; ++i) {
         ioapics[i].desc = descs[i];
         map_ioapic_mmio(&ioapics[i], i);
@@ -393,6 +408,7 @@ void ioapic_configure_irq(
     val |= IOAPIC_RTE_DELIVERY_MODE(delivery);
     val |= IOAPIC_RTE_DST_MODE(dest);
     val |= IOAPIC_RTE_DST(dest_apic);
+    val |= IOAPIC_RTE_VECTOR(vector);
 
     if (mask) {
         val |= IOAPIC_RTE_MASKED;
@@ -449,7 +465,6 @@ void ioapic_configure_legacy_irq(
     irq_polarity_t polarity;
 
     resolve_legacy_irq(irq, &gsi, &trigger, &polarity);
-
     ioapic_configure_irq(gsi, trigger, polarity, delivery, dest, dest_lapic, vector, mask);
 }
 

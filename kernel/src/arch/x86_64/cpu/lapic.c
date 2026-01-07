@@ -193,6 +193,7 @@ void lapic_init(void) {
 
     uint32_t svr = SVR_SPURIOUS_VECTOR(INTERRUPT_APIC_SPURIOUS) | SVR_APIC_ENABLE;
     lapic_write(LAPIC_REG_SPURIOUS_IRQ, svr);
+    lapic_write(LAPIC_REG_TASK_PRIORITY, 0);
 
     lapic_error_init();
     lapic_pmi_init();

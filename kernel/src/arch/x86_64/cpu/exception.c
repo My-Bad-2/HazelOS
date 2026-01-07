@@ -1,10 +1,11 @@
+#include "cpu/exception.h"
+
 #include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 
 #include "arch.h"
-#include "cpu/exception.h"
 #include "cpu/idt.h"
 #include "cpu/ioapic.h"
 #include "cpu/lapic.h"
@@ -99,6 +100,32 @@ static void configure_irq(
     }
 }
 
+static void configure_legacy_irq(
+    uint8_t vector,
+    apic_interrupt_delivery_mode_t delivery,
+    apic_interrupt_dest_mode_t dest,
+    uint32_t dest_apic,
+    bool mask
+) {
+    bool ioapic = ioapic_is_initialized();
+
+    if (ioapic) {
+        ioapic_configure_legacy_irq(
+            vector - PLATFORM_INTERRUPT_BASE,
+            delivery,
+            dest,
+            dest_apic,
+            vector,
+            mask
+        );
+        return;
+    }
+
+    if ((vector >= PLATFORM_INTERRUPT_BASE) && (vector <= PLATFORM_INTERRUPT_BASE + 16)) {
+        pic_configure_irq(vector, mask, IRQ_TRIGGER_EDGE);
+    }
+}
+
 void init_isr_registry(void) {
     if (isr_registry != nullptr) {
         KLOG_DEBUG("ISR: registry already initialized entries=%d\n", IDT_ENTRY_COUNT);
@@ -172,6 +199,41 @@ int register_external_interrupt_handler(
     if (gsi != GSI_NONE) {
         configure_irq(vector, trigger, polarity, delivery, dest, dest_apic, mask, gsi);
     }
+
+    return 0;
+}
+
+int register_external_irq_handler(
+    uint8_t vector,
+    isr_handler_t handler,
+    void* ctx,
+    apic_interrupt_delivery_mode_t delivery,
+    apic_interrupt_dest_mode_t dest,
+    uint32_t dest_apic
+) {
+    ASSERT(isr_registry);
+
+    if (vector > (IDT_ENTRY_COUNT - 1)) {
+        int err = errno = EINVAL;
+        KLOG_WARN("ISR: invalid vector=%u errno=%d\n", vector, err);
+        return -1;
+    }
+
+    if (isr_registry[vector].ctx) {
+        // In a PCI shared interrupt system, append to a linked list here
+        int err = errno = EBUSY;
+        KLOG_WARN("ISR: vector=%u already registered errno=%d\n", vector, err);
+        return -1;
+    }
+
+    isr_registry[vector].handler = handler;
+    isr_registry[vector].ctx     = ctx;
+
+    bool mask = false;
+
+    configure_legacy_irq(vector, delivery, dest, dest_apic, mask);
+
+    KLOG_DEBUG("ISR: registered vector=%u handler=%p ctx=%p\n", vector, handler, ctx);
 
     return 0;
 }
@@ -267,6 +329,31 @@ void deregister_interrupt_handler(uint8_t vector) {
 
     isr_registry[vector].handler = nullptr;
     isr_registry[vector].ctx     = nullptr;
+
+    KLOG_DEBUG("ISR: deregistered vector=%u\n", vector);
+}
+
+void deregister_external_irq_handler(uint8_t vector) {
+    if (vector > (IDT_ENTRY_COUNT - 1)) {
+        int err = errno = EINVAL;
+        KLOG_WARN("ISR: invalid vector=%u errno=%d\n", vector, err);
+        return;
+    }
+
+    if (!isr_registry[vector].handler) {
+        int err = errno = ENOENT;
+        KLOG_WARN("ISR: no handler to deregister vector=%u errno=%d\n", vector, err);
+        return;
+    }
+
+    isr_registry[vector].handler = nullptr;
+    isr_registry[vector].ctx     = nullptr;
+
+    uint32_t dest_apic = isr_registry[vector].dest_apic;
+    uint32_t gsi       = isr_registry[vector].gsi;
+    bool mask          = true;
+
+    configure_legacy_irq(vector, DELIVERY_MODE_FIXED, DESTMODE_PHYSICAL, dest_apic, mask);
 
     KLOG_DEBUG("ISR: deregistered vector=%u\n", vector);
 }
