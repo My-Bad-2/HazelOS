@@ -122,7 +122,8 @@
 #define FEATURE_PDPE1GB (struct cpu_features){.leaf = FEATURE_LEAF8_01, .reg = 3, .bit = 26}
 #define FEATURE_RDTSCP  (struct cpu_features){.leaf = FEATURE_LEAF8_01, .reg = 3, .bit = 27}
 
-#define FEATURE_CPB (struct cpu_features){.leaf = FEATURE_LEAF8_07, .reg = 3, .bit = 9}
+#define FEATURE_TSC_INVARIANT (struct cpu_features){.leaf = FEATURE_LEAF8_07, .reg = 3, .bit = 8}
+#define FEATURE_CPB           (struct cpu_features){.leaf = FEATURE_LEAF8_07, .reg = 3, .bit = 9}
 
 typedef struct {
     uint32_t eax;

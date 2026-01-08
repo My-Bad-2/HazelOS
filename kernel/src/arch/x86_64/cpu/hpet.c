@@ -1,7 +1,6 @@
 #include "drivers/hpet.h"
 
 #include <errno.h>
-#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdint.h>
 #include <uacpi/acpi.h>
 #include <uacpi/tables.h>

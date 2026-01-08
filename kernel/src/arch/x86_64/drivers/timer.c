@@ -7,6 +7,7 @@
 #include "drivers/arch_timer.h"
 #include "drivers/hpet.h"
 #include "drivers/pit.h"
+#include "drivers/tsc.h"
 #include "libs/log.h"
 
 static clock_source_t source;
@@ -17,6 +18,8 @@ static const char* timer_clock_source_name(clock_source_t src) {
             return "PIT";
         case CLOCK_HPET:
             return "HPET";
+        case CLOCK_TSC:
+            return "TSC";
         default:
             return "UNKNOWN";
     }
@@ -30,6 +33,7 @@ static void timer_handler(interrupt_trapframe_t*, void*) {
             pit_tick();
             break;
         case CLOCK_HPET:
+        case CLOCK_TSC:
             break;
         default:
             if (!warned) {
@@ -54,6 +58,9 @@ void timer_mdelay(size_t ms) {
         case CLOCK_HPET:
             hpet_mdelay(ms);
             break;
+        case CLOCK_TSC:
+            tsc_mdelay(ms);
+            break;
         default:
             errno = ENODEV;
             KLOG_WARN("TIMER: mdelay requested before clock source was initialized\n");
@@ -69,6 +76,9 @@ void timer_udelay(size_t us) {
         case CLOCK_HPET:
             hpet_udelay(us);
             break;
+        case CLOCK_TSC:
+            tsc_udelay(us);
+            break;
         default:
             errno = ENODEV;
             KLOG_WARN("TIMER: udelay requested before clock source was initialized\n");
@@ -79,6 +89,7 @@ void timer_udelay(size_t us) {
 void timer_init(void) {
     pit_init();
     hpet_init();
+    tsc_init();
 
     KLOG_INFO("TIMER: active source=%s\n", timer_clock_source_name(source));
 

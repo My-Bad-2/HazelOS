@@ -205,7 +205,7 @@ set(
 )
 
 if(${CMAKE_HOST_SYSTEM_NAME} STREQUAL "Linux")
-	set(QEMU_HARDWARE_ACCEL_FLAGS -enable-kvm -cpu max)
+	set(QEMU_HARDWARE_ACCEL_FLAGS -enable-kvm -cpu max,+invtsc)
 elseif(${CMAKE_HOST_SYSTEM_NAME} STREQUAL "Darwin")
 	set(QEMU_HARDWARE_ACCEL_FLAGS -accel hvf -cpu host)
 elseif(${CMAKE_HOST_SYSTEM} STREQUAL "Windows")

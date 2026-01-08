@@ -1,7 +1,5 @@
 #include "cpu/cpu.h"
 
-#include <cpuid.h>
-
 #include "libs/log.h"
 
 static cpuid_registers_t leaves[FEATURE_COUNT];
