@@ -1,5 +1,6 @@
 #include "drivers/pit.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 
@@ -7,22 +8,28 @@
 #include "cpu/io.h"
 #include "drivers/arch_timer.h"
 #include "drivers/timer.h"
+#include "libs/log.h"
 #include "libs/spinlock.h"
 
 #include "internal/pit.h"
 
 static atomic_size_t global_ticks    = 0;
 static atomic_uint current_frequency = 0;
+static bool warned_zero_freq         = false;
 
 static void set_pit_frequency(uint32_t freq) {
     if (freq == 0) {
+        errno = EINVAL;
+        KLOG_WARN("PIT: requested zero frequency, defaulting to 1000 Hz\n");
         freq = 1000;
     }
 
     uint32_t divisor = PIT_BASE_FREQ / freq;
 
-    if (divisor > UINT16_MAX) {
-        divisor = 0;
+    if (divisor == 0 || divisor > UINT16_MAX) {
+        errno = EINVAL;
+        KLOG_WARN("PIT: invalid divisor for freq=%u Hz\n", freq);
+        return;
     }
 
     atomic_store_explicit(&current_frequency, freq, memory_order_seq_cst);
@@ -34,6 +41,8 @@ static void set_pit_frequency(uint32_t freq) {
     io_write8(PIT_PORT_CH0, (uint8_t)(divisor & 0xff));
     io_wait();
     io_write8(PIT_PORT_CH0, (uint8_t)((divisor >> 8) & 0xff));
+
+    KLOG_DEBUG("PIT: frequency set to %u Hz (div=%u)\n", freq, divisor);
 }
 
 static uint16_t pit_read_hardware_count(void) {
@@ -66,12 +75,25 @@ void pit_init(void) {
     const uint32_t freq = 1000;
     set_pit_frequency(freq);
     timer_set_clock_source(CLOCK_PIT);
+    KLOG_INFO("PIT: initialized at %u Hz\n", freq);
 }
 
 void pit_mdelay(size_t ms) {
     size_t start_ticks = pit_get_ticks();
 
-    uint32_t freq          = atomic_load_explicit(&current_frequency, memory_order_seq_cst);
+    uint32_t freq = atomic_load_explicit(&current_frequency, memory_order_seq_cst);
+
+    if (freq == 0) {
+        errno = ENODEV;
+
+        if (!warned_zero_freq) {
+            warned_zero_freq = true;
+            KLOG_WARN("PIT: mdelay requested while frequency is zero\n");
+        }
+
+        return;
+    }
+
     uint64_t ticks_to_wait = (ms * freq) / 1000;
     uint64_t target        = start_ticks + ticks_to_wait;
 
@@ -111,17 +133,26 @@ void pit_udelay(size_t us) {
 
 void pit_configure_timer(timer_type_t type, uint32_t freq_hz) {
     if (freq_hz == 0) {
+        errno = EINVAL;
+        KLOG_WARN("PIT: requested zero Hz, defaulting to 1000 Hz\n");
         freq_hz = 1000;
     }
 
     if (freq_hz > PIT_BASE_FREQ) {
+        KLOG_WARN(
+            "PIT: requested freq=%u Hz too high, clamping to %u Hz\n",
+            freq_hz,
+            PIT_BASE_FREQ
+        );
         freq_hz = PIT_BASE_FREQ;
     }
 
     uint32_t divisor = PIT_BASE_FREQ / freq_hz;
 
-    if (divisor > UINT16_MAX) {
-        divisor = 0;
+    if (divisor == 0 || divisor > UINT16_MAX) {
+        errno = EINVAL;
+        KLOG_WARN("PIT: invalid divisor for freq=%u Hz\n", freq_hz);
+        return;
     }
 
     atomic_store_explicit(&current_frequency, freq_hz, memory_order_seq_cst);
@@ -146,4 +177,11 @@ void pit_configure_timer(timer_type_t type, uint32_t freq_hz) {
     io_write8(PIT_PORT_CH0, (divisor >> 8) & 0xff);
 
     release_irq_lock(&lock);
+
+    KLOG_DEBUG(
+        "PIT: configured %s timer freq=%u Hz (div=%u)\n",
+        (type == TIMER_ONESHOT) ? "one-shot" : "periodic",
+        freq_hz,
+        divisor
+    );
 }

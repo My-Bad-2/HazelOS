@@ -7,7 +7,7 @@ extern "C" {
 
 typedef enum {
     CLOCK_PIT,
-    // CLOCK_HPET,
+    CLOCK_HPET,
     // CLOCK_LAPIC,
 } clock_source_t;
 

@@ -10,7 +10,6 @@
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 #include "memory/vmm.h"
-#include "uacpi/types.h"
 
 uacpi_status uacpi_kernel_get_rsdp(uacpi_phys_addr* out_rsdp_address) {
     if (!rsdp_request.response) {

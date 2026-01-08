@@ -128,7 +128,8 @@ static void configure_legacy_irq(
 
 void init_isr_registry(void) {
     if (isr_registry != nullptr) {
-        KLOG_DEBUG("ISR: registry already initialized entries=%d\n", IDT_ENTRY_COUNT);
+        errno = EAGAIN;
+        KLOG_WARN("ISR: registry already initialized entries=%d\n", IDT_ENTRY_COUNT);
         return;
     }
 
