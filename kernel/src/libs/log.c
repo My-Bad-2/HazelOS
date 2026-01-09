@@ -60,7 +60,7 @@ static void get_level_meta(log_level_t level, const char** color, const char** l
     }
 }
 
-void kernel_log(log_level_t level, const char* file, int line, const char* fmt, ...) {
+void kernel_log(log_level_t level, const char* fmt, ...) {
     if (level < LOG_LEVEL_THRESHOLD) {
         return;
     }
@@ -71,7 +71,7 @@ void kernel_log(log_level_t level, const char* file, int line, const char* fmt, 
 
     get_level_meta(level, &color, &label);
 
-    int offset = snprintf(buf, LOG_BUF_SIZE, "%s[%s] %s:%d: ", color, label, file, line);
+    int offset = snprintf(buf, LOG_BUF_SIZE, "%s[%s]: ", color, label);
 
     // Safety check for buffer overflow
     if (offset < 0) {

@@ -20,16 +20,16 @@ typedef enum {
 #define LOG_LEVEL_THRESHOLD LOG_TRACE
 #endif
 
-void kernel_log(log_level_t level, const char* file, int line, const char* fmt, ...);
+void kernel_log(log_level_t level, const char* fmt, ...);
 [[noreturn]] void kernel_panic(const char* file, int line, const char* fmt, ...);
 
-#define KLOG_TRACE(fmt, ...)   kernel_log(LOG_TRACE, __FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
-#define KLOG_DEBUG(fmt, ...)   kernel_log(LOG_DEBUG, __FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
-#define KLOG_VERBOSE(fmt, ...) kernel_log(LOG_VERBOSE, __FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
-#define KLOG_INFO(fmt, ...)    kernel_log(LOG_INFO, __FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
-#define KLOG_WARN(fmt, ...)    kernel_log(LOG_WARN, __FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
-#define KLOG_ERROR(fmt, ...)   kernel_log(LOG_ERROR, __FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
-#define KLOG_FATAL(fmt, ...)   kernel_log(LOG_FATAL, __FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
+#define KLOG_TRACE(fmt, ...)   kernel_log(LOG_TRACE, fmt, ##__VA_ARGS__)
+#define KLOG_DEBUG(fmt, ...)   kernel_log(LOG_DEBUG, fmt, ##__VA_ARGS__)
+#define KLOG_VERBOSE(fmt, ...) kernel_log(LOG_VERBOSE, fmt, ##__VA_ARGS__)
+#define KLOG_INFO(fmt, ...)    kernel_log(LOG_INFO, fmt, ##__VA_ARGS__)
+#define KLOG_WARN(fmt, ...)    kernel_log(LOG_WARN, fmt, ##__VA_ARGS__)
+#define KLOG_ERROR(fmt, ...)   kernel_log(LOG_ERROR, fmt, ##__VA_ARGS__)
+#define KLOG_FATAL(fmt, ...)   kernel_log(LOG_FATAL, fmt, ##__VA_ARGS__)
 
 #define PANIC(fmt, ...) kernel_panic(__FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
 

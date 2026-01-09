@@ -14,7 +14,12 @@ void kmain(void) {
     drivers_init();
 
 #if KERNEL_TEST
-    kernel_run_tests();
+    // Enable when we've introduced new tests
+    const bool run_tests = false;
+
+    if (run_tests) {
+        kernel_run_tests();
+    }
 #endif
     KLOG_INFO("Hello, World!\n");
 
