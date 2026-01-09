@@ -36,3 +36,7 @@ bool cpu_has_feature(struct cpu_features feat) {
             PANIC("Unknown CPUID register %d", feat.reg);
     }
 }
+
+cpuid_registers_t cpu_read_value(uint32_t leaf) {
+    return call_cpuid(leaf, 0);
+}

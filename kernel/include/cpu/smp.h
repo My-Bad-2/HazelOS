@@ -30,6 +30,9 @@ typedef struct per_cpu_data {
 
 void smp_init(void);
 
+void arch_init_cpu_state(per_cpu_data_t* cpu);
+void arch_commit_cpu_state(per_cpu_data_t* cpu);
+
 per_cpu_data_t* smp_current_core(void);
 uint32_t smp_current_core_idx(void);
 

@@ -19,9 +19,6 @@ extern uint8_t bootstrap_stack[];
 static per_cpu_data_t* cpu_datas = nullptr;
 static bool initialized          = false;
 
-extern void arch_init_cpu_state(per_cpu_data_t* cpu);
-extern void arch_commit_cpu_state(per_cpu_data_t* cpu);
-
 static void init_cpu_state(per_cpu_data_t* cpu) {
     ASSERT(cpu);
     void* stack = nullptr;

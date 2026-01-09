@@ -74,3 +74,6 @@
 #define LAPIC_ERR_SEND_ILLEGAL_VECTOR (1 << 5)  // Send Illegal Vector
 #define LAPIC_ERR_RECV_ILLEGAL_VECTOR (1 << 6)  // Receive Illegal Vector
 #define LAPIC_ERR_ILLEGAL_REGISTER    (1 << 7)  // Illegal Register Address
+
+#define TIMER_DIV_1  0xb  // 1011b (Divide by 1) - Use carefully
+#define TIMER_DIV_16 0x3  // 0011b (Divide by 16)

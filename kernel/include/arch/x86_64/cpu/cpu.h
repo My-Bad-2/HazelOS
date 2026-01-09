@@ -125,6 +125,8 @@
 #define FEATURE_TSC_INVARIANT (struct cpu_features){.leaf = FEATURE_LEAF8_07, .reg = 3, .bit = 8}
 #define FEATURE_CPB           (struct cpu_features){.leaf = FEATURE_LEAF8_07, .reg = 3, .bit = 9}
 
+#define CPUID_TIME_INFO 0x15
+
 typedef struct {
     uint32_t eax;
     uint32_t ebx;
@@ -149,5 +151,7 @@ struct cpu_features {
 
 void cpu_read_features(void);
 bool cpu_has_feature(struct cpu_features feat);
+
+cpuid_registers_t cpu_read_value(uint32_t leaf);
 
 #endif

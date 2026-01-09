@@ -1,3 +1,4 @@
+#include "drivers/arch_timer.h"
 #ifndef KERNEL_CPU_LAPIC_H
 #define KERNEL_CPU_LAPIC_H 1
 
@@ -19,6 +20,13 @@ void lapic_send_broadcast_ipi(uint8_t vector, apic_interrupt_delivery_mode_t mod
 void lapic_send_broadcast_self_ipi(uint8_t vector, apic_interrupt_delivery_mode_t mode);
 
 void lapic_send_eoi(void);
+
+void lapic_timer_calibrate(void);
+void lapic_timer_mask(void);
+void lapic_timer_unmask(void);
+void lapic_timer_stop(void);
+
+void lapic_configure_timer(timer_mode_t mode, uint8_t vector, uint64_t count);
 
 #ifdef __cplusplus
 }

@@ -13,6 +13,9 @@ extern "C" {
 void timer_set_clock_source(clock_source_t source);
 void timer_mdelay(size_t ms);
 void timer_udelay(size_t us);
+void timer_configure(timer_mode_t mode, uint8_t vector, size_t count);
+
+void timer_tick(void);
 void timer_init(void);
 
 #ifdef __cplusplus

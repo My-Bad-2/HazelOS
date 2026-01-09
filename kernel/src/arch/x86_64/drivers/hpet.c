@@ -59,10 +59,9 @@ typedef struct {
     hpet_timer_register_t timers[];
 } hpet_register_t;
 
-static hpet_register_t* hpet_regs  = nullptr;
-static uint64_t clock_period_fs    = 0;
-static uint64_t timers_bitmap      = 0;
-static uint64_t num_timers         = 0;
+static hpet_register_t* hpet_regs = nullptr;
+static uint64_t clock_period_fs   = 0;
+
 static bool warned_no_clock_period = false;
 static bool warned_no_hpet_regs    = false;
 
@@ -119,7 +118,7 @@ void hpet_init(void) {
     uint16_t vendor_id      = (caps >> 16) & 0xffff;
 
     // n_timers = (bits 8:12 of cap) + 1
-    num_timers = ((hpet_regs->general_caps >> 8) & 0x1f) + 1;
+    size_t num_timers = ((hpet_regs->general_caps >> 8) & 0x1f) + 1;
 
     if (vendor_id == 0 || vendor_id == 0xffff) {
         errno = ENODEV;
@@ -238,99 +237,4 @@ void hpet_mdelay(size_t ms) {
     while (hpet_regs->main_counter_value < (start + ticks)) {
         arch_pause();
     }
-}
-
-static int get_best_timer_idx(uint32_t gsi, bool periodic) {
-    for (int i = 0; i < num_timers; ++i) {
-        if (timers_bitmap & (1 << i)) {
-            continue;
-        }
-
-        uint64_t caps       = hpet_regs->timers[i].conf_caps;
-        uint32_t route_caps = (caps >> 32);
-
-        // Check if this timer can physically drive the requested IRQ
-        if (!(route_caps & (1 << gsi))) {
-            continue;
-        }
-
-        if (periodic && !(caps & TN_PER_INT_CAP)) {
-            continue;
-        }
-
-        return i;
-    }
-
-    return -1;
-}
-
-void hpet_configure_timer(timer_type_t type, uint32_t ms, uint32_t gsi) {
-    if (!hpet_regs) {
-        errno = ENODEV;
-
-        if (!warned_no_hpet_regs) {
-            warned_no_hpet_regs = true;
-            KLOG_WARN("HPET: configure timer requested before initialization\n");
-        }
-
-        return;
-    }
-
-    int idx = get_best_timer_idx(gsi, type == TIMER_PERIODIC);
-
-    if (idx == -1) {
-        errno = ENODEV;
-        KLOG_WARN(
-            "HPET: no available timer for GSI=%u (periodic=%d)\n",
-            gsi,
-            type == TIMER_PERIODIC
-        );
-        return;
-    }
-
-    timers_bitmap |= (1 << idx);
-
-    hpet_regs->timers[idx].conf_caps &= ~TN_INT_ENB_CNF;
-
-    uint64_t config = hpet_regs->timers[idx].conf_caps;
-
-    config &= ~TN_INT_ROUTE_CNF;
-    config |= ((uint64_t)gsi << 9);
-    config &= ~TN_INT_TYPE_CNF;
-
-    if (type == TIMER_PERIODIC) {
-        config |= TN_TYPE_CNF;
-        config |= TN_VAL_SET_CNF;
-    } else {
-        config &= ~TN_TYPE_CNF;
-    }
-
-    hpet_regs->timers[idx].conf_caps = config;
-
-    uint64_t ticks   = time_to_ticks(ms, FEMTOSECONDS_PER_MS);
-    uint64_t current = hpet_regs->main_counter_value;
-
-    if (ticks == 0) {
-        return;
-    }
-
-    if (type == TIMER_PERIODIC) {
-        hpet_regs->timers[idx].comparator_value = ticks;
-
-        // Set absolute match for first tick
-        hpet_regs->timers[idx].conf_caps &= ~TN_VAL_SET_CNF;
-        hpet_regs->timers[idx].comparator_value = current + ticks;
-    } else {
-        hpet_regs->timers[idx].comparator_value = current + ticks;
-    }
-
-    hpet_regs->timers[idx].conf_caps |= TN_INT_ENB_CNF;
-
-    KLOG_DEBUG(
-        "HPET: timer=%d configured type=%s period=%u ms gsi=%u\n",
-        idx,
-        (type == TIMER_PERIODIC) ? "periodic" : "oneshot",
-        ms,
-        gsi
-    );
 }

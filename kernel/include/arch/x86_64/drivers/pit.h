@@ -4,8 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "drivers/arch_timer.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -19,8 +17,6 @@ void pit_tick(void);
 
 void pit_mdelay(size_t ms);
 void pit_udelay(size_t us);
-
-void pit_configure_timer(timer_type_t type, uint32_t freq_hz);
 
 #ifdef __cplusplus
 }

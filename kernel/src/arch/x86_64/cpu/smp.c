@@ -27,7 +27,6 @@ void arch_init_cpu_state(per_cpu_data_t* cpu) {
     );
 }
 
-[[gnu::used]]
 void arch_commit_cpu_state(per_cpu_data_t* cpu) {
     ASSERT(cpu);
 

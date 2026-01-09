@@ -1,12 +1,16 @@
 #include "cpu/lapic.h"
 
 #include <errno.h>
+#include <llvm-libc-macros/generic-error-number-macros.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "arch.h"
 #include "cpu/cpu.h"
 #include "cpu/exception.h"
 #include "cpu/registers.h"
+#include "drivers/arch_timer.h"
+#include "drivers/timer.h"
 #include "libs/log.h"
 #include "libs/mmio.h"
 #include "libs/spinlock.h"
@@ -18,10 +22,18 @@
 
 #include "internal/lapic.h"
 
-static void* virt_base             = nullptr;
+static void* virt_base = nullptr;
+
+static uint32_t freq_hz      = 0;
+static uint32_t ticks_per_us = 0;
+
 static bool x2apic_enabled         = false;
 static bool tsc_deadline_supported = false;
+static bool warned_no_freq         = false;
+static bool warned_deadline_mode   = false;
+
 static interrupt_lock_t lock;
+static timer_mode_t curr_mode;
 
 static uint32_t lapic_read(size_t offset) {
     if (x2apic_enabled) {
@@ -100,6 +112,10 @@ static void apic_error_handler(interrupt_trapframe_t*, void*) {
     }
 
     KLOG_ERROR("%s", buf);
+}
+
+static void apic_timer_handler(interrupt_trapframe_t*, void*) {
+    timer_tick();
 }
 
 static inline void lapic_error_init(void) {
@@ -202,6 +218,19 @@ void lapic_init(void) {
     create_interrupt_lock(&lock);
 
     int res = register_interrupt_handler(
+        INTERRUPT_APIC_TIMER,
+        apic_timer_handler,
+        nullptr,
+        IRQ_TRIGGER_EDGE,
+        IRQ_POLARITY_HIGH
+    );
+
+    if (res != 0) {
+        int err = errno ? errno : EIO;
+        PANIC("LAPIC: failed to register timer handler errno=%d\n", err);
+    }
+
+    res = register_interrupt_handler(
         INTERRUPT_APIC_ERROR,
         apic_error_handler,
         nullptr,
@@ -311,4 +340,146 @@ void lapic_send_broadcast_ipi(uint8_t vector, apic_interrupt_delivery_mode_t mod
 
 void lapic_send_eoi(void) {
     lapic_write(LAPIC_REG_EOI, 0);
+}
+
+void lapic_timer_mask(void) {
+    uint32_t val = lapic_read(LAPIC_REG_LVT_TIMER);
+    lapic_write(LAPIC_REG_LVT_TIMER, val | LVT_MASKED);
+}
+
+void lapic_timer_unmask(void) {
+    uint32_t val = lapic_read(LAPIC_REG_LVT_TIMER);
+    lapic_write(LAPIC_REG_LVT_TIMER, val & ~LVT_MASKED);
+}
+
+void lapic_timer_stop(void) {
+    lapic_write(LAPIC_REG_INIT_COUNT, 0);
+
+    if (tsc_deadline_supported) {
+        write_msr(X86_MSR_IA32_TSC_DEADLINE, 0);
+    }
+}
+
+static uint32_t try_cpuid_frequency(void) {
+    cpuid_registers_t regs = cpu_read_value(CPUID_TIME_INFO);
+
+    if (regs.ecx == 0 || regs.eax == 0 || regs.ebx == 0) {
+        return 0;
+    }
+
+    return regs.ecx;
+}
+
+static uint32_t calibrate_manually(void) {
+    lapic_write(LAPIC_REG_DIVIDE_CONF, TIMER_DIV_16);
+    lapic_write(LAPIC_REG_LVT_TIMER, LVT_MASKED);
+    lapic_write(LAPIC_REG_INIT_COUNT, UINT32_MAX);
+
+    const size_t calibaration_ms = 50;
+    timer_mdelay(calibaration_ms);
+
+    uint32_t curr = lapic_read(LAPIC_REG_CURRENT_COUNT);
+    lapic_write(LAPIC_REG_INIT_COUNT, 0);
+
+    uint64_t ticks = UINT32_MAX - curr;
+
+    return (uint32_t)(ticks * 100 * 16);
+}
+
+void lapic_timer_calibrate(void) {
+    freq_hz = try_cpuid_frequency();
+
+    if (freq_hz == 0) {
+        freq_hz = calibrate_manually();
+    }
+
+    if (freq_hz == 0) {
+        errno = EIO;
+
+        if (!warned_no_freq) {
+            warned_no_freq = true;
+            KLOG_WARN("LAPIC: timer calibration failed (freq_hz=0)\n");
+        }
+
+        return;
+    }
+
+    ticks_per_us = (freq_hz / 16) / 1000000;
+
+    if (ticks_per_us == 0) {
+        ticks_per_us = 1;
+        errno        = ERANGE;
+        KLOG_WARN("LAPIC: ticks_per_us underflow, clamping to 1\n");
+    }
+
+    KLOG_INFO("LAPIC: timer calibrated freq=%u Hz ticks_per_us=%u\n", freq_hz, ticks_per_us);
+}
+
+static void set_lvt_mode(uint8_t vector, timer_mode_t mode) {
+    lapic_write(LAPIC_REG_LVT_TIMER, 0);
+
+    if (curr_mode == TIMER_TSC_DEADLINE) {
+        write_msr(X86_MSR_IA32_TSC_DEADLINE, 0);
+    }
+
+    uint32_t lvt = vector;
+
+    switch (mode) {
+        case TIMER_ONESHOT:
+            lvt |= LVT_TIMER_MODE_ONESHOT;
+            break;
+        case TIMER_PERIODIC:
+            lvt |= LVT_TIMER_MODE_PERIODIC;
+            break;
+        case TIMER_TSC_DEADLINE:
+            if (tsc_deadline_supported) {
+                lvt |= LVT_TIMER_MODE_TSC_DEADLINE;
+            } else {
+                errno = ENODEV;
+
+                if (!warned_deadline_mode) {
+                    warned_deadline_mode = true;
+                    KLOG_WARN(
+                        "LAPIC: TSC deadline mode requested but not supported; falling back to "
+                        "one-shot\n"
+                    );
+                }
+
+                lvt |= LVT_TIMER_MODE_ONESHOT;
+            }
+            break;
+    }
+
+    lapic_write(LAPIC_REG_LVT_TIMER, lvt);
+    lapic_write(LAPIC_REG_DIVIDE_CONF, TIMER_DIV_16);
+
+    curr_mode = mode;
+}
+
+void lapic_configure_timer(timer_mode_t mode, uint8_t vector, uint64_t count) {
+    if (mode != TIMER_TSC_DEADLINE && ticks_per_us == 0) {
+        errno = ENODEV;
+
+        if (!warned_no_freq) {
+            warned_no_freq = true;
+            KLOG_WARN("LAPIC: configure_timer called before calibration\n");
+        }
+
+        return;
+    }
+
+    set_lvt_mode(vector, mode);
+
+    if (mode == TIMER_TSC_DEADLINE) {
+        asm volatile("mfence" ::: "memory");
+        write_msr(X86_MSR_IA32_TSC_DEADLINE, count);
+    } else {
+        uint32_t ticks = (uint32_t)(count * ticks_per_us);
+
+        if (ticks == 0 && count > 0) {
+            ticks = 1;
+        }
+
+        lapic_write(LAPIC_REG_INIT_COUNT, ticks);
+    }
 }

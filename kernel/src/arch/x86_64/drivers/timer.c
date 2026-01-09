@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 #include "cpu/exception.h"
+#include "cpu/lapic.h"
 #include "drivers/arch_timer.h"
 #include "drivers/hpet.h"
 #include "drivers/pit.h"
@@ -11,6 +12,9 @@
 #include "libs/log.h"
 
 static clock_source_t source;
+
+static bool warned_invalid_mode   = false;
+static bool warned_invalid_source = false;
 
 static const char* timer_clock_source_name(clock_source_t src) {
     switch (src) {
@@ -26,6 +30,10 @@ static const char* timer_clock_source_name(clock_source_t src) {
 }
 
 static void timer_handler(interrupt_trapframe_t*, void*) {
+    timer_tick();
+}
+
+void timer_tick(void) {
     static bool warned;
 
     switch (source) {
@@ -46,8 +54,23 @@ static void timer_handler(interrupt_trapframe_t*, void*) {
 }
 
 void timer_set_clock_source(clock_source_t src) {
-    source = src;
-    KLOG_INFO("TIMER: clock source set to %s\n", timer_clock_source_name(src));
+    switch (src) {
+        case CLOCK_PIT:
+        case CLOCK_HPET:
+        case CLOCK_TSC:
+            source = src;
+            KLOG_INFO("TIMER: clock source set to %s\n", timer_clock_source_name(src));
+            return;
+        default:
+            errno = EINVAL;
+
+            if (!warned_invalid_source) {
+                warned_invalid_source = true;
+                KLOG_WARN("TIMER: invalid clock source requested=%d\n", src);
+            }
+
+            return;
+    }
 }
 
 void timer_mdelay(size_t ms) {
@@ -86,6 +109,28 @@ void timer_udelay(size_t us) {
     }
 }
 
+void timer_configure(timer_mode_t mode, uint8_t vector, size_t count) {
+    switch (mode) {
+        case TIMER_ONESHOT:
+        case TIMER_PERIODIC:
+        case TIMER_TSC_DEADLINE:
+            break;
+        default:
+            errno = EINVAL;
+
+            if (!warned_invalid_mode) {
+                warned_invalid_mode = true;
+                KLOG_WARN("TIMER: configure called with invalid mode=%d\n", mode);
+            }
+
+            return;
+    }
+
+    KLOG_DEBUG("TIMER: configuring mode=%d vector=%u count=%zu\n", mode, vector, count);
+
+    lapic_configure_timer(mode, vector, count);
+}
+
 void timer_init(void) {
     pit_init();
     hpet_init();
@@ -93,7 +138,7 @@ void timer_init(void) {
 
     KLOG_INFO("TIMER: active source=%s\n", timer_clock_source_name(source));
 
-    register_external_irq_handler(
+    int res = register_external_irq_handler(
         IRQ_TIMER,
         timer_handler,
         nullptr,
@@ -101,4 +146,12 @@ void timer_init(void) {
         DESTMODE_PHYSICAL,
         0
     );
+
+    if (res != 0) {
+        int err = errno ? errno : EIO;
+        KLOG_ERROR("TIMER: failed to register IRQ handler errno=%d\n", err);
+        errno = err;
+    }
+
+    lapic_timer_calibrate();
 }
