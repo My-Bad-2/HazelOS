@@ -12,6 +12,11 @@ IncludeCategories:
   - Regex: '^".*'
     Priority: 2
 
+# For each macros
+ForEachMacros:
+  - 'list_for_each'
+  - 'list_for_each_safe'
+
 # General Formatting
 ColumnLimit: 100
 IndentWidth: 4
@@ -29,3 +34,4 @@ AllowAllParametersOfDeclarationOnNextLine: false
 AllowShortFunctionsOnASingleLine: Empty
 KeepEmptyLinesAtTheStartOfBlocks: false
 AlignAfterOpenBracket: BlockIndent
+SpaceBeforeParens: ControlStatementsExceptForEachMacros

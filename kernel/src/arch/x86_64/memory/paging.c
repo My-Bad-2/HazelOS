@@ -72,7 +72,7 @@ static inline void reload_mapping(pagemap_t* map) {
     }
 }
 
-size_t convert_generic_flags(uint32_t flags, cache_type_t cache, size_t page_size) {
+static size_t convert_generic_flags(uint32_t flags, cache_type_t cache, size_t page_size) {
     size_t ret       = 0;
     const size_t pat = (page_size == PAGE_SIZE_SMALL) ? X86_PAGE_FLAG_PAT : X86_PAGE_FLAG_LARGE_PAT;
 
@@ -472,7 +472,7 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
         }
     }
 
-    if (!args.skip_flush) {
+    if (!args.skip_flush && pagemap_is_active(map)) {
         if (aligned_length > (PAGE_SIZE_MEDIUM * 16)) {
             reload_mapping(map);
         } else {
@@ -583,13 +583,15 @@ void pagemap_unmap(pagemap_t* map, pagemap_unmap_args_t args) {
 
     // A single 2MB huge paeg contains 512 4KB pages. Executing 512 invlpg instructions is
     // expensive. A full CR3 write is often cheaper.
-    if (args.length > PAGE_SIZE_MEDIUM * 16) {
-        reload_mapping(map);
-    } else {
-        // For small ranges (e.g. 4KB to 1.9MB), individual invalidation is better to preserve the
-        // TLB entries of the rest of the kernel.
-        for (uintptr_t i = virt_start; i <= virt_end; i += PAGE_SIZE_SMALL) {
-            invlpg((const void*)(i));
+    if (pagemap_is_active(map)) {
+        if (args.length > PAGE_SIZE_MEDIUM * 16) {
+            reload_mapping(map);
+        } else {
+            // For small ranges (e.g. 4KB to 1.9MB), individual invalidation is better to preserve
+            // the TLB entries of the rest of the kernel.
+            for (uintptr_t i = virt_start; i <= virt_end; i += PAGE_SIZE_SMALL) {
+                invlpg((const void*)(i));
+            }
         }
     }
 

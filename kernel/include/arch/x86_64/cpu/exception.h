@@ -5,7 +5,7 @@
 
 #define GSI_NONE 0xffffffff
 
-typedef struct {
+typedef struct [[gnu::aligned(16)]] {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
     uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
 
