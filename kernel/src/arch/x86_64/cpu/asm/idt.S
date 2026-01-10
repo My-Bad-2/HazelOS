@@ -1,6 +1,7 @@
 .section .text.isr
 
 .extern x86_exception_handler
+.global isr_restore_path
 .type isr_common_stub, @function
 isr_common_stub:
     cld
@@ -22,26 +23,25 @@ isr_common_stub:
     pushq %r14
     pushq %r15
 
-    movq %rsp, %rdi
-
-    # We check the Code Segment (CS) saved on the stack to see if we came from User Mode.
-    movq 144(%rsp), %rax
-    testb $3, %al        # Check bottom 2 bits (RPL). If != 0, it's User Mode.
+    testb $3, 144(%rsp)  # Check bottom 2 bits (RPL). If != 0, it's User Mode.
     jz 1f
     swapgs               # Switch GS to Kernel Per-CPU Data
 1:
+    movq %rsp, %rdi
+
     pushq %rbp          # Save the RBP of the interrupted code
     movq %rsp, %rbp     # Set RBP to current stack
 
     call x86_exception_handler
 
-    popq %rbp # Restore stack to just the Trap Frame
+    # Teardown the Trace frame
+    leave
 
-    movq 144(%rsp), %rax
-    testb $3, %al
-    jz 2f
+isr_restore_path:
+    testb $3, 144(%rsp)
+    jz 1f
     swapgs               # Switch GS back to User TLS
-2:
+1:
     # Restore Registers
     popq %r15
     popq %r14

@@ -35,6 +35,8 @@ void arch_writec(char ch) {
 void arch_halt(bool interrupts) {
     if (!interrupts) {
         arch_disable_interrupts();
+    } else {
+        arch_enable_interrupts();
     }
 
     while (true) {

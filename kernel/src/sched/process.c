@@ -10,14 +10,15 @@
 #include "libs/list.h"
 #include "libs/log.h"
 #include "memory/heap.h"
+#include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 #include "memory/vmm.h"
 
 #define QUANTUM_BASE 20
 
-static atomic_int next_pid = 1;
-static atomic_int next_tid = 1;
+static atomic_uint next_pid = 1;
+static atomic_uint next_tid = 1;
 
 static struct list_node global_process_list = LIST_INIT(global_process_list);
 
@@ -26,7 +27,7 @@ process_t* process_create(bool is_kernel) {
 
     if (!proc) {
         errno = ENOMEM;
-        KLOG_WARN("PROC: failed to allocate process struct errno=%d\n", errno);
+        KLOG_WARN("PROC: failed to allocate process struct errno=%u\n", errno);
         return nullptr;
     }
 
@@ -42,6 +43,8 @@ process_t* process_create(bool is_kernel) {
         // Shared kernel map
         memcpy(&proc->map, vmm_get_kernel_pagemap(), sizeof(pagemap_t));
         memcpy(&proc->space, &kernel_space, sizeof(vm_space_t));
+
+        proc->is_kernel = true;
     } else {
         pagemap_create(&proc->map);
 
@@ -59,7 +62,7 @@ process_t* process_create(bool is_kernel) {
 
     list_push_back(&global_process_list, &proc->global_list);
 
-    KLOG_INFO("PROC: created pid=%d kernel=%d\n", proc->pid, is_kernel);
+    KLOG_INFO("PROC: created pid=%u kernel=%u\n", proc->pid, is_kernel);
 
     return proc;
 }
@@ -81,7 +84,7 @@ void process_destroy(process_t* proc) {
 
     kfree(proc, sizeof(process_t));
 
-    KLOG_INFO("PROC: destroyed pid=%d\n", proc->pid);
+    KLOG_INFO("PROC: destroyed pid=%u\n", proc->pid);
 }
 
 process_t* process_find_by_pid(int pid) {
@@ -115,7 +118,7 @@ thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg) {
 
     if (!t) {
         errno = ENOMEM;
-        KLOG_WARN("THREAD: failed to allocate thread errno=%d\n", errno);
+        KLOG_WARN("THREAD: failed to allocate thread errno=%u\n", errno);
         return nullptr;
     }
 
@@ -134,7 +137,7 @@ thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg) {
             errno = EINVAL;
         }
 
-        KLOG_WARN("THREAD: arch init failed tid=%d errno=%d\n", t->tid, errno);
+        KLOG_WARN("THREAD: arch init failed tid=%u errno=%u\n", t->tid, errno);
         kfree(t, sizeof(thread_t));
         return nullptr;
     }
@@ -143,7 +146,7 @@ thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg) {
 
     const char* state = thread_state_to_str(t->state);
 
-    KLOG_DEBUG("THREAD: created tid=%d pid=%d state=%s\n", t->tid, proc->pid, state);
+    KLOG_DEBUG("THREAD: created tid=%u pid=%u state=%s\n", t->tid, proc->pid, state);
 
     return t;
 }
@@ -164,25 +167,44 @@ void thread_destroy(thread_t* t) {
     arch_thread_destroy(t);
     kfree(t, sizeof(thread_t));
 
-    KLOG_DEBUG("THREAD: destroyed tid=%d pid=%d\n", t->tid, t->owner ? t->owner->pid : -1);
+    KLOG_DEBUG("THREAD: destroyed tid=%u pid=%u\n", t->tid, t->owner ? t->owner->pid : 0);
 }
 
-thread_t* thread_clone(thread_t* src) {
-    thread_t* t = thread_create(src->owner, nullptr, nullptr);
+thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf) {
+    thread_t* child = thread_create(parent->owner, nullptr, nullptr);
 
-    if (!t) {
+    if (!child) {
         return nullptr;
     }
 
-    memcpy(&t->context, &src->context, sizeof(interrupt_trapframe_t));
+    memset(child, 0, sizeof(thread_t));
+    child->tid   = atomic_fetch_add_explicit(&next_tid, 1, memory_order_relaxed);
+    child->owner = target_proc;
+    child->state = THREAD_READY;
 
-#ifdef __x86_64__
-    t->context.rax = 0;
-#endif
+    child->kernel_stack = vmm_alloc(
+        &kernel_space,
+        KSTACK_SIZE,
+        VMM_FLAG_STACK | VMM_FLAG_WRITE | VMM_FLAG_READ,
+        CACHE_WRITE_BACK,
+        PAGE_SIZE_SMALL
+    );
 
-    t->priority = src->priority;
+    if (!child->kernel_stack) {
+        kfree(child, sizeof(thread_t));
+        return nullptr;
+    }
 
-    KLOG_DEBUG("THREAD: cloned tid=%d from tid=%d pid=%d\n", t->tid, src->tid, src->owner->pid);
+    child->kernel_stack_top = (uintptr_t)child->kernel_stack + KSTACK_SIZE;
 
-    return t;
+    arch_thread_clone(child, tf);
+
+    KLOG_DEBUG(
+        "THREAD: cloned tid=%u from tid=%u pid=%u\n",
+        child->tid,
+        parent->tid,
+        child->owner->pid
+    );
+
+    return child;
 }

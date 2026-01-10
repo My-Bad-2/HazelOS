@@ -7,6 +7,7 @@
 
 #include "arch.h"
 #include "drivers/arch_timer.h"
+#include "drivers/pit.h"
 #include "drivers/timer.h"
 #include "libs/log.h"
 #include "memory/memory.h"
@@ -145,7 +146,9 @@ void hpet_init(void) {
     );
 
     timer_set_clock_source(CLOCK_HPET);
+    pit_disable();
 }
+
 void hpet_disable(void) {
     hpet_regs->general_config &= ~HPET_CONF_ENABLE;
 }

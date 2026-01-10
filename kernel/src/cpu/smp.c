@@ -9,6 +9,7 @@
 #include "boot/boot.h"
 #include "drivers/acpi.h"
 #include "libs/log.h"
+#include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
@@ -41,6 +42,8 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
     }
 
     cpu->stack_top = (uintptr_t)stack + KSTACK_SIZE;
+
+    create_interrupt_lock(&cpu->lock);
 
     arch_init_cpu_state(cpu);
 
@@ -139,4 +142,16 @@ uint32_t smp_current_core_idx(void) {
 
 uint32_t arch_get_core_idx(void) {
     return smp_current_core_idx();
+}
+
+per_cpu_data_t* smp_get_core(uint32_t idx) {
+    if (!cpu_datas) {
+        return nullptr;
+    }
+
+    if (idx >= mp_request.response->cpu_count) {
+        return nullptr;
+    }
+
+    return &cpu_datas[idx];
 }

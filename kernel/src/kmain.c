@@ -3,6 +3,7 @@
 #include "drivers/drivers.h"
 #include "libs/log.h"
 #include "memory/memory.h"
+#include "sched/scheduler.h"
 #include "tests/runner.h"
 
 void kmain(void) {
@@ -12,6 +13,7 @@ void kmain(void) {
     smp_init();
 
     drivers_init();
+    scheduler_init();
 
 #if KERNEL_TEST
     // Enable when we've introduced new tests

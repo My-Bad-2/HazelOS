@@ -10,6 +10,7 @@
 #include "drivers/pit.h"
 #include "drivers/tsc.h"
 #include "libs/log.h"
+#include "sched/scheduler.h"
 
 static clock_source_t source;
 
@@ -29,8 +30,12 @@ static const char* timer_clock_source_name(clock_source_t src) {
     }
 }
 
-static void timer_handler(interrupt_trapframe_t*, void*) {
+static void timer_handler(interrupt_trapframe_t* tf, void*) {
     timer_tick();
+
+    if (scheduler_is_initialized()) {
+        scheduler_handler(tf);
+    }
 }
 
 void timer_tick(void) {
@@ -138,6 +143,8 @@ void timer_init(void) {
 
     KLOG_INFO("TIMER: active source=%s\n", timer_clock_source_name(source));
 
+    lapic_timer_calibrate();
+
     int res = register_external_irq_handler(
         IRQ_TIMER,
         timer_handler,
@@ -152,6 +159,4 @@ void timer_init(void) {
         KLOG_ERROR("TIMER: failed to register IRQ handler errno=%d\n", err);
         errno = err;
     }
-
-    lapic_timer_calibrate();
 }

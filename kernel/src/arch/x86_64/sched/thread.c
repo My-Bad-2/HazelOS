@@ -1,15 +1,45 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
+#include "arch.h"
+#include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
+#include "cpu/smp.h"
 #include "libs/log.h"
 #include "libs/math.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 #include "sched/process.h"
+#include "sched/scheduler.h"
+
+extern void kernel_thread_entry(void);
+extern void isr_restore_path(void);
+
+struct kernel_stack_layout {
+    switch_context_t ctx;
+    uint64_t args;
+    uint64_t entry;
+};
+
+struct user_stack_layout {
+    switch_context_t ctx;
+    interrupt_trapframe_t tf;
+    uint64_t thread_exit;
+};
+
+// NOLINTNEXTLINE(misc-use-internal-linkage)
+[[noreturn, gnu::used]] void thread_exit(void) {
+    arch_disable_interrupts();
+    thread_t* curr = smp_current_core()->curr_thread;
+    scheduler_remove_thread(curr);
+    scheduler_yield();
+
+    PANIC("THREAD: terminated thread called from the afterlife");
+}
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     if (!t) {
@@ -30,43 +60,56 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
 
     if (!t->kernel_stack) {
         errno = ENOMEM;
-        KLOG_WARN("THREAD: kernel stack allocation failed tid=%d\n", t->tid);
+        KLOG_WARN("THREAD: kernel stack allocation failed tid=%u\n", t->tid);
         return false;
     }
 
     t->kernel_stack_top = (uintptr_t)t->kernel_stack + KSTACK_SIZE;
-
-    t->context.rip    = (uint64_t)entry;
-    t->context.rdi    = (uint64_t)arg;
-    t->context.rflags = X86_FLAGS_IF;
+    uintptr_t sp        = align_down(t->kernel_stack_top, 0x10);
 
     if (proc->is_kernel) {
-        t->context.cs = offsetof(gdt_table_t, entries) + (1 * sizeof(gdt_entry_t));
-        t->context.ss = offsetof(gdt_table_t, entries) + (2 * sizeof(gdt_entry_t));
+        sp -= sizeof(struct kernel_stack_layout);
 
-        // Kernel threads run on the kernel stack
-        t->context.rsp = t->kernel_stack_top;
+        struct kernel_stack_layout* kstack = (struct kernel_stack_layout*)sp;
+        memset(kstack, 0, sizeof(struct kernel_stack_layout));
+
+        kstack->entry   = (uint64_t)entry;
+        kstack->args    = (uint64_t)arg;
+        kstack->ctx.rip = (uint64_t)kernel_thread_entry;
+
+        t->context_rsp = (uint64_t)&kstack->ctx;
     } else {
-        t->context.cs = offsetof(gdt_table_t, entries) + (4 * sizeof(gdt_entry_t));
-        t->context.ss = offsetof(gdt_table_t, entries) + (3 * sizeof(gdt_entry_t));
+        sp -= sizeof(struct user_stack_layout);
+        struct user_stack_layout* ustack = (struct user_stack_layout*)sp;
+        memset(ustack, 0, sizeof(struct user_stack_layout));
 
         uint32_t flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER | VMM_FLAG_STACK;
 
-        size_t size  = USTACK_SIZE;
-        void* ustack = vmm_alloc(&proc->space, size, flags, CACHE_WRITE_BACK, PAGE_SIZE_SMALL);
+        size_t size       = USTACK_SIZE;
+        void* ustack_base = vmm_alloc(&proc->space, size, flags, CACHE_WRITE_BACK, PAGE_SIZE_SMALL);
 
-        if (!ustack) {
+        if (!ustack_base) {
             vmm_free(&proc->space, t->kernel_stack, KSTACK_SIZE);
             errno = ENOMEM;
-            KLOG_WARN("THREAD: user stack allocation failed tid=%d pid=%d\n", t->tid, proc->pid);
+            KLOG_WARN("THREAD: user stack allocation failed tid=%u pid=%u\n", t->tid, proc->pid);
             return false;
         }
 
-        t->user_stack = ustack;
-        uint64_t rsp  = (uintptr_t)ustack + USTACK_SIZE;
+        t->user_stack = ustack_base;
+        uint64_t rsp  = (uintptr_t)ustack_base + USTACK_SIZE;
         rsp           = align_down(rsp, 0x10);
 
-        t->context.rsp = rsp;
+        ustack->tf.rip = (uint64_t)entry;
+        ustack->tf.rdi = (uint64_t)arg;
+
+        ustack->tf.cs = offsetof(gdt_table_t, entries) + (1 * sizeof(gdt_entry_t));
+        ustack->tf.ss = offsetof(gdt_table_t, entries) + (2 * sizeof(gdt_entry_t));
+
+        ustack->tf.rflags = X86_FLAGS_IF | X86_FLAGS_RESERVED_ONES;
+        ustack->tf.rsp    = rsp;
+
+        ustack->ctx.rip = (uint64_t)isr_restore_path;
+        t->context_rsp  = (uint64_t)&ustack->ctx;
     }
 
     return true;
@@ -83,7 +126,22 @@ void arch_thread_destroy(thread_t* t) {
         vmm_free(&kernel_space, t->kernel_stack, KSTACK_SIZE);
     }
 
-    if (!t->owner->is_kernel && t->context.rsp != 0) {
+    if (!t->owner->is_kernel && t->context_rsp != 0) {
         vmm_free(&proc->space, t->user_stack, USTACK_SIZE);
     }
+}
+
+void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf) {
+    uintptr_t sp = align_down(child->kernel_stack_top, 0x10);
+
+    sp -= sizeof(struct user_stack_layout);
+    struct user_stack_layout* layout = (struct user_stack_layout*)sp;
+
+    memset(layout, 0, sizeof(struct user_stack_layout));
+
+    layout->tf     = *tf;
+    layout->tf.rax = 0;
+
+    layout->ctx.rip    = (uint64_t)isr_restore_path;
+    child->context_rsp = (uint64_t)&layout->tf;
 }

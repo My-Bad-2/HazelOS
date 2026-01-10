@@ -17,7 +17,7 @@ typedef enum {
 } thread_state_t;
 
 typedef struct process {
-    int pid;
+    uint32_t pid;
     bool is_kernel;
 
     vm_space_t space;
@@ -33,12 +33,13 @@ void process_destroy(process_t* proc);
 process_t* process_find_by_pid(int pid);
 
 typedef struct thread {
-    int tid;
+    uint32_t tid;
     thread_state_t state;
     process_t* owner;
 
-    interrupt_trapframe_t context;
+    interrupt_trapframe_t tf;
 
+    uintptr_t context_rsp;
     uintptr_t kernel_stack_top;
 
     void* kernel_stack;
@@ -47,8 +48,12 @@ typedef struct thread {
     int priority;
     int ticks_remaining;
 
+    uint32_t cpu_affinity;  // Which CPU (s) this thread is allowed to run on
+    uint32_t assigned_cpu;
+
     struct list_node sched_node;
     struct list_node process_node;
+    struct list_node* joiner;
 } thread_t;
 
 thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg);
@@ -56,7 +61,8 @@ void thread_destroy(thread_t* t);
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
 void arch_thread_destroy(thread_t* t);
+void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf);
 
-thread_t* thread_clone(thread_t* src);
+thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf);
 
 #endif

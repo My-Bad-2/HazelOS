@@ -18,6 +18,7 @@
 #include "memory/pagemap.h"
 #include "memory/paging.h"
 #include "memory/vma.h"
+#include "sched/scheduler.h"
 
 typedef struct {
     isr_handler_t handler;
@@ -64,14 +65,14 @@ static const char* const exception_messages[32] = {
     "Reserved (31)"
 };
 
-static void send_eoi(uint8_t vector) {
+static void send_eoi(uint64_t vector) {
     if (ioapic_is_initialized() && vector >= PLATFORM_INTERRUPT_BASE) {
         lapic_send_eoi();
         return;
     }
 
     if ((vector >= PLATFORM_INTERRUPT_BASE) && (vector <= PLATFORM_INTERRUPT_BASE + 16)) {
-        pic_send_eoi(vector);
+        pic_send_eoi((uint8_t)vector);
     }
 }
 
@@ -475,6 +476,7 @@ static void handle_crash(interrupt_trapframe_t* tf) {
     PANIC("Unhandled vector (%lu)", tf->vector);
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage)
 void x86_exception_handler(interrupt_trapframe_t* tf) {
     ASSERT(isr_registry);
 
@@ -491,7 +493,7 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
     irq_trigger_mode_t trigger = isr_registry[tf->vector].trigger;
 
     if (trigger == IRQ_TRIGGER_EDGE) {
-        send_eoi((uint8_t)tf->vector);
+        send_eoi(tf->vector);
     }
 
     if (handler) {
@@ -501,6 +503,6 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
     }
 
     if (trigger == IRQ_TRIGGER_LEVEL) {
-        send_eoi((uint8_t)tf->vector);
+        send_eoi(tf->vector);
     }
 }
