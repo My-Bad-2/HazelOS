@@ -18,7 +18,6 @@
 #include "memory/pagemap.h"
 #include "memory/paging.h"
 #include "memory/vma.h"
-#include "sched/scheduler.h"
 
 typedef struct {
     isr_handler_t handler;

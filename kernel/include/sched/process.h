@@ -1,3 +1,4 @@
+#include "drivers/timer.h"
 #ifndef KERNEL_SCHED_PROCESS_H
 #define KERNEL_SCHED_PROCESS_H 1
 
@@ -10,9 +11,10 @@
 #include "memory/vma.h"
 
 typedef enum {
-    THREAD_READY,
+    THREAD_READY = 0,
     THREAD_RUNNING,
     THREAD_BLOCKED,
+    THREAD_SLEEPING,
     THREAD_TERMINATED,
 } thread_state_t;
 
@@ -55,7 +57,7 @@ typedef struct thread {
     struct list_node sched_node;
     struct list_node process_node;
 
-    struct list_node* joiner;
+    timer_event_t sleep_timer;
     void* fpu_buffer;
 } thread_t;
 

@@ -1,6 +1,7 @@
 #include "sched/scheduler.h"
 
 #include <errno.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "arch.h"
@@ -18,14 +19,17 @@
 #include "memory/heap.h"
 #include "sched/process.h"
 
-#define MLFQ_LEVELS     32
-#define QUANTUM_MIN     5
-#define QUANTUM_SCALE   32
-#define BOOST_THRESHOLD 2000
+#define MLFQ_LEVELS           32
+#define QUANTUM_MIN           5
+#define QUANTUM_SCALE         32
+#define BOOST_THRESHOLD       2000
+#define LOAD_BALANCE_INTERVAL 1000
 
-static process_t* kernel_proc = nullptr;
-static uint32_t cpu_count     = 0;
-static bool initialized       = false;
+static process_t* kernel_proc   = nullptr;
+static uint32_t cpu_count       = 0;
+static uint32_t balance_counter = 0;
+static struct list_node sleeping_list;
+static bool initialized = false;
 
 void arch_switch_context(switch_context_t** prev, switch_context_t* next);
 
@@ -43,6 +47,16 @@ static inline int get_highest_priority_queue(uint32_t bitmap) {
     }
 
     return ctz(bitmap);
+}
+
+static void sleep_callback(void* ctx) {
+    thread_t* t = (thread_t*)ctx;
+
+    if (t->state != THREAD_SLEEPING) {
+        return;
+    }
+
+    scheduler_unblock(t);
 }
 
 void scheduler_init(void) {
@@ -91,6 +105,7 @@ void scheduler_init(void) {
 
         data->idle_thread       = idle;
         data->curr_thread       = idle;
+        data->thread_count      = 1;
         data->ticks_since_boost = 0;
 
         release_interrupt_lock(&data->lock);
@@ -123,6 +138,7 @@ void scheduler_add_thread(thread_t* t) {
 
     list_push_back(&data->queues[0], &t->sched_node);
     data->active_queues_bitmap |= (1 << 0);
+    data->thread_count++;
 
     release_interrupt_lock(&data->lock);
 }
@@ -152,9 +168,91 @@ void scheduler_remove_thread(thread_t* t) {
         }
     }
 
+    data->thread_count--;
     t->state = THREAD_TERMINATED;
 
     release_interrupt_lock(&data->lock);
+}
+
+static void balance_load(void) {
+    per_cpu_data_t* me     = smp_current_core();
+    per_cpu_data_t* victim = nullptr;
+
+    uint32_t max_threads = 0;
+
+    for (uint32_t i = 0; i < cpu_count; ++i) {
+        if (i == me->cpu_idx) {
+            continue;
+        }
+
+        per_cpu_data_t* cpu = smp_get_core(i);
+
+        if (cpu->thread_count > max_threads) {
+            max_threads = cpu->thread_count;
+            victim      = cpu;
+        }
+    }
+
+    // Only steal if victim has more than 1 threads
+    if (!victim || max_threads < 2) {
+        return;
+    }
+
+    // Deadlock-free locking
+    per_cpu_data_t* first  = (me->cpu_idx < victim->cpu_idx) ? me : victim;
+    per_cpu_data_t* second = (me->cpu_idx < victim->cpu_idx) ? victim : me;
+
+    acquire_interrupt_lock(&first->lock);
+    acquire_interrupt_lock(&second->lock);
+
+    // Steal from the tail of the lowest priority queue
+    struct list_node* stolen_node = nullptr;
+
+    for (int p = MLFQ_LEVELS - 1; p >= 0; --p) {
+        if (!list_empty(&victim->queues[p])) {
+            stolen_node = victim->queues[p].prev;
+
+            // Don't steal if it's the only thread running there
+            if (stolen_node == &victim->queues[p]) {
+                continue;
+            }
+
+            if (stolen_node == &victim->curr_thread->sched_node) {
+                continue;
+            }
+
+            // Detach from victim
+            list_remove(stolen_node);
+
+            if (list_empty(&victim->queues[p])) {
+                victim->active_queues_bitmap &= ~(1u << p);
+            }
+
+            victim->thread_count--;
+            break;
+        }
+    }
+
+    if (stolen_node) {
+        thread_t* t = container_of(stolen_node, thread_t, sched_node);
+
+        t->assigned_cpu = me->cpu_idx;
+
+        list_push_back(&me->queues[t->priority], &t->sched_node);
+        me->active_queues_bitmap |= (1u << t->priority);
+
+        me->thread_count++;
+
+        KLOG_INFO(
+            "SCHED: cpu %zu stole thread %zu from cpu %zu\n",
+            me->cpu_idx,
+            t->tid,
+            victim->cpu_idx
+        );
+    }
+
+    release_interrupt_lock(&second->lock);
+    release_interrupt_lock(&first->lock);
 }
 
 static void
@@ -223,6 +321,13 @@ static void boost_queues_if_needed(per_cpu_data_t* cpu) {
         if (!list_empty(&cpu->queues[0])) {
             cpu->active_queues_bitmap |= 1u;
         }
+    }
+}
+
+static void balance_load_if_needed(void) {
+    if (++balance_counter >= LOAD_BALANCE_INTERVAL) {
+        balance_counter = 0;
+        balance_load();
     }
 }
 
@@ -303,6 +408,8 @@ void scheduler_handler(interrupt_trapframe_t* tf) {
     }
 
     acquire_interrupt_lock(&cpu->lock);
+
+    balance_load_if_needed();
     thread_t* curr = cpu->curr_thread;
 
     save_current_thread_state(cpu, curr, tf);
@@ -311,6 +418,46 @@ void scheduler_handler(interrupt_trapframe_t* tf) {
     thread_t* next = select_next_thread(cpu);
 
     switch_to_thread(cpu, curr, next, tf);
+}
+
+void scheduler_block(void) {
+    per_cpu_data_t* cpu = smp_current_core();
+
+    acquire_interrupt_lock(&cpu->lock);
+
+    thread_t* curr = cpu->curr_thread;
+    curr->state    = THREAD_BLOCKED;
+
+    release_interrupt_lock(&cpu->lock);
+    scheduler_yield();
+}
+
+void scheduler_unblock(thread_t* t) {
+    per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
+
+    acquire_interrupt_lock(&cpu->lock);
+
+    if (t->state == THREAD_BLOCKED || t->state == THREAD_SLEEPING) {
+        t->state = THREAD_READY;
+
+        list_push_back(&cpu->queues[t->priority], &t->sched_node);
+        cpu->active_queues_bitmap |= (1u << t->priority);
+    }
+
+    release_interrupt_lock(&cpu->lock);
+}
+
+void scheduler_sleep(size_t ms) {
+    per_cpu_data_t* cpu = smp_current_core();
+    thread_t* curr      = cpu->curr_thread;
+
+    timer_arm_oneshot(&cpu->timer_manager, &curr->sleep_timer, ms, sleep_callback, curr);
+
+    acquire_interrupt_lock(&cpu->lock);
+    curr->state = THREAD_SLEEPING;
+    release_interrupt_lock(&cpu->lock);
+
+    scheduler_yield();
 }
 
 bool scheduler_is_initialized(void) {

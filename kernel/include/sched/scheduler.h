@@ -9,13 +9,17 @@ extern "C" {
 #endif
 
 void scheduler_init(void);
-void scheduler_add_thread(thread_t* t);
-void scheduler_remove_thread(thread_t* t);
-void scheduler_yield(void);
-
 bool scheduler_is_initialized(void);
 
+void scheduler_add_thread(thread_t* t);
+void scheduler_remove_thread(thread_t* t);
+
+void scheduler_block(void);
+void scheduler_unblock(thread_t* t);
+void scheduler_sleep(size_t ms);
+
 void scheduler_handler(interrupt_trapframe_t* tf);
+void scheduler_yield(void);
 
 #ifdef __cplusplus
 }

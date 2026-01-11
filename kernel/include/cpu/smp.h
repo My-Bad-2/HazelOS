@@ -36,6 +36,8 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     uint32_t active_queues_bitmap;
     uint32_t ticks_since_boost;
 
+    uint32_t thread_count;
+
     thread_t* curr_thread;
     thread_t* idle_thread;
 
