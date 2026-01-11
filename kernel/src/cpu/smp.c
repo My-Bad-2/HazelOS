@@ -8,6 +8,7 @@
 #include "arch.h"
 #include "boot/boot.h"
 #include "drivers/acpi.h"
+#include "drivers/timer.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
@@ -45,6 +46,7 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
 
     create_interrupt_lock(&cpu->lock);
 
+    timer_manager_init(&cpu->timer_manager);
     arch_init_cpu_state(cpu);
 
     KLOG_DEBUG(

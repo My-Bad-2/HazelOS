@@ -5,6 +5,7 @@
 
 #include "cpu/exception.h"
 #include "cpu/lapic.h"
+#include "cpu/smp.h"
 #include "drivers/arch_timer.h"
 #include "drivers/hpet.h"
 #include "drivers/pit.h"
@@ -31,7 +32,10 @@ static const char* timer_clock_source_name(clock_source_t src) {
 }
 
 static void timer_handler(interrupt_trapframe_t* tf, void*) {
+    per_cpu_data_t* cpu = smp_current_core();
+
     timer_tick();
+    timer_manager_tick(&cpu->timer_manager);
 
     if (scheduler_is_initialized()) {
         scheduler_handler(tf);

@@ -1,5 +1,6 @@
 #include <stdatomic.h>
 
+#include "drivers/timer.h"
 #include "libs/list.h"
 #include "libs/spinlock.h"
 #include "sched/process.h"
@@ -39,6 +40,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     thread_t* idle_thread;
 
     interrupt_lock_t lock;
+    timer_manager_t timer_manager;
 } per_cpu_data_t;
 
 void smp_init(void);
