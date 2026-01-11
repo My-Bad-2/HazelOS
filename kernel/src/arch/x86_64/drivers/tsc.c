@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "arch.h"
+#include "compiler.h"
 #include "cpu/cpu.h"
 #include "drivers/timer.h"
 #include "libs/log.h"
@@ -65,7 +66,7 @@ void tsc_init(void) {
 // Standard uint64 multiplication will result in an overflow in just under 7 seconds after boot (on
 // a 3GHz processor), hence we use 128-bits to widen up the space.
 static inline uint64_t muldiv64(uint64_t a, uint64_t b, uint64_t c) {
-    unsigned __int128 res = (unsigned __int128)a * b;
+    uint128_t res = (uint128_t)a * b;
     return (uint64_t)(res / c);
 }
 

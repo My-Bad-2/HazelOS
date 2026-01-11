@@ -14,6 +14,7 @@ bool scheduler_is_initialized(void);
 void scheduler_add_thread(thread_t* t);
 void scheduler_remove_thread(thread_t* t);
 
+void scheduler_renice(thread_t* t, int nice);
 void scheduler_block(void);
 void scheduler_unblock(thread_t* t);
 void scheduler_sleep(size_t ms);

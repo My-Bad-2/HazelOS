@@ -53,8 +53,10 @@ typedef struct thread {
     size_t total_runtime;
     size_t last_start_time;
 
-    uint32_t cpu_affinity;  // Which CPU (s) this thread is allowed to run on
     uint32_t assigned_cpu;
+    int nice;
+
+    size_t weight;
 
     struct rb_node rb_node;
     struct list_node sched_node;

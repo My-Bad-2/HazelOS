@@ -1,6 +1,8 @@
 #ifndef KERNEL_COMPILER_H
 #define KERNEL_COMPILER_H 1
 
+#include <stddef.h>
+
 #if __has_builtin(__builtin_expect)
 #define likely(x)   __builtin_expect(!!(x), true)
 #define unlikely(x) __builtin_expect(!!(x), false)
@@ -45,5 +47,9 @@
 // TODO: Implement it
 #define popcount(x)
 #endif
+
+typedef __int128 int128_t;
+typedef unsigned __int128 uint128_t;
+typedef ptrdiff_t ssize_t;
 
 #endif

@@ -1,12 +1,12 @@
 #include "sched/scheduler.h"
 
 #include <errno.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "arch.h"
 #include "boot/boot.h"
-#include "compiler.h"
 #include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
@@ -22,6 +22,8 @@
 #define SCHEDULER_LATENCY     20
 #define CACHE_HOT_THRESHOLD   1
 
+#define DEFAULT_NICE 0
+
 static process_t* kernel_proc = nullptr;
 static bool initialized       = false;
 
@@ -31,18 +33,45 @@ static uint32_t balance_counter = 0;
 static size_t cfs_granularity  = 0;
 static size_t max_schedule_lag = 0;
 
+// misc/scripts/calculate_weight.py
+static const size_t prio_to_weight[40] = {
+    88818, 71054, 56843, 45475, 36380, 29104, 23283, 18626, 14901, 11921, 9537, 7629, 6104, 4883,
+    3906,  3125,  2500,  2000,  1600,  1280,  1024,  819,   655,   524,   419,  336,  268,  215,
+    172,   137,   110,   88,    70,    56,    45,    36,    29,    23,    18,   15,
+};
+
 void arch_switch_context(switch_context_t** prev, switch_context_t* next);
 
 static void idle_task_entry(void*) {
     arch_halt(true);
 }
 
-static inline int get_highest_priority_queue(uint32_t bitmap) {
-    if (bitmap == 0) {
-        return -1;
+static bool is_cpu_idle(per_cpu_data_t* cpu) {
+    return cpu->curr_thread == cpu->idle_thread;
+}
+
+static inline size_t get_weight(int nice) {
+    if (nice < -20) {
+        nice = -20;
     }
 
-    return ctz(bitmap);
+    if (nice > 19) {
+        nice = 19;
+    }
+
+    // Map [-20, 19] to index [0, 39]
+    return prio_to_weight[nice + 20];
+}
+
+static inline size_t calculate_weighted_delta(size_t delta, size_t weight) {
+    if (weight == DEFAULT_NICE) {
+        return delta;
+    }
+
+    uint128_t v = (uint128_t)delta;
+    v           = (v * get_weight(DEFAULT_NICE)) / weight;
+
+    return (size_t)v;
 }
 
 static void sleep_callback(void* ctx) {
@@ -53,6 +82,17 @@ static void sleep_callback(void* ctx) {
     }
 
     scheduler_unblock(t);
+}
+
+static ssize_t scale_vruntime(ssize_t vruntime, size_t old_weight, size_t new_weight) {
+    if (old_weight == new_weight) {
+        return vruntime;
+    }
+
+    uint128_t v = (uint128_t)vruntime;
+    v           = (v * old_weight) / new_weight;
+
+    return (ssize_t)v;
 }
 
 void scheduler_init(void) {
@@ -168,6 +208,13 @@ void scheduler_add_thread(thread_t* t) {
 
     acquire_interrupt_lock(&data->lock);
 
+    if (t->nice == 0 && t->weight == 0) {
+        t->nice   = 0;
+        t->weight = get_weight(0);
+    } else {
+        t->weight = get_weight(t->nice);
+    }
+
     t->vruntime        = data->min_vruntime;
     t->state           = THREAD_READY;
     t->last_start_time = get_time_now();
@@ -266,7 +313,7 @@ static void balance_load(void) {
         cfs_remove_thread(victim, t);
         victim->thread_count--;
 
-        int64_t lag = (int64_t)t->vruntime - (int64_t)victim->min_vruntime;
+        ssize_t lag = (ssize_t)t->vruntime - (ssize_t)victim->min_vruntime;
         t->vruntime = me->min_vruntime + (size_t)lag;
 
         if (t->vruntime < me->min_vruntime) {
@@ -333,8 +380,10 @@ void scheduler_handler(interrupt_trapframe_t* tf) {
             delta = 1;
         }
 
-        curr->vruntime += delta;
+        size_t weighted_delta = calculate_weighted_delta(delta, curr->weight);
+
         curr->total_runtime += delta;
+        curr->vruntime += weighted_delta;
 
         if (curr->vruntime > cpu->min_vruntime) {
             cpu->min_vruntime = curr->vruntime;
@@ -353,9 +402,9 @@ void scheduler_handler(interrupt_trapframe_t* tf) {
     next = cfs_pick_next(cpu);
 
     if (next && curr && curr->state == THREAD_RUNNING) {
-        int64_t diff = (int64_t)next->vruntime - (int64_t)curr->vruntime;
+        ssize_t diff = (ssize_t)next->vruntime - (ssize_t)curr->vruntime;
 
-        if (diff > (int64_t)max_schedule_lag) {
+        if (diff > (ssize_t)max_schedule_lag) {
             KLOG_DEBUG(
                 "SCHED: clamping Thread %u (VR: %lu) to %lu\n",
                 next->tid,
@@ -440,6 +489,19 @@ void scheduler_unblock(thread_t* t) {
 
     acquire_interrupt_lock(&cpu->lock);
 
+    const size_t latency_bonus = (cfs_granularity * 10) / 4;
+    size_t target_vruntime     = cpu->min_vruntime;
+
+    if (target_vruntime > latency_bonus) {
+        target_vruntime -= latency_bonus;
+    } else {
+        target_vruntime = 0;
+    }
+
+    if (t->vruntime < target_vruntime) {
+        t->vruntime = target_vruntime;
+    }
+
     if (t->state == THREAD_BLOCKED || t->state == THREAD_SLEEPING) {
         t->state = THREAD_READY;
 
@@ -460,6 +522,57 @@ void scheduler_sleep(size_t ms) {
     release_interrupt_lock(&cpu->lock);
 
     scheduler_yield();
+}
+
+void scheduler_renice(thread_t* t, int nice) {
+    per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
+
+    if (nice < -20) {
+        nice = -20;
+    }
+
+    if (nice > 19) {
+        nice = 19;
+    }
+
+    acquire_interrupt_lock(&cpu->lock);
+
+    if (t->nice == nice) {
+        release_interrupt_lock(&cpu->lock);
+        return;
+    }
+
+    bool is_waiting = (t->state == THREAD_READY);
+
+    if (is_waiting) {
+        cfs_remove_thread(cpu, t);
+    }
+
+    // It is always possible that vruntime is slightly ahead of min_vruntime due to clamping or load
+    // balancing.
+    ssize_t vruntime_lag = (ssize_t)t->vruntime - (ssize_t)cpu->min_vruntime;
+
+    size_t old_weight = t->weight;
+    size_t new_weight = get_weight(nice);
+
+    if (vruntime_lag != 0) {
+        if (vruntime_lag > 0) {
+            vruntime_lag = scale_vruntime(vruntime_lag, old_weight, new_weight);
+        } else {
+            vruntime_lag = -scale_vruntime(-vruntime_lag, old_weight, new_weight);
+        }
+    }
+
+    t->vruntime = cpu->min_vruntime + (size_t)vruntime_lag;
+
+    t->nice   = nice;
+    t->weight = new_weight;
+
+    if (is_waiting) {
+        cfs_insert_thread(cpu, t);
+    }
+
+    release_interrupt_lock(&cpu->lock);
 }
 
 bool scheduler_is_initialized(void) {
