@@ -37,6 +37,23 @@ bool cpu_has_feature(struct cpu_features feat) {
     }
 }
 
+bool cpu_has_subfeature(struct cpu_subfeatures feat) {
+    cpuid_registers_t leaf = call_cpuid(feat.leaf, feat.subleaf);
+
+    switch (feat.reg) {
+        case 0:
+            return leaf.eax & (1u << feat.bit);
+        case 1:
+            return leaf.ebx & (1u << feat.bit);
+        case 2:
+            return leaf.ecx & (1u << feat.bit);
+        case 3:
+            return leaf.edx & (1u << feat.bit);
+        default:
+            PANIC("Unknown CPUID register %d", feat.reg);
+    }
+}
+
 cpuid_registers_t cpu_read_value(uint32_t leaf) {
     return call_cpuid(leaf, 0);
 }

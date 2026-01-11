@@ -125,6 +125,8 @@
 #define FEATURE_TSC_INVARIANT (struct cpu_features){.leaf = FEATURE_LEAF8_07, .reg = 3, .bit = 8}
 #define FEATURE_CPB           (struct cpu_features){.leaf = FEATURE_LEAF8_07, .reg = 3, .bit = 9}
 
+#define FEATURE_XSAVEOPT (struct cpu_subfeatures){.leaf = 0xD, .subleaf = 1, .reg = 0, .bit = 0}
+
 #define CPUID_TIME_INFO 0x15
 
 typedef struct {
@@ -149,8 +151,16 @@ struct cpu_features {
     uint8_t bit;
 };
 
+struct cpu_subfeatures {
+    uint32_t leaf;
+    uint32_t subleaf;
+    uint8_t reg;
+    uint8_t bit;
+};
+
 void cpu_read_features(void);
 bool cpu_has_feature(struct cpu_features feat);
+bool cpu_has_subfeature(struct cpu_subfeatures feat);
 
 cpuid_registers_t cpu_read_value(uint32_t leaf);
 

@@ -8,6 +8,7 @@
 #include "cpu/lapic.h"
 #include "cpu/pic.h"
 #include "cpu/registers.h"
+#include "cpu/simd.h"
 #include "libs/log.h"
 
 void arch_init_cpu_state(per_cpu_data_t* cpu) {
@@ -36,6 +37,7 @@ void arch_commit_cpu_state(per_cpu_data_t* cpu) {
 
     lapic_init();
     ioapic_init();
+    simd_init();
 
     uint64_t gs_val = (uint64_t)cpu;
     write_msr(X86_MSR_IA32_GS_BASE, gs_val);

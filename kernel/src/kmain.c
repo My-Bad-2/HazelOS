@@ -6,6 +6,15 @@
 #include "sched/scheduler.h"
 #include "tests/runner.h"
 
+static void worker(void* arg) {
+    const char* name = (const char*)arg;
+
+    while (true) {
+        KLOG_DEBUG("Hello from Thread %s!\n", name);
+    }
+}
+
+// NOLINTNEXTLINE(misc-use-internal-linkage)
 void kmain(void) {
     arch_serial_init();
 
@@ -23,6 +32,7 @@ void kmain(void) {
         kernel_run_tests();
     }
 #endif
+
     KLOG_INFO("Hello, World!\n");
 
     arch_halt(true);

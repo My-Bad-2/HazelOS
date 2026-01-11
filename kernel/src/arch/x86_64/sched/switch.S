@@ -10,6 +10,7 @@
 .global kernel_thread_entry
 .type kernel_thread_entry, @function
 kernel_thread_entry:
+    sti
     popq %rdi   # Load argument
     popq %rax   # Load function pointer
     call *%rax  # Execute Kernel function

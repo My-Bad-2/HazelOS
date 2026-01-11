@@ -31,6 +31,7 @@ process_t* process_create(bool is_kernel);
 void process_destroy(process_t* proc);
 
 process_t* process_find_by_pid(int pid);
+process_t* get_kernel_process(void);
 
 typedef struct thread {
     uint32_t tid;
@@ -53,7 +54,9 @@ typedef struct thread {
 
     struct list_node sched_node;
     struct list_node process_node;
+
     struct list_node* joiner;
+    void* fpu_buffer;
 } thread_t;
 
 thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg);
@@ -64,5 +67,8 @@ void arch_thread_destroy(thread_t* t);
 void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf);
 
 thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf);
+
+void thread_save_fpu(thread_t* t);
+void thread_restore_fpu(thread_t* t);
 
 #endif

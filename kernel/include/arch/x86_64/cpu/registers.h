@@ -12,38 +12,38 @@
 // clang-format off
 
 // This header is intended to be included in both C and ASM
-#define X86_CR0_PE               0x00000001  // protected mode enable
-#define X86_CR0_MP               0x00000002  // monitor coprocessor
-#define X86_CR0_EM               0x00000004  // emulation
-#define X86_CR0_TS               0x00000008  // task switched
-#define X86_CR0_ET               0x00000010  // extension type
-#define X86_CR0_NE               0x00000020  // enable x87 exception
-#define X86_CR0_WP               0x00010000  // supervisor write protect
-#define X86_CR0_NW               0x20000000  // not write-through
-#define X86_CR0_CD               0x40000000  // cache disable
-#define X86_CR0_PG               0x80000000  // enable paging
-#define X86_CR4_PAE              0x00000020  // PAE paging
+#define X86_CR0_PE               0x00000001ul  // protected mode enable
+#define X86_CR0_MP               0x00000002ul  // monitor coprocessor
+#define X86_CR0_EM               0x00000004ul  // emulation
+#define X86_CR0_TS               0x00000008ul  // task switched
+#define X86_CR0_ET               0x00000010ul  // extension type
+#define X86_CR0_NE               0x00000020ul  // enable x87 exception
+#define X86_CR0_WP               0x00010000ul  // supervisor write protect
+#define X86_CR0_NW               0x20000000ul  // not write-through
+#define X86_CR0_CD               0x40000000ul  // cache disable
+#define X86_CR0_PG               0x80000000ul  // enable paging
+#define X86_CR4_PAE              0x00000020ul  // PAE paging
 #define X86_CR3_BASE_MASK        (((1ull << 39) - 1) << 12)
-#define X86_CR4_PGE              0x00000080  // page global enable
-#define X86_CR4_OSFXSR           0x00000200  // os supports fxsave
-#define X86_CR4_OSXMMEXPT        0x00000400  // os supports xmm exception
-#define X86_CR4_UMIP             0x00000800  // User-mode instruction prevention
-#define X86_CR4_LA57             0x00001000  // 5-level paging
-#define X86_CR4_VMXE             0x00002000  // enable vmx
-#define X86_CR4_FSGSBASE         0x00010000  // enable {rd,wr}{fs,gs}base
-#define X86_CR4_PCIDE            0x00020000  // Process-context ID enable
-#define X86_CR4_OSXSAVE          0x00040000  // os supports xsave
-#define X86_CR4_SMEP             0x00100000  // SMEP protection enabling
-#define X86_CR4_SMAP             0x00200000  // SMAP protection enabling
-#define X86_CR4_PKE              0x00400000  // Enable protection keys
-#define X86_EFER_SCE             0x00000001  // enable SYSCALL
-#define X86_EFER_LME             0x00000100  // long mode enable
-#define X86_EFER_LMA             0x00000400  // long mode active
-#define X86_EFER_NXE             0x00000800  // to enable execute disable bit
-#define X86_MSR_IA32_PLATFORM_ID 0x00000017  // platform id
-#define X86_MSR_IA32_APIC_BASE   0x0000001b  // APIC base physical address
-#define X86_MSR_IA32_TSC_ADJUST  0x0000003b  // TSC adjust
-#define X86_MSR_IA32_SPEC_CTRL   0x00000048  // Speculative Execution Controls
+#define X86_CR4_PGE              0x00000080ul  // page global enable
+#define X86_CR4_OSFXSR           0x00000200ul  // os supports fxsave
+#define X86_CR4_OSXMMEXPT        0x00000400ul  // os supports xmm exception
+#define X86_CR4_UMIP             0x00000800ul  // User-mode instruction prevention
+#define X86_CR4_LA57             0x00001000ul  // 5-level paging
+#define X86_CR4_VMXE             0x00002000ul  // enable vmx
+#define X86_CR4_FSGSBASE         0x00010000ul  // enable {rd,wr}{fs,gs}base
+#define X86_CR4_PCIDE            0x00020000ul  // Process-context ID enable
+#define X86_CR4_OSXSAVE          0x00040000ul  // os supports xsave
+#define X86_CR4_SMEP             0x00100000ul  // SMEP protection enabling
+#define X86_CR4_SMAP             0x00200000ul  // SMAP protection enabling
+#define X86_CR4_PKE              0x00400000ul  // Enable protection keys
+#define X86_EFER_SCE             0x00000001ul  // enable SYSCALL
+#define X86_EFER_LME             0x00000100ul  // long mode enable
+#define X86_EFER_LMA             0x00000400ul  // long mode active
+#define X86_EFER_NXE             0x00000800ul  // to enable execute disable bit
+#define X86_MSR_IA32_PLATFORM_ID 0x00000017ul  // platform id
+#define X86_MSR_IA32_APIC_BASE   0x0000001bul  // APIC base physical address
+#define X86_MSR_IA32_TSC_ADJUST  0x0000003bul  // TSC adjust
+#define X86_MSR_IA32_SPEC_CTRL   0x00000048ul  // Speculative Execution Controls
 #define X86_SPEC_CTRL_IBRS       (1ull << 0)
 
 // Partitions indirect branch predictors across hyperthreads
@@ -243,11 +243,52 @@
      X86_DR7_G3 | X86_DR7_RW0 | X86_DR7_LEN0 | X86_DR7_RW1 | X86_DR7_LEN1 | X86_DR7_RW2 |       \
      X86_DR7_LEN2 | X86_DR7_RW3 | X86_DR7_LEN3)
 
+#define X86_XCR0_X87       0x00000001  // x87 FPU/MMX State
+#define X86_XCR0_SSE       0x00000002  // SSE State (XMM registers)
+#define X86_XCR0_AVX       0x00000004  // AVX State (YMM_Hi128)
+#define X86_XCR0_BNDREG    0x00000008  // MPX Bound Registers (BND0-BND3)
+#define X86_XCR0_BNDCSR    0x00000010  // MPX Bound Config/Status (BNDCFGU/S)
+#define X86_XCR0_OPMASK    0x00000020  // AVX-512 Opmask (k0-k7)
+#define X86_XCR0_ZMM_Hi256 0x00000040  // AVX-512 Upper 256 bits (ZMM0-15)
+#define X86_XCR0_Hi_ZMM    0x00000080  // AVX-512 Upper 16 regs (ZMM16-31)
+#define X86_XCR0_PT        0x00000100  // Processor Trace State
+#define X86_XCR0_PKRU      0x00000200  // Protection Key Rights (PKRU)
+#define X86_XCR0_PASID     0x00000400  // Process Address Space ID
+#define X86_XCR0_CET_U     0x00000800  // Control-flow Enforcement (User)
+#define X86_XCR0_CET_S     0x00001000  // Control-flow Enforcement (Supervisor)
+#define X86_XCR0_HDC       0x00002000  // Hardware Duty Cycling State
+#define X86_XCR0_UINTR     0x00004000  // User Interrupts State
+#define X86_XCR0_LBR       0x00008000  // Last Branch Record State
+#define X86_XCR0_HWP       0x00010000  // Hardware P-States
+#define X86_XCR0_XTILECFG  0x00020000  // AMX Tile Configuration
+#define X86_XCR0_XTILEDATA 0x00040000  // AMX Tile Data
+#define X86_XCR0_APX       0x00080000  // Advanced Performance Extensions
+
+// MXCSR
+#define X86_MXCSR_IE         0x00001  // Invalid Operation Flag
+#define X86_MXCSR_DE         0x00002  // Denormal Flag
+#define X86_MXCSR_ZE         0x00004  // Divide-by-Zero Flag
+#define X86_MXCSR_OE         0x00008  // Overflow Flag
+#define X86_MXCSR_UE         0x00010  // Underflow Flag
+#define X86_MXCSR_PE         0x00020  // Precision Flag
+#define X86_MXCSR_DAZ        0x00040  // Denormals Are Zeros
+#define X86_MXCSR_IM         0x00080  // Invalid Operation Mask
+#define X86_MXCSR_DM         0x00100  // Denormal Mask
+#define X86_MXCSR_ZM         0x00200  // Divide-by-Zero Mask
+#define X86_MXCSR_OM         0x00400  // Overflow Mask
+#define X86_MXCSR_UM         0x00800  // Underflow Mask
+#define X86_MXCSR_PM         0x01000  // Precision Mask
+#define X86_MXCSR_RC_MASK    0x06000  // Rounding Control Mask
+#define X86_MXCSR_RC_NEAREST 0x00000  // Round to Nearest (Even)
+#define X86_MXCSR_RC_DOWN    0x02000  // Round Down (toward -Inf)
+#define X86_MXCSR_RC_UP      0x04000  // Round Up (toward +Inf)
+#define X86_MXCSR_RC_TRUNC   0x06000  // Round toward Zero (Truncate)
+#define X86_MXCSR_FTZ        0x08000  // Flush to Zero
 
 // INVPCID Types
-#define INVPCID_INDIVIDUAL_ADDR 0            // Invalidate specific addr in specific PCID
-#define INVPCID_SINGLE_CONTEXT  1            // Invalidate all entries for specific PCID
-#define INVPCID_ALL_CONTEXT     2            // Invalidate all entries for all PCIDs (including Global)
+#define INVPCID_INDIVIDUAL_ADDR           0  // Invalidate specific addr in specific PCID
+#define INVPCID_SINGLE_CONTEXT            1  // Invalidate all entries for specific PCID
+#define INVPCID_ALL_CONTEXT               2  // Invalidate all entries for all PCIDs (including Global)
 #define INVPCID_ALL_CONTEXT_RETAIN_GLOBAL 3  // Invalidate all entries for all PCIDs (excluding Global)
 
 // clang-format on
@@ -323,6 +364,32 @@ DEFINE_DR_ACCESSOR(3)
 // Define accessors for Status (DR6) and Control (DR7)
 DEFINE_DR_ACCESSOR(6)
 DEFINE_DR_ACCESSOR(7)
+
+static inline uint32_t read_mxcsr(void) {
+    uint32_t mxcsr = 0;
+    asm volatile("stmxcsr %0" : "=m"(mxcsr));
+    return mxcsr;
+}
+
+static inline void write_mxcsr(uint32_t mxcsr) {
+    asm volatile("ldmxcsr %0" ::"m"(mxcsr));
+}
+
+#define XCR_XFEATURE_ENABLED_MASK 0
+
+static inline uint64_t read_xcr0(void) {
+    uint32_t low  = 0;
+    uint32_t high = 0;
+    asm volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(XCR_XFEATURE_ENABLED_MASK));
+    return ((uint64_t)high << 32) | low;
+}
+
+static inline void write_xcr0(uint64_t xcr0) {
+    uint32_t low  = xcr0 & 0xFFFFFFFF;
+    uint32_t high = xcr0 >> 32;
+
+    asm volatile("xsetbv" : : "a"(low), "d"(high), "c"(XCR_XFEATURE_ENABLED_MASK) : "memory");
+}
 
 #endif
 #endif

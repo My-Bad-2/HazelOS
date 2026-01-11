@@ -77,7 +77,7 @@ void scheduler_init(void) {
         memset(data->queues, 0, size);
 
         for (int q = 0; q < MLFQ_LEVELS; ++q) {
-            list_init(&data->queues[i]);
+            list_init(&data->queues[q]);
         }
 
         thread_t* idle = thread_create(kernel_proc, idle_task_entry, nullptr);
@@ -90,7 +90,7 @@ void scheduler_init(void) {
         }
 
         data->idle_thread       = idle;
-        data->curr_thread       = nullptr;
+        data->curr_thread       = idle;
         data->ticks_since_boost = 0;
 
         release_interrupt_lock(&data->lock);
@@ -181,6 +181,10 @@ save_current_thread_state(per_cpu_data_t* cpu, thread_t* curr, interrupt_trapfra
 
             curr->state = THREAD_READY;
 
+            if (curr->priority >= MLFQ_LEVELS) {
+                curr->priority = MLFQ_LEVELS - 1;
+            }
+
             list_push_back(&cpu->queues[curr->priority], &curr->sched_node);
             cpu->active_queues_bitmap |= (1u << curr->priority);
         }
@@ -260,7 +264,6 @@ switch_to_thread(per_cpu_data_t* cpu, thread_t* curr, thread_t* next, interrupt_
     }
 
     cpu->curr_thread = next;
-    curr             = next;
     next->state      = THREAD_RUNNING;
 
     if (next->owner && next->owner->map.phys_root) {
@@ -274,6 +277,9 @@ switch_to_thread(per_cpu_data_t* cpu, thread_t* curr, thread_t* next, interrupt_
 #ifdef __x86_64__
     update_tss_rsp0(&cpu->tss, next->kernel_stack_top);
 #endif
+
+    thread_save_fpu(curr);
+    thread_restore_fpu(next);
 
     release_interrupt_lock(&cpu->lock);
 
@@ -309,4 +315,8 @@ void scheduler_handler(interrupt_trapframe_t* tf) {
 
 bool scheduler_is_initialized(void) {
     return initialized;
+}
+
+process_t* get_kernel_process(void) {
+    return kernel_proc;
 }
