@@ -1,3 +1,4 @@
+#include "libs/log.h"
 #ifndef KERNEL_LIBS_RB_TREE_H
 #define KERNEL_LIBS_RB_TREE_H 1
 
@@ -24,6 +25,10 @@ struct rb_root {
     (struct rb_root) { \
         nullptr        \
     }
+
+#define RB_CLEAR_NODE(node) ((node)->rb_parent_color = (uintptr_t)(node))
+
+#define RB_EMPTY_NODE(node) ((node)->rb_parent_color == (uintptr_t)(node))
 
 #define RB_RED   0
 #define RB_BLACK 1
@@ -53,9 +58,9 @@ static inline void __rb_set_color(struct rb_node* n, size_t color) {
 }
 
 static inline void rb_init_node(struct rb_node* node) {
-    node->rb_parent_color = 0;
-    node->rb_right        = nullptr;
-    node->rb_left         = nullptr;
+    RB_CLEAR_NODE(node);
+    node->rb_right = nullptr;
+    node->rb_left  = nullptr;
 }
 
 #ifndef container_of

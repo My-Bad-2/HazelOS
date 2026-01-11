@@ -37,6 +37,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
 
     size_t min_vruntime;
     uint32_t thread_count;
+    uint32_t balance_counter;
 
     thread_t* curr_thread;
     thread_t* idle_thread;

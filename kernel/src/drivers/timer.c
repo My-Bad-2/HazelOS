@@ -71,8 +71,6 @@ void timer_arm_oneshot(
     timer_insert_sorted(manager, timer);
 
     release_spinlock(&manager->lock);
-
-    KLOG_DEBUG("TIMER: armed oneshot delay=%lu ticks manager=%p\n", delay, manager);
 }
 
 void timer_arm_periodic(
@@ -100,8 +98,6 @@ void timer_arm_periodic(
     timer_insert_sorted(manager, timer);
 
     release_spinlock(&manager->lock);
-
-    KLOG_DEBUG("TIMER: armed periodic interval=%lu ticks manager=%p\n", interval, manager);
 }
 
 bool timer_cancel(timer_event_t* timer) {

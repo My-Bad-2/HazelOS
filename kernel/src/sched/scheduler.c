@@ -27,11 +27,10 @@
 static process_t* kernel_proc = nullptr;
 static bool initialized       = false;
 
-static uint32_t cpu_count       = 0;
-static uint32_t balance_counter = 0;
-
+static uint32_t cpu_count      = 0;
 static size_t cfs_granularity  = 0;
 static size_t max_schedule_lag = 0;
+static size_t yield_penalty    = 0;
 
 // misc/scripts/calculate_weight.py
 static const size_t prio_to_weight[40] = {
@@ -130,11 +129,14 @@ void scheduler_init(void) {
         data->curr_thread  = idle;
         data->thread_count = 1;
 
+        data->balance_counter = 0;
+
         release_interrupt_lock(&data->lock);
     }
 
     cfs_granularity  = (timer_get_hz() / 1000) * 4;
     max_schedule_lag = (timer_get_hz() / 10);
+    yield_penalty    = (timer_get_hz() / 1000) * 5;
 
     timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
 
@@ -171,6 +173,10 @@ static void cfs_insert_thread(per_cpu_data_t* cpu, thread_t* t) {
 }
 
 static void cfs_remove_thread(per_cpu_data_t* cpu, thread_t* t) {
+    if (RB_EMPTY_NODE(&t->rb_node)) {
+        return;
+    }
+
     if (cpu->cfs_cache == &t->rb_node) {
         struct rb_node* next_node = rb_next(&t->rb_node);
 
@@ -178,6 +184,7 @@ static void cfs_remove_thread(per_cpu_data_t* cpu, thread_t* t) {
     }
 
     rb_erase(&t->rb_node, &cpu->cfs_tree);
+    RB_CLEAR_NODE(&t->rb_node);
 }
 
 static thread_t* cfs_pick_next(per_cpu_data_t* cpu) {
@@ -339,7 +346,7 @@ static void balance_load(void) {
     release_interrupt_lock(&first->lock);
 }
 
-void scheduler_handler(interrupt_trapframe_t* tf) {
+void scheduler_handler(interrupt_trapframe_t*) {
     per_cpu_data_t* cpu = smp_current_core();
 
     if (!cpu) {
@@ -348,8 +355,8 @@ void scheduler_handler(interrupt_trapframe_t* tf) {
         return;
     }
 
-    if (++balance_counter >= LOAD_BALANCE_INTERVAL) {
-        balance_counter = 0;
+    if (++cpu->balance_counter >= LOAD_BALANCE_INTERVAL) {
+        cpu->balance_counter = 0;
         balance_load();
     }
 
@@ -360,16 +367,13 @@ void scheduler_handler(interrupt_trapframe_t* tf) {
 
     size_t now = get_time_now();
 
-    if (curr && (now - curr->last_start_time) < cfs_granularity) {
+    if (curr && (curr->state == THREAD_RUNNING) &&
+        (now - curr->last_start_time) < cfs_granularity) {
         release_interrupt_lock(&cpu->lock);
         return;
     }
 
     if (curr && curr != cpu->idle_thread) {
-        if (tf) {
-            curr->tf = *tf;
-        }
-
         size_t delta = now - curr->last_start_time;
 
         if (delta > max_schedule_lag) {
@@ -409,7 +413,7 @@ void scheduler_handler(interrupt_trapframe_t* tf) {
                 "SCHED: clamping Thread %u (VR: %lu) to %lu\n",
                 next->tid,
                 next->vruntime,
-                curr->vruntime + max_schedule_lag
+                next->vruntime + max_schedule_lag
             );
 
             // Remove next to modify its key safely
@@ -466,10 +470,6 @@ void scheduler_handler(interrupt_trapframe_t* tf) {
         (switch_context_t**)&curr->context_rsp,
         (switch_context_t*)next->context_rsp
     );
-
-    if (tf) {
-        *tf = curr->tf;
-    }
 }
 
 void scheduler_block(void) {
@@ -515,10 +515,12 @@ void scheduler_sleep(size_t ms) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* curr      = cpu->curr_thread;
 
-    timer_arm_oneshot(&cpu->timer_manager, &curr->sleep_timer, ms, sleep_callback, curr);
-
     acquire_interrupt_lock(&cpu->lock);
-    curr->state = THREAD_SLEEPING;
+    if (curr && curr != cpu->idle_thread) {
+        timer_arm_oneshot(&cpu->timer_manager, &curr->sleep_timer, ms, sleep_callback, curr);
+        curr->state = THREAD_SLEEPING;
+    }
+
     release_interrupt_lock(&cpu->lock);
 
     scheduler_yield();
@@ -573,6 +575,26 @@ void scheduler_renice(thread_t* t, int nice) {
     }
 
     release_interrupt_lock(&cpu->lock);
+}
+
+void scheduler_yield(void) {
+    per_cpu_data_t* cpu = smp_current_core();
+
+    acquire_interrupt_lock(&cpu->lock);
+
+    thread_t* curr = cpu->curr_thread;
+
+    if (curr && curr != cpu->idle_thread) {
+        size_t penalty = yield_penalty;
+        penalty        = calculate_weighted_delta(penalty, curr->weight);
+
+        curr->vruntime += penalty;
+
+        // curr->state = THREAD_READY;
+    }
+
+    release_interrupt_lock(&cpu->lock);
+    scheduler_handler(nullptr);
 }
 
 bool scheduler_is_initialized(void) {
