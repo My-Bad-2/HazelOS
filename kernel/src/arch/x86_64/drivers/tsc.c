@@ -14,13 +14,13 @@ static uint64_t tsc_boot_time = 0;
 static bool warned_no_tsc     = false;
 static bool warned_no_freq    = false;
 
-static inline uint64_t tsc_read(void) {
+static inline size_t tsc_read(void) {
     uint32_t lo = 0;
     uint32_t hi = 0;
 
     asm volatile("lfence" ::: "memory");
     asm volatile("rdtsc" : "=a"(lo), "=b"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return ((size_t)hi << 32) | lo;
 }
 
 bool tsc_is_invarient(void) {
@@ -96,4 +96,28 @@ void tsc_udelay(size_t us) {
 
 void tsc_mdelay(size_t ms) {
     tsc_ndelay(ms * 1000000);
+}
+
+size_t tsc_get_time(void) {
+    if (tsc_freq_hz == 0) {
+        if (!warned_no_tsc) {
+            warned_no_tsc = true;
+            KLOG_WARN("TSC: get time requested before calibration\n");
+        }
+
+        return 0;
+    }
+
+    size_t current_tsc = tsc_read();
+
+    if (current_tsc < tsc_boot_time) {
+        return 0;
+    }
+
+    size_t elapsed_ticks = current_tsc - tsc_boot_time;
+    return muldiv64(elapsed_ticks, 1000000000ul, tsc_freq_hz);
+}
+
+size_t tsc_get_hz(void) {
+    return tsc_freq_hz;
 }

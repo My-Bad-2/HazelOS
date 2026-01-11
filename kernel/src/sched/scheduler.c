@@ -13,32 +13,28 @@
 #include "cpu/smp.h"
 #include "drivers/arch_timer.h"
 #include "drivers/timer.h"
-#include "libs/list.h"
 #include "libs/log.h"
+#include "libs/rb_tree.h"
 #include "libs/spinlock.h"
-#include "memory/heap.h"
 #include "sched/process.h"
 
-#define MLFQ_LEVELS           32
-#define QUANTUM_MIN           5
-#define QUANTUM_SCALE         32
-#define BOOST_THRESHOLD       2000
 #define LOAD_BALANCE_INTERVAL 1000
+#define SCHEDULER_LATENCY     20
+#define CACHE_HOT_THRESHOLD   1
 
-static process_t* kernel_proc   = nullptr;
+static process_t* kernel_proc = nullptr;
+static bool initialized       = false;
+
 static uint32_t cpu_count       = 0;
 static uint32_t balance_counter = 0;
-static struct list_node sleeping_list;
-static bool initialized = false;
+
+static size_t cfs_granularity  = 0;
+static size_t max_schedule_lag = 0;
 
 void arch_switch_context(switch_context_t** prev, switch_context_t* next);
 
 static void idle_task_entry(void*) {
     arch_halt(true);
-}
-
-static inline int get_timer_slice(int priority) {
-    return QUANTUM_MIN + (priority * QUANTUM_SCALE);
 }
 
 static inline int get_highest_priority_queue(uint32_t bitmap) {
@@ -60,9 +56,8 @@ static void sleep_callback(void* ctx) {
 }
 
 void scheduler_init(void) {
-    const size_t size = sizeof(struct list_node) * MLFQ_LEVELS;
-    kernel_proc       = process_create(true);
-    cpu_count         = (uint32_t)mp_request.response->cpu_count;
+    kernel_proc = process_create(true);
+    cpu_count   = (uint32_t)mp_request.response->cpu_count;
 
     if (!kernel_proc) {
         if (errno == 0) {
@@ -78,22 +73,6 @@ void scheduler_init(void) {
 
         acquire_interrupt_lock(&data->lock);
 
-        data->active_queues_bitmap = 0;
-        data->queues               = kmalloc(size);
-
-        if (!data->queues) {
-            errno = ENOMEM;
-            KLOG_ERROR("SCHED: failed to allocate run queues cpu=%u errno=%d\n", i, errno);
-            release_interrupt_lock(&data->lock);
-            return;
-        }
-
-        memset(data->queues, 0, size);
-
-        for (int q = 0; q < MLFQ_LEVELS; ++q) {
-            list_init(&data->queues[q]);
-        }
-
         thread_t* idle = thread_create(kernel_proc, idle_task_entry, nullptr);
 
         if (!idle) {
@@ -103,19 +82,76 @@ void scheduler_init(void) {
             return;
         }
 
-        data->idle_thread       = idle;
-        data->curr_thread       = idle;
-        data->thread_count      = 1;
-        data->ticks_since_boost = 0;
+        data->cfs_tree     = RB_ROOT;
+        data->cfs_cache    = nullptr;
+        data->min_vruntime = 0;
+
+        data->idle_thread  = idle;
+        data->curr_thread  = idle;
+        data->thread_count = 1;
 
         release_interrupt_lock(&data->lock);
     }
+
+    cfs_granularity  = (timer_get_hz() / 1000) * 4;
+    max_schedule_lag = (timer_get_hz() / 10);
 
     timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
 
     initialized = true;
 
-    KLOG_INFO("SCHED: initialized cpus=%u levels=%d\n", cpu_count, MLFQ_LEVELS);
+    KLOG_INFO("SCHED: initialized cpus=%u\n", cpu_count);
+}
+
+static void cfs_insert_thread(per_cpu_data_t* cpu, thread_t* t) {
+    struct rb_node** link  = &cpu->cfs_tree.rb_node;
+    struct rb_node* parent = nullptr;
+
+    size_t key       = t->vruntime;
+    bool is_leftmost = true;
+
+    while (*link) {
+        parent          = *link;
+        thread_t* entry = rb_entry(parent, thread_t, rb_node);
+
+        if (key < entry->vruntime) {
+            link = &parent->rb_left;
+        } else {
+            link        = &parent->rb_right;
+            is_leftmost = false;
+        }
+    }
+
+    rb_link_node(&t->rb_node, parent, link);
+    rb_insert_color(&t->rb_node, &cpu->cfs_tree);
+
+    if (is_leftmost) {
+        cpu->cfs_cache = &t->rb_node;
+    }
+}
+
+static void cfs_remove_thread(per_cpu_data_t* cpu, thread_t* t) {
+    if (cpu->cfs_cache == &t->rb_node) {
+        struct rb_node* next_node = rb_next(&t->rb_node);
+
+        cpu->cfs_cache = next_node;
+    }
+
+    rb_erase(&t->rb_node, &cpu->cfs_tree);
+}
+
+static thread_t* cfs_pick_next(per_cpu_data_t* cpu) {
+    struct rb_node* left = cpu->cfs_cache;
+
+    if (!left) {
+        return nullptr;
+    }
+
+    return rb_entry(left, thread_t, rb_node);
+}
+
+static inline size_t get_time_now(void) {
+    return timer_get_time();
 }
 
 void scheduler_add_thread(thread_t* t) {
@@ -132,12 +168,11 @@ void scheduler_add_thread(thread_t* t) {
 
     acquire_interrupt_lock(&data->lock);
 
-    t->priority        = 0;
-    t->ticks_remaining = get_timer_slice(t->priority);
+    t->vruntime        = data->min_vruntime;
     t->state           = THREAD_READY;
+    t->last_start_time = get_time_now();
 
-    list_push_back(&data->queues[0], &t->sched_node);
-    data->active_queues_bitmap |= (1 << 0);
+    cfs_insert_thread(data, t);
     data->thread_count++;
 
     release_interrupt_lock(&data->lock);
@@ -151,34 +186,31 @@ void scheduler_remove_thread(thread_t* t) {
     }
 
     per_cpu_data_t* data = smp_get_core(t->assigned_cpu);
-    int priority         = t->priority;
 
     acquire_interrupt_lock(&data->lock);
 
     if (t->state == THREAD_READY) {
-        if (t->sched_node.next) {
-            list_remove(&t->sched_node);
-
-            t->sched_node.next = nullptr;
-            t->sched_node.prev = nullptr;
-
-            if (list_empty(&data->queues[priority])) {
-                data->active_queues_bitmap &= ~(1u << priority);
-            }
-        }
+        cfs_remove_thread(data, t);
+        data->thread_count--;
+    } else if (t->state == THREAD_RUNNING) {
+        data->thread_count--;
     }
 
-    data->thread_count--;
     t->state = THREAD_TERMINATED;
+    timer_cancel(&t->sleep_timer);
 
     release_interrupt_lock(&data->lock);
 }
 
 static void balance_load(void) {
-    per_cpu_data_t* me     = smp_current_core();
-    per_cpu_data_t* victim = nullptr;
+    per_cpu_data_t* me = smp_current_core();
 
-    uint32_t max_threads = 0;
+    if (me->thread_count > 1) {
+        return;
+    }
+
+    per_cpu_data_t* victim = nullptr;
+    uint32_t max_load      = 0;
 
     for (uint32_t i = 0; i < cpu_count; ++i) {
         if (i == me->cpu_idx) {
@@ -186,15 +218,16 @@ static void balance_load(void) {
         }
 
         per_cpu_data_t* cpu = smp_get_core(i);
+        uint32_t load       = cpu->thread_count;
 
-        if (cpu->thread_count > max_threads) {
-            max_threads = cpu->thread_count;
-            victim      = cpu;
+        if (load > (me->thread_count + 1) && load > max_load) {
+            max_load = load;
+            victim   = cpu;
         }
     }
 
     // Only steal if victim has more than 1 threads
-    if (!victim || max_threads < 2) {
+    if (!victim || max_load < 2) {
         return;
     }
 
@@ -205,42 +238,44 @@ static void balance_load(void) {
     acquire_interrupt_lock(&first->lock);
     acquire_interrupt_lock(&second->lock);
 
-    // Steal from the tail of the lowest priority queue
-    struct list_node* stolen_node = nullptr;
+    // The right-most node has the highest vruntime (most cpu usage). Moving it allows the victim to
+    // focus on the low vruntime tasks.
+    struct rb_node* right = rb_last(&victim->cfs_tree);
 
-    for (int p = MLFQ_LEVELS - 1; p >= 0; --p) {
-        if (!list_empty(&victim->queues[p])) {
-            stolen_node = victim->queues[p].prev;
+    while (right) {
+        thread_t* t = rb_entry(right, thread_t, rb_node);
 
-            // Don't steal if it's the only thread running there
-            if (stolen_node == &victim->queues[p]) {
-                continue;
-            }
-
-            if (stolen_node == &victim->curr_thread->sched_node) {
-                continue;
-            }
-
-            // Detach from victim
-            list_remove(stolen_node);
-
-            if (list_empty(&victim->queues[p])) {
-                victim->active_queues_bitmap &= ~(1u << p);
-            }
-
-            victim->thread_count--;
-            break;
+        if (t == victim->idle_thread) {
+            right = rb_prev(right);
+            continue;
         }
-    }
 
-    if (stolen_node) {
-        thread_t* t = container_of(stolen_node, thread_t, sched_node);
+        if (t == victim->curr_thread) {
+            right = rb_prev(right);
+            continue;
+        }
+
+        uint64_t now = get_time_now();
+
+        // If the thread ran very recently, moving it kills performance.
+        if (now - t->last_start_time < CACHE_HOT_THRESHOLD) {
+            right = rb_prev(right);
+            continue;
+        }
+
+        cfs_remove_thread(victim, t);
+        victim->thread_count--;
+
+        int64_t lag = (int64_t)t->vruntime - (int64_t)victim->min_vruntime;
+        t->vruntime = me->min_vruntime + (size_t)lag;
+
+        if (t->vruntime < me->min_vruntime) {
+            t->vruntime = me->min_vruntime;
+        }
 
         t->assigned_cpu = me->cpu_idx;
-
-        list_push_back(&me->queues[t->priority], &t->sched_node);
-        me->active_queues_bitmap |= (1u << t->priority);
-
+        t->state        = THREAD_READY;
+        cfs_insert_thread(me, t);
         me->thread_count++;
 
         KLOG_INFO(
@@ -249,141 +284,131 @@ static void balance_load(void) {
             t->tid,
             victim->cpu_idx
         );
+
+        break;
     }
 
     release_interrupt_lock(&second->lock);
     release_interrupt_lock(&first->lock);
 }
 
-static void
-save_current_thread_state(per_cpu_data_t* cpu, thread_t* curr, interrupt_trapframe_t* tf) {
+void scheduler_handler(interrupt_trapframe_t* tf) {
+    per_cpu_data_t* cpu = smp_current_core();
+
+    if (!cpu) {
+        errno = ENODEV;
+        KLOG_ERROR("SCHED: handler called with no CPU context\n");
+        return;
+    }
+
+    if (++balance_counter >= LOAD_BALANCE_INTERVAL) {
+        balance_counter = 0;
+        balance_load();
+    }
+
+    acquire_interrupt_lock(&cpu->lock);
+
+    thread_t* curr = cpu->curr_thread;
+    thread_t* next = nullptr;
+
+    size_t now = get_time_now();
+
+    if (curr && (now - curr->last_start_time) < cfs_granularity) {
+        release_interrupt_lock(&cpu->lock);
+        return;
+    }
+
     if (curr && curr != cpu->idle_thread) {
         if (tf) {
             curr->tf = *tf;
         }
 
+        size_t delta = now - curr->last_start_time;
+
+        if (delta > max_schedule_lag) {
+            delta = max_schedule_lag;
+        }
+
+        if (delta == 0) {
+            delta = 1;
+        }
+
+        curr->vruntime += delta;
+        curr->total_runtime += delta;
+
+        if (curr->vruntime > cpu->min_vruntime) {
+            cpu->min_vruntime = curr->vruntime;
+        }
+
         if (curr->state == THREAD_RUNNING) {
-            curr->ticks_remaining--;
-
-            bool expired = (curr->ticks_remaining <= 0);
-
-            if (expired) {
-                int p = curr->priority;
-
-                if (p < MLFQ_LEVELS - 1) {
-                    curr->priority++;
-                }
-
-                curr->ticks_remaining = get_timer_slice(curr->priority);
-            }
-
             curr->state = THREAD_READY;
-
-            if (curr->priority >= MLFQ_LEVELS) {
-                curr->priority = MLFQ_LEVELS - 1;
+            cfs_insert_thread(cpu, curr);
+        } else {
+            if (curr->state != THREAD_READY) {
+                cpu->thread_count--;
             }
-
-            list_push_back(&cpu->queues[curr->priority], &curr->sched_node);
-            cpu->active_queues_bitmap |= (1u << curr->priority);
         }
     }
-}
 
-static void boost_queues_if_needed(per_cpu_data_t* cpu) {
-    cpu->ticks_since_boost++;
+    next = cfs_pick_next(cpu);
 
-    if (cpu->ticks_since_boost >= BOOST_THRESHOLD) {
-        cpu->ticks_since_boost = 0;
+    if (next && curr && curr->state == THREAD_RUNNING) {
+        int64_t diff = (int64_t)next->vruntime - (int64_t)curr->vruntime;
 
-        uint32_t boost_mask = cpu->active_queues_bitmap & ~1u;
+        if (diff > (int64_t)max_schedule_lag) {
+            KLOG_DEBUG(
+                "SCHED: clamping Thread %u (VR: %lu) to %lu\n",
+                next->tid,
+                next->vruntime,
+                curr->vruntime + max_schedule_lag
+            );
 
-        while (boost_mask) {
-            int p = ctz(boost_mask);
+            // Remove next to modify its key safely
+            cfs_remove_thread(cpu, next);
 
-            struct list_node* src  = &cpu->queues[p];
-            struct list_node* dest = &cpu->queues[0];
+            // Pull it back to a reasonable distance
+            next->vruntime = curr->vruntime + max_schedule_lag;
 
-            while (!list_empty(src)) {
-                struct list_node* node = src->next;
-                list_remove(node);
+            // Re-insert it back
+            cfs_insert_thread(cpu, next);
 
-                thread_t* t        = container_of(node, thread_t, sched_node);
-                t->priority        = 0;
-                t->ticks_remaining = get_timer_slice(0);
-
-                list_push_back(dest, node);
+            if (next->vruntime < cpu->min_vruntime) {
+                cpu->min_vruntime = next->vruntime;
             }
-
-            boost_mask &= ~(1u << p);
-            cpu->active_queues_bitmap &= ~(1u << p);
-        }
-
-        if (!list_empty(&cpu->queues[0])) {
-            cpu->active_queues_bitmap |= 1u;
         }
     }
-}
 
-static void balance_load_if_needed(void) {
-    if (++balance_counter >= LOAD_BALANCE_INTERVAL) {
-        balance_counter = 0;
-        balance_load();
-    }
-}
-
-static thread_t* select_next_thread(per_cpu_data_t* cpu) {
-    int next_q = get_highest_priority_queue(cpu->active_queues_bitmap);
-
-    if (next_q == -1) {
-        return nullptr;
-    }
-
-    struct list_node* node = cpu->queues[next_q].next;
-
-    list_remove(node);
-    node->next = nullptr;
-    node->prev = nullptr;
-
-    if (list_empty(&cpu->queues[next_q])) {
-        cpu->active_queues_bitmap &= ~(1u << next_q);
-    }
-
-    return container_of(node, thread_t, sched_node);
-}
-
-static void
-switch_to_thread(per_cpu_data_t* cpu, thread_t* curr, thread_t* next, interrupt_trapframe_t* tf) {
-    if (!next) {
+    if (next) {
+        cfs_remove_thread(cpu, next);
+    } else {
         next = cpu->idle_thread;
     }
 
-    if (!next) {
-        PANIC("SCHEDULER: No threads and no idle thread!");
-    }
-
     if (curr == next) {
-        curr->state = THREAD_RUNNING;
+        curr->state           = THREAD_RUNNING;
+        curr->last_start_time = now;
 
         release_interrupt_lock(&cpu->lock);
         return;
     }
 
-    cpu->curr_thread = next;
-    next->state      = THREAD_RUNNING;
+    cpu->curr_thread      = next;
+    next->state           = THREAD_RUNNING;
+    next->assigned_cpu    = cpu->cpu_idx;
+    next->last_start_time = now;
 
-    if (next->owner && next->owner->map.phys_root) {
-        uintptr_t next_cr3 = next->owner->map.phys_root;
-
-        if (read_cr3() != next_cr3) {
-            write_cr3(next_cr3);
-        }
+    if (curr->owner != next->owner) {
+        write_cr3(next->owner->map.phys_root);
     }
 
 #ifdef __x86_64__
     update_tss_rsp0(&cpu->tss, next->kernel_stack_top);
 #endif
 
-    thread_save_fpu(curr);
+    if (curr->state != THREAD_TERMINATED) {
+        thread_save_fpu(curr);
+    }
+
     thread_restore_fpu(next);
 
     release_interrupt_lock(&cpu->lock);
@@ -396,28 +421,6 @@ switch_to_thread(per_cpu_data_t* cpu, thread_t* curr, thread_t* next, interrupt_
     if (tf) {
         *tf = curr->tf;
     }
-}
-
-void scheduler_handler(interrupt_trapframe_t* tf) {
-    per_cpu_data_t* cpu = smp_current_core();
-
-    if (!cpu) {
-        errno = ENODEV;
-        KLOG_ERROR("SCHED: handler called with no CPU context\n");
-        return;
-    }
-
-    acquire_interrupt_lock(&cpu->lock);
-
-    balance_load_if_needed();
-    thread_t* curr = cpu->curr_thread;
-
-    save_current_thread_state(cpu, curr, tf);
-    boost_queues_if_needed(cpu);
-
-    thread_t* next = select_next_thread(cpu);
-
-    switch_to_thread(cpu, curr, next, tf);
 }
 
 void scheduler_block(void) {
@@ -440,8 +443,7 @@ void scheduler_unblock(thread_t* t) {
     if (t->state == THREAD_BLOCKED || t->state == THREAD_SLEEPING) {
         t->state = THREAD_READY;
 
-        list_push_back(&cpu->queues[t->priority], &t->sched_node);
-        cpu->active_queues_bitmap |= (1u << t->priority);
+        cfs_insert_thread(cpu, t);
     }
 
     release_interrupt_lock(&cpu->lock);

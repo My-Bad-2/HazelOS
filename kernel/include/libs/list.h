@@ -1,7 +1,9 @@
 #ifndef KERNEL_LIBS_LIST_H
 #define KERNEL_LIBS_LIST_H 1
 
-#include <stdbool.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct list_node {
     struct list_node* next;
@@ -59,5 +61,9 @@ static inline bool list_empty(const struct list_node* sentinel) {
 #define list_for_each_safe(pos, n, sentinel)                               \
     for ((pos) = (sentinel)->next, (n) = (pos)->next; (pos) != (sentinel); \
          (pos) = (n), (n) = (pos)->next)
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

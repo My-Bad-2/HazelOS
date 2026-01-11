@@ -118,6 +118,36 @@ void timer_udelay(size_t us) {
     }
 }
 
+size_t timer_get_time(void) {
+    switch (source) {
+        case CLOCK_PIT:
+            return pit_get_ticks();
+        case CLOCK_HPET:
+            return hpet_get_ticks();
+        case CLOCK_TSC:
+            return tsc_get_time();
+        default:
+            errno = ENODEV;
+            KLOG_WARN("TIMER: get time requested before clock source was initialized\n");
+            return 0;
+    }
+}
+
+size_t timer_get_hz(void) {
+    switch (source) {
+        case CLOCK_PIT:
+            return pit_get_hz();
+        case CLOCK_HPET:
+            return hpet_get_hz();
+        case CLOCK_TSC:
+            return tsc_get_hz();
+        default:
+            errno = ENODEV;
+            KLOG_WARN("TIMER: get hz requested before clock source was initialized\n");
+            return 0;
+    }
+}
+
 void timer_configure(timer_mode_t mode, uint8_t vector, size_t count) {
     switch (mode) {
         case TIMER_ONESHOT:

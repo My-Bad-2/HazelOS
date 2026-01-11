@@ -296,6 +296,10 @@
 #ifndef __ASSEMBLER__
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define DEFINE_CR_ACCESSOR(n)                                    \
     static inline uint64_t read_cr##n(void) {                    \
         uint64_t val;                                            \
@@ -390,6 +394,10 @@ static inline void write_xcr0(uint64_t xcr0) {
 
     asm volatile("xsetbv" : : "a"(low), "d"(high), "c"(XCR_XFEATURE_ENABLED_MASK) : "memory");
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 #endif

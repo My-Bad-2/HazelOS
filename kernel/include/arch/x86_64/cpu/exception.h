@@ -5,6 +5,10 @@
 
 #define GSI_NONE 0xffffffff
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
     uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
@@ -129,5 +133,9 @@ int register_external_irq_handler(
 void deregister_external_interrupt_handler(uint8_t vector);
 void deregister_interrupt_handler(uint8_t vector);
 void deregister_external_irq_handler(uint8_t vector);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

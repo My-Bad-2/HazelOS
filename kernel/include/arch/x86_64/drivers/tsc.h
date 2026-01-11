@@ -14,6 +14,9 @@ void tsc_mdelay(size_t ms);
 void tsc_udelay(size_t us);
 void tsc_ndelay(size_t ns);
 
+size_t tsc_get_time(void);
+size_t tsc_get_hz(void);
+
 #ifdef __cplusplus
 }
 #endif

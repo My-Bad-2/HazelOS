@@ -241,3 +241,11 @@ void hpet_mdelay(size_t ms) {
         arch_pause();
     }
 }
+
+size_t hpet_get_ticks(void) {
+    return hpet_regs->main_counter_value / clock_period_fs;
+}
+
+size_t hpet_get_hz(void) {
+    return clock_period_fs;
+}

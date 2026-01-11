@@ -1,13 +1,13 @@
-#include <stdatomic.h>
-
-#include "drivers/timer.h"
-#include "libs/list.h"
-#include "libs/spinlock.h"
-#include "sched/process.h"
 #ifndef KERNEL_CPU_H
 #define KERNEL_CPU_H 1
 
+#include <stdatomic.h>
 #include <stddef.h>
+
+#include "drivers/timer.h"
+#include "libs/rb_tree.h"
+#include "libs/spinlock.h"
+#include "sched/process.h"
 
 #ifdef __x86_64__
 #include "cpu/gdt.h"
@@ -32,10 +32,10 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     tss_t tss;
 #endif
 
-    struct list_node* queues;
-    uint32_t active_queues_bitmap;
-    uint32_t ticks_since_boost;
+    struct rb_root cfs_tree;
+    struct rb_node* cfs_cache;
 
+    size_t min_vruntime;
     uint32_t thread_count;
 
     thread_t* curr_thread;

@@ -12,6 +12,7 @@ void pit_init(void);
 void pit_disable(void);
 
 uint64_t pit_get_ticks(void);
+size_t pit_get_hz(void);
 
 void pit_tick(void);
 

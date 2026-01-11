@@ -1,4 +1,3 @@
-#include "drivers/timer.h"
 #ifndef KERNEL_SCHED_PROCESS_H
 #define KERNEL_SCHED_PROCESS_H 1
 
@@ -6,7 +5,9 @@
 #include <stdint.h>
 
 #include "cpu/exception.h"
+#include "drivers/timer.h"
 #include "libs/list.h"
+#include "libs/rb_tree.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 
@@ -48,12 +49,14 @@ typedef struct thread {
     void* kernel_stack;
     void* user_stack;
 
-    int priority;
-    int ticks_remaining;
+    size_t vruntime;
+    size_t total_runtime;
+    size_t last_start_time;
 
     uint32_t cpu_affinity;  // Which CPU (s) this thread is allowed to run on
     uint32_t assigned_cpu;
 
+    struct rb_node rb_node;
     struct list_node sched_node;
     struct list_node process_node;
 

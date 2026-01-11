@@ -71,6 +71,10 @@ uint64_t pit_get_ticks(void) {
     return atomic_load_explicit(&global_ticks, memory_order_seq_cst);
 }
 
+size_t pit_get_hz(void) {
+    return current_frequency;
+}
+
 void pit_disable(void) {
     uint8_t cmd = PIT_ACCESS_LOHI | PIT_MODE_0;
     io_write8(PIT_PORT_CMD, cmd);

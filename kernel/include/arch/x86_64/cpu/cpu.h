@@ -129,6 +129,10 @@
 
 #define CPUID_TIME_INFO 0x15
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t eax;
     uint32_t ebx;
@@ -163,5 +167,9 @@ bool cpu_has_feature(struct cpu_features feat);
 bool cpu_has_subfeature(struct cpu_subfeatures feat);
 
 cpuid_registers_t cpu_read_value(uint32_t leaf);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

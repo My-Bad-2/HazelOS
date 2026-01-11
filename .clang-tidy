@@ -54,7 +54,8 @@ Checks: >
   -modernize-use-auto,
   
   # Avoid Trailing Return Types
-  -modernize-use-trailing-return-type
+  -modernize-use-trailing-return-type,
+  -clang-diagnostic-cast-qual
 
 # Treat warnings as errors to enforce quality in CI/CD
 WarningsAsErrors: 'bugprone-*,linuxkernel-*,clang-analyzer-*,performance-*'

@@ -15,8 +15,6 @@
 #include "memory/vma.h"
 #include "memory/vmm.h"
 
-#define QUANTUM_BASE 20
-
 static atomic_uint next_pid = 1;
 static atomic_uint next_tid = 1;
 
@@ -110,6 +108,8 @@ static const char* thread_state_to_str(thread_state_t state) {
             return "Blocked";
         case THREAD_TERMINATED:
             return "Terminated";
+        case THREAD_SLEEPING:
+            return "Sleeping";
     }
 }
 
@@ -127,10 +127,8 @@ thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg) {
     t->tid = atomic_load_explicit(&next_tid, memory_order_relaxed);
     atomic_fetch_add_explicit(&next_tid, 1, memory_order_relaxed);
 
-    t->owner           = proc;
-    t->state           = THREAD_READY;
-    t->priority        = 0;
-    t->ticks_remaining = QUANTUM_BASE;
+    t->owner = proc;
+    t->state = THREAD_READY;
 
     if (!arch_thread_init(t, entry, arg)) {
         if (errno == 0) {

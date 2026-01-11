@@ -91,8 +91,6 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     t->kernel_stack_top = (uintptr_t)t->kernel_stack + KSTACK_SIZE;
     uintptr_t sp        = align_down(t->kernel_stack_top, 0x10);
 
-    KLOG_DEBUG("buffer = %p size=%lx\n", t->fpu_buffer, fpu_size);
-
     if (proc->is_kernel) {
         sp -= sizeof(struct kernel_stack_layout);
 
