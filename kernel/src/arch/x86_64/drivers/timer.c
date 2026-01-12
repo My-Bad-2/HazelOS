@@ -31,14 +31,14 @@ static const char* timer_clock_source_name(clock_source_t src) {
     }
 }
 
-static void timer_handler(interrupt_trapframe_t* tf, void*) {
+static void timer_handler(interrupt_trapframe_t*, void*) {
     per_cpu_data_t* cpu = smp_current_core();
 
     timer_tick();
     timer_manager_tick(&cpu->timer_manager);
 
     if (scheduler_is_initialized()) {
-        scheduler_handler(tf);
+        scheduler_handler();
     }
 }
 

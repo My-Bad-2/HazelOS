@@ -27,10 +27,9 @@
 static process_t* kernel_proc = nullptr;
 static bool initialized       = false;
 
-static uint32_t cpu_count      = 0;
-static size_t cfs_granularity  = 0;
-static size_t max_schedule_lag = 0;
-static size_t yield_penalty    = 0;
+static uint32_t cpu_count     = 0;
+static size_t cfs_granularity = 0;
+static size_t yield_penalty   = 0;
 
 // misc/scripts/calculate_weight.py
 static const size_t prio_to_weight[40] = {
@@ -63,7 +62,7 @@ static inline size_t get_weight(int nice) {
 }
 
 static inline size_t calculate_weighted_delta(size_t delta, size_t weight) {
-    if (weight == DEFAULT_NICE) {
+    if (weight == get_weight(DEFAULT_NICE)) {
         return delta;
     }
 
@@ -134,9 +133,8 @@ void scheduler_init(void) {
         release_interrupt_lock(&data->lock);
     }
 
-    cfs_granularity  = (timer_get_hz() / 1000) * 4;
-    max_schedule_lag = (timer_get_hz() / 10);
-    yield_penalty    = (timer_get_hz() / 1000) * 5;
+    cfs_granularity = (timer_get_hz() / 10);
+    yield_penalty   = (timer_get_hz() / 1000) * 5;
 
     timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
 
@@ -145,18 +143,39 @@ void scheduler_init(void) {
     KLOG_INFO("SCHED: initialized cpus=%u\n", cpu_count);
 }
 
+static int cfs_cmp(thread_t* a, thread_t* b) {
+    if (a->vruntime < b->vruntime) {
+        return -1;
+    }
+
+    if (a->vruntime > b->vruntime) {
+        return 1;
+    }
+
+    if (a->tid < b->tid) {
+        return -1;
+    }
+
+    if (a->tid > b->tid) {
+        return 1;
+    }
+
+    return 0;
+}
+
 static void cfs_insert_thread(per_cpu_data_t* cpu, thread_t* t) {
     struct rb_node** link  = &cpu->cfs_tree.rb_node;
     struct rb_node* parent = nullptr;
 
-    size_t key       = t->vruntime;
     bool is_leftmost = true;
 
     while (*link) {
         parent          = *link;
         thread_t* entry = rb_entry(parent, thread_t, rb_node);
 
-        if (key < entry->vruntime) {
+        int cmp = cfs_cmp(t, entry);
+
+        if (cmp < 0) {
             link = &parent->rb_left;
         } else {
             link        = &parent->rb_right;
@@ -173,14 +192,8 @@ static void cfs_insert_thread(per_cpu_data_t* cpu, thread_t* t) {
 }
 
 static void cfs_remove_thread(per_cpu_data_t* cpu, thread_t* t) {
-    if (RB_EMPTY_NODE(&t->rb_node)) {
-        return;
-    }
-
     if (cpu->cfs_cache == &t->rb_node) {
-        struct rb_node* next_node = rb_next(&t->rb_node);
-
-        cpu->cfs_cache = next_node;
+        cpu->cfs_cache = rb_next(&t->rb_node);
     }
 
     rb_erase(&t->rb_node, &cpu->cfs_tree);
@@ -189,6 +202,10 @@ static void cfs_remove_thread(per_cpu_data_t* cpu, thread_t* t) {
 
 static thread_t* cfs_pick_next(per_cpu_data_t* cpu) {
     struct rb_node* left = cpu->cfs_cache;
+
+    if (!left) {
+        left = rb_first(&cpu->cfs_tree);
+    }
 
     if (!left) {
         return nullptr;
@@ -346,7 +363,15 @@ static void balance_load(void) {
     release_interrupt_lock(&first->lock);
 }
 
-void scheduler_handler(interrupt_trapframe_t*) {
+static inline size_t min_vruntime(size_t a, size_t b) {
+    return (a < b) ? a : b;
+}
+
+static inline size_t max_vruntime(size_t a, size_t b) {
+    return (a > b) ? a : b;
+}
+
+void scheduler_handler(void) {
     per_cpu_data_t* cpu = smp_current_core();
 
     if (!cpu) {
@@ -367,17 +392,18 @@ void scheduler_handler(interrupt_trapframe_t*) {
 
     size_t now = get_time_now();
 
-    if (curr && (curr->state == THREAD_RUNNING) &&
-        (now - curr->last_start_time) < cfs_granularity) {
-        release_interrupt_lock(&cpu->lock);
-        return;
+    if (curr && (curr->state == THREAD_RUNNING)) {
+        if ((now - curr->last_start_time) < cfs_granularity) {
+            release_interrupt_lock(&cpu->lock);
+            return;
+        }
     }
 
     if (curr && curr != cpu->idle_thread) {
         size_t delta = now - curr->last_start_time;
 
-        if (delta > max_schedule_lag) {
-            delta = max_schedule_lag;
+        if (now < curr->last_start_time) {
+            delta = 0;
         }
 
         if (delta == 0) {
@@ -389,47 +415,25 @@ void scheduler_handler(interrupt_trapframe_t*) {
         curr->total_runtime += delta;
         curr->vruntime += weighted_delta;
 
-        if (curr->vruntime > cpu->min_vruntime) {
-            cpu->min_vruntime = curr->vruntime;
+        size_t v_next             = curr->vruntime;
+        struct rb_node* left_node = rb_first(&cpu->cfs_tree);
+
+        if (left_node) {
+            thread_t* left = rb_entry(left_node, thread_t, rb_node);
+            v_next         = min_vruntime(v_next, left->vruntime);
         }
 
-        if (curr->state == THREAD_RUNNING) {
+        cpu->min_vruntime = max_vruntime(cpu->min_vruntime, v_next);
+
+        if (curr->state == THREAD_RUNNING || curr->state == THREAD_READY) {
             curr->state = THREAD_READY;
             cfs_insert_thread(cpu, curr);
         } else {
-            if (curr->state != THREAD_READY) {
-                cpu->thread_count--;
-            }
+            cpu->thread_count--;
         }
     }
 
     next = cfs_pick_next(cpu);
-
-    if (next && curr && curr->state == THREAD_RUNNING) {
-        ssize_t diff = (ssize_t)next->vruntime - (ssize_t)curr->vruntime;
-
-        if (diff > (ssize_t)max_schedule_lag) {
-            KLOG_DEBUG(
-                "SCHED: clamping Thread %u (VR: %lu) to %lu\n",
-                next->tid,
-                next->vruntime,
-                next->vruntime + max_schedule_lag
-            );
-
-            // Remove next to modify its key safely
-            cfs_remove_thread(cpu, next);
-
-            // Pull it back to a reasonable distance
-            next->vruntime = curr->vruntime + max_schedule_lag;
-
-            // Re-insert it back
-            cfs_insert_thread(cpu, next);
-
-            if (next->vruntime < cpu->min_vruntime) {
-                cpu->min_vruntime = next->vruntime;
-            }
-        }
-    }
 
     if (next) {
         cfs_remove_thread(cpu, next);
@@ -448,7 +452,7 @@ void scheduler_handler(interrupt_trapframe_t*) {
     cpu->curr_thread      = next;
     next->state           = THREAD_RUNNING;
     next->assigned_cpu    = cpu->cpu_idx;
-    next->last_start_time = now;
+    next->last_start_time = get_time_now();
 
     if (curr->owner != next->owner) {
         write_cr3(next->owner->map.phys_root);
@@ -544,7 +548,7 @@ void scheduler_renice(thread_t* t, int nice) {
         return;
     }
 
-    bool is_waiting = (t->state == THREAD_READY);
+    bool is_waiting = (t->state == THREAD_READY) && !RB_EMPTY_NODE(&t->rb_node);
 
     if (is_waiting) {
         cfs_remove_thread(cpu, t);
@@ -590,11 +594,11 @@ void scheduler_yield(void) {
 
         curr->vruntime += penalty;
 
-        // curr->state = THREAD_READY;
+        curr->state = THREAD_READY;
     }
 
     release_interrupt_lock(&cpu->lock);
-    scheduler_handler(nullptr);
+    scheduler_handler();
 }
 
 bool scheduler_is_initialized(void) {

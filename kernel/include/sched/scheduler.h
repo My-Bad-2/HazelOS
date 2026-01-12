@@ -1,7 +1,6 @@
 #ifndef KERNEL_SCHED_SCHEDULER_H
 #define KERNEL_SCHED_SCHEDULER_H 1
 
-#include "cpu/exception.h"
 #include "sched/process.h"
 
 #ifdef __cplusplus
@@ -19,7 +18,7 @@ void scheduler_block(void);
 void scheduler_unblock(thread_t* t);
 void scheduler_sleep(size_t ms);
 
-void scheduler_handler(interrupt_trapframe_t* tf);
+void scheduler_handler(void);
 void scheduler_yield(void);
 
 #ifdef __cplusplus
