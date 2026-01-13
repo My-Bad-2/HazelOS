@@ -27,7 +27,6 @@ struct rb_root {
     }
 
 #define RB_CLEAR_NODE(node) ((node)->rb_parent_color = (uintptr_t)(node))
-
 #define RB_EMPTY_NODE(node) ((node)->rb_parent_color == (uintptr_t)(node))
 
 #define RB_RED   0

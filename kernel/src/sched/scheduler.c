@@ -7,6 +7,7 @@
 
 #include "arch.h"
 #include "boot/boot.h"
+#include "compiler.h"
 #include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
@@ -27,9 +28,10 @@
 static process_t* kernel_proc = nullptr;
 static bool initialized       = false;
 
-static uint32_t cpu_count     = 0;
-static size_t cfs_granularity = 0;
-static size_t yield_penalty   = 0;
+static uint32_t cpu_count         = 0;
+static size_t cfs_min_granularity = 0;
+static size_t yield_penalty       = 0;
+static size_t target_latency      = 0;
 
 // misc/scripts/calculate_weight.py
 static const size_t prio_to_weight[40] = {
@@ -133,8 +135,11 @@ void scheduler_init(void) {
         release_interrupt_lock(&data->lock);
     }
 
-    cfs_granularity = (timer_get_hz() / 10);
-    yield_penalty   = (timer_get_hz() / 1000) * 5;
+    const size_t ticks_per_ns = (1000000000ul / timer_get_hz());
+
+    cfs_min_granularity = ticks_per_ns * 1000000ul;   // 1 ms
+    yield_penalty       = ticks_per_ns * 5000000ul;   // 5 ms
+    target_latency      = ticks_per_ns * 20000000ul;  // 20 ms
 
     timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
 
@@ -371,6 +376,24 @@ static inline size_t max_vruntime(size_t a, size_t b) {
     return (a > b) ? a : b;
 }
 
+static size_t get_time_slice(per_cpu_data_t* cpu) {
+    size_t thread_count = cpu->thread_count;
+
+    if (thread_count == 0) {
+        return cfs_min_granularity;
+    }
+
+    size_t slice = target_latency / thread_count;
+
+    // If we have too many threads, we extend the latency period rather than thrashing the cpu with
+    // tiny time slices.
+    if (slice < cfs_min_granularity) {
+        slice = cfs_min_granularity;
+    }
+
+    return slice;
+}
+
 void scheduler_handler(void) {
     per_cpu_data_t* cpu = smp_current_core();
 
@@ -380,20 +403,24 @@ void scheduler_handler(void) {
         return;
     }
 
-    if (++cpu->balance_counter >= LOAD_BALANCE_INTERVAL) {
-        cpu->balance_counter = 0;
+    if ((++cpu->balance_counter & (1024 - 1)) == 0) {
         balance_load();
+    }
+
+    thread_t* curr = cpu->curr_thread;
+    size_t now     = get_time_now();
+
+    if (curr && curr->state != THREAD_TERMINATED) {
+        thread_save_fpu(curr);
     }
 
     acquire_interrupt_lock(&cpu->lock);
 
-    thread_t* curr = cpu->curr_thread;
     thread_t* next = nullptr;
-
-    size_t now = get_time_now();
+    size_t slice   = get_time_slice(cpu);
 
     if (curr && (curr->state == THREAD_RUNNING)) {
-        if ((now - curr->last_start_time) < cfs_granularity) {
+        if ((now - curr->last_start_time) < slice) {
             release_interrupt_lock(&cpu->lock);
             return;
         }
@@ -404,10 +431,6 @@ void scheduler_handler(void) {
 
         if (now < curr->last_start_time) {
             delta = 0;
-        }
-
-        if (delta == 0) {
-            delta = 1;
         }
 
         size_t weighted_delta = calculate_weighted_delta(delta, curr->weight);
@@ -437,6 +460,7 @@ void scheduler_handler(void) {
 
     if (next) {
         cfs_remove_thread(cpu, next);
+        prefetch((void*)next->context_rsp, 1, 3);
     } else {
         next = cpu->idle_thread;
     }
@@ -452,23 +476,24 @@ void scheduler_handler(void) {
     cpu->curr_thread      = next;
     next->state           = THREAD_RUNNING;
     next->assigned_cpu    = cpu->cpu_idx;
-    next->last_start_time = get_time_now();
+    next->last_start_time = now;
 
-    if (curr->owner != next->owner) {
-        write_cr3(next->owner->map.phys_root);
+    process_t* next_proc = next->owner;
+    process_t* curr_proc = curr ? curr->owner : nullptr;
+
+    if (next_proc) {
+        if (curr_proc != next_proc) {
+            write_cr3(next_proc->map.phys_root);
+        }
     }
+
+    release_interrupt_lock(&cpu->lock);
 
 #ifdef __x86_64__
     update_tss_rsp0(&cpu->tss, next->kernel_stack_top);
 #endif
 
-    if (curr->state != THREAD_TERMINATED) {
-        thread_save_fpu(curr);
-    }
-
     thread_restore_fpu(next);
-
-    release_interrupt_lock(&cpu->lock);
 
     arch_switch_context(
         (switch_context_t**)&curr->context_rsp,
@@ -493,7 +518,7 @@ void scheduler_unblock(thread_t* t) {
 
     acquire_interrupt_lock(&cpu->lock);
 
-    const size_t latency_bonus = (cfs_granularity * 10) / 4;
+    const size_t latency_bonus = (cfs_min_granularity * 10) / 4;
     size_t target_vruntime     = cpu->min_vruntime;
 
     if (target_vruntime > latency_bonus) {
@@ -531,7 +556,8 @@ void scheduler_sleep(size_t ms) {
 }
 
 void scheduler_renice(thread_t* t, int nice) {
-    per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
+    per_cpu_data_t* cpu = nullptr;
+    size_t flags        = 0;
 
     if (nice < -20) {
         nice = -20;
@@ -541,40 +567,56 @@ void scheduler_renice(thread_t* t, int nice) {
         nice = 19;
     }
 
-    acquire_interrupt_lock(&cpu->lock);
+    if (*(volatile int*)&t->nice == nice) {
+        return;
+    }
+
+    while (true) {
+        uint32_t expected_cpu = *(volatile uint32_t*)&t->assigned_cpu;
+        cpu                   = smp_get_core(expected_cpu);
+
+        acquire_interrupt_lock(&cpu->lock);
+
+        if (t->assigned_cpu == expected_cpu) {
+            break;
+        }
+
+        release_interrupt_lock(&cpu->lock);
+        arch_pause();
+    }
 
     if (t->nice == nice) {
         release_interrupt_lock(&cpu->lock);
         return;
     }
 
-    bool is_waiting = (t->state == THREAD_READY) && !RB_EMPTY_NODE(&t->rb_node);
+    bool on_rq = (t->state == THREAD_READY) && !RB_EMPTY_NODE(&t->rb_node);
 
-    if (is_waiting) {
+    if (on_rq) {
         cfs_remove_thread(cpu, t);
     }
-
-    // It is always possible that vruntime is slightly ahead of min_vruntime due to clamping or load
-    // balancing.
-    ssize_t vruntime_lag = (ssize_t)t->vruntime - (ssize_t)cpu->min_vruntime;
 
     size_t old_weight = t->weight;
     size_t new_weight = get_weight(nice);
 
-    if (vruntime_lag != 0) {
-        if (vruntime_lag > 0) {
-            vruntime_lag = scale_vruntime(vruntime_lag, old_weight, new_weight);
-        } else {
-            vruntime_lag = -scale_vruntime(-vruntime_lag, old_weight, new_weight);
-        }
-    }
+    if (old_weight != new_weight) {
+        int64_t vruntime_lag = (ssize_t)t->vruntime - (ssize_t)cpu->min_vruntime;
 
-    t->vruntime = cpu->min_vruntime + (size_t)vruntime_lag;
+        if (vruntime_lag != 0) {
+            uint128_t lag_abs =
+                (vruntime_lag < 0) ? (uint128_t)(-vruntime_lag) : (uint128_t)vruntime_lag;
+            lag_abs = (lag_abs * old_weight) / new_weight;
+
+            vruntime_lag = (vruntime_lag < 0) ? -(int64_t)lag_abs : (int64_t)lag_abs;
+        }
+
+        t->vruntime = cpu->min_vruntime + (size_t)vruntime_lag;
+    }
 
     t->nice   = nice;
     t->weight = new_weight;
 
-    if (is_waiting) {
+    if (on_rq) {
         cfs_insert_thread(cpu, t);
     }
 
