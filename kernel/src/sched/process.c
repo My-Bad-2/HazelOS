@@ -1,6 +1,7 @@
 #include "sched/process.h"
 
 #include <errno.h>
+#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -154,13 +155,25 @@ static const char* thread_state_to_str(thread_state_t state) {
     }
 }
 
-thread_t* thread_create(
-    process_t* proc,
-    void (*entry)(void*),
-    void* arg,
-    sched_policy_t policy,
-    int priority
-) {
+thread_t* thread_create(thread_create_args_t* args) {
+    if (!args || !args->entry) {
+        errno = EINVAL;
+        return nullptr;
+    }
+
+    if (args->policy == SCHED_DEADLINE) {
+        if (args->dl.runtime == 0 || args->dl.period == 0 || args->dl.runtime > args->dl.period) {
+            KLOG_WARN(
+                "THREAD: Invalid DL params: runtime=%lu period=%lu\n",
+                args->dl.runtime,
+                args->dl.period
+            );
+
+            errno = EINVAL;
+            return nullptr;
+        }
+    }
+
     thread_t* t = (thread_t*)kmalloc(sizeof(thread_t));
 
     if (!t) {
@@ -173,22 +186,45 @@ thread_t* thread_create(
 
     t->tid = handle_alloc(&tid_handle_tbl, t);
 
-    t->owner        = proc;
+    t->owner        = args->proc;
     t->state        = THREAD_READY;
     t->assigned_cpu = UINT32_MAX;
-    t->policy       = policy;
+    t->policy       = args->policy;
 
-    if (policy == SCHED_NORMAL) {
-        t->nice = 0;
-    } else {
-        t->priorty = priority;
+    switch (t->policy) {
+        case SCHED_DEADLINE:
+            t->dl_runtime = args->dl.runtime;
+            t->dl_period  = args->dl.period;
+            break;
+        case SCHED_NORMAL:
+            if (args->normal.nice < -20) {
+                t->nice = -20;
+            } else if (args->normal.nice > 19) {
+                t->nice = 19;
+            } else {
+                t->nice = args->normal.nice;
+            }
 
-        if (policy == SCHED_RR) {
-            t->time_slice = 0;
-        }
+            t->nice_idx = t->nice + 20;
+            break;
+        case SCHED_FIFO:
+        case SCHED_RR:
+            t->priorty = args->rt.priority;
+            if (t->priorty < 0) {
+                t->priorty = 0;
+            }
+
+            if (t->priorty > 99) {
+                t->priorty = 99;
+            }
+
+            if (t->policy == SCHED_RR) {
+                t->time_slice = 0;
+            }
+            break;
     }
 
-    if (!arch_thread_init(t, entry, arg)) {
+    if (!arch_thread_init(t, args->entry, args->arg)) {
         if (errno == 0) {
             errno = EINVAL;
         }
@@ -198,17 +234,25 @@ thread_t* thread_create(
         return nullptr;
     }
 
-    if (proc) {
-        acquire_spinlock(&proc->lock);
+    if (args->proc) {
+        acquire_spinlock(&args->proc->lock);
 
-        process_insert_thread(proc, t);
-        proc->thread_count++;
+        process_insert_thread(args->proc, t);
+        args->proc->thread_count++;
 
-        release_spinlock(&proc->lock);
+        release_spinlock(&args->proc->lock);
     }
 
     const char* state = thread_state_to_str(t->state);
-    KLOG_DEBUG("THREAD: created tid=%u pid=%u state=%s\n", t->tid, proc->pid, state);
+    uint32_t pid      = args->proc ? args->proc->pid : 0;
+
+    KLOG_DEBUG(
+        "THREAD: created tid=%u pid=%u state=%s policty=%d\n",
+        t->tid,
+        pid,
+        state,
+        t->policy
+    );
 
     return t;
 }
@@ -244,17 +288,43 @@ void thread_destroy(thread_t* t) {
 }
 
 thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf) {
-    thread_t* child =
-        thread_create(parent->owner, nullptr, nullptr, parent->policy, parent->priorty);
+    thread_t* child = (thread_t*)kmalloc(sizeof(thread_t));
 
     if (!child) {
+        errno = ENOMEM;
         return nullptr;
     }
 
     memset(child, 0, sizeof(thread_t));
-    child->tid   = handle_alloc(&tid_handle_tbl, child);
-    child->owner = target_proc;
-    child->state = THREAD_READY;
+
+    child->tid = handle_alloc(&tid_handle_tbl, child);
+
+    if (child->tid == 0) {
+        kfree(child, sizeof(thread_t));
+        errno = ENOMEM;
+        return nullptr;
+    }
+
+    child->owner        = target_proc;
+    child->assigned_cpu = UINT32_MAX;
+    child->state        = THREAD_READY;
+
+    child->policy = parent->policy;
+
+    switch (parent->policy) {
+        case SCHED_DEADLINE:
+            child->dl_period  = parent->dl_period;
+            child->dl_runtime = parent->dl_runtime;
+            break;
+        case SCHED_NORMAL:
+            child->nice     = parent->nice;
+            child->nice_idx = parent->nice_idx;
+            break;
+        case SCHED_FIFO:
+        case SCHED_RR:
+            child->priorty = parent->priorty;
+            break;
+    }
 
     child->kernel_stack = vmm_alloc(
         &kernel_space,
@@ -265,6 +335,7 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
     );
 
     if (!child->kernel_stack) {
+        handle_free(&tid_handle_tbl, child->tid);
         kfree(child, sizeof(thread_t));
         return nullptr;
     }
@@ -273,11 +344,20 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
 
     arch_thread_clone(child, tf);
 
+    if (target_proc) {
+        acquire_spinlock(&target_proc->lock);
+
+        process_insert_thread(target_proc, child);
+        target_proc->thread_count++;
+        release_spinlock(&target_proc->lock);
+    }
+
     KLOG_DEBUG(
-        "THREAD: cloned tid=%u from tid=%u pid=%u\n",
+        "THREAD: cloned tid=%u from tid=%u pid=%u policy=%d\n",
         child->tid,
         parent->tid,
-        child->owner->pid
+        child->owner->pid,
+        child->policy
     );
 
     return child;

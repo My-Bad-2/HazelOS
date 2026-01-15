@@ -30,6 +30,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     atomic_int is_online;
     bool is_bsp;
     bool reschedule_needed;
+    bool is_nohz_active;
 
 #ifdef __x86_64__
     gdt_table_t gdt;
@@ -40,6 +41,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     size_t min_vruntime;
 
     struct rb_root_cached rt_tree;
+    struct rb_root_cached dl_tree;
 
     thread_t* curr_thread;
     thread_t* idle_thread;

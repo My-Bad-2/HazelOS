@@ -8,6 +8,10 @@
 #define HANDLE_MAX      (UINT16_MAX + 1)
 #define HANDLE_IDX_MASK (HANDLE_MAX - 1)
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef uint32_t handle_t;
 
 typedef struct [[gnu::aligned(16)]] {
@@ -27,5 +31,9 @@ void handle_table_init(handle_table_t* table);
 handle_t handle_alloc(handle_table_t* table, void* ptr);
 void* handle_lookup(handle_table_t* table, handle_t handle);
 void* handle_free(handle_table_t* table, handle_t handle);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

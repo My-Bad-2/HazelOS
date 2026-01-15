@@ -25,6 +25,7 @@ void lapic_timer_calibrate(void);
 void lapic_timer_mask(void);
 void lapic_timer_unmask(void);
 void lapic_timer_stop(void);
+void lapic_timer_start(size_t ticks);
 
 void lapic_configure_timer(timer_mode_t mode, uint8_t vector, uint64_t count);
 

@@ -360,6 +360,17 @@ void lapic_timer_stop(void) {
     }
 }
 
+void lapic_timer_start(size_t ticks) {
+    uint32_t is_tsc = lapic_read(LAPIC_REG_LVT_TIMER) & LVT_TIMER_MODE_TSC_DEADLINE;
+
+    if (tsc_deadline_supported && is_tsc) {
+        write_msr(X86_MSR_IA32_TSC_DEADLINE, ticks);
+    } else {
+        uint32_t count = (uint32_t)(ticks * ticks_per_us);
+        lapic_write(LAPIC_REG_INIT_COUNT, count);
+    }
+}
+
 static uint32_t try_cpuid_frequency(void) {
     cpuid_registers_t regs = cpu_read_value(CPUID_TIME_INFO);
 

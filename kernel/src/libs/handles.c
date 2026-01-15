@@ -1,7 +1,6 @@
 #include "libs/handles.h"
 
 #include <stdatomic.h>
-#include <string.h>
 
 #include "libs/spinlock.h"
 #include "memory/heap.h"

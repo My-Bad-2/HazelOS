@@ -1,7 +1,6 @@
 #ifndef KERNEL_SCHED_PROCESS_H
 #define KERNEL_SCHED_PROCESS_H 1
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,7 +19,12 @@ typedef enum {
     THREAD_TERMINATED,
 } thread_state_t;
 
-typedef enum { SCHED_NORMAL, SCHED_FIFO, SCHED_RR } sched_policy_t;
+typedef enum {
+    SCHED_NORMAL,
+    SCHED_FIFO,
+    SCHED_RR,
+    SCHED_DEADLINE,
+} sched_policy_t;
 
 typedef struct process {
     uint32_t pid;
@@ -67,6 +71,11 @@ typedef struct thread {
     size_t arrival_time;
     size_t time_slice;
 
+    size_t dl_deadline;
+    size_t dl_period;
+    size_t dl_runtime;
+    size_t dl_remaining;
+
     struct rb_node rb_node;
     struct rb_node process_node;
 
@@ -74,13 +83,31 @@ typedef struct thread {
     void* fpu_buffer;
 } thread_t;
 
-thread_t* thread_create(
-    process_t* proc,
-    void (*entry)(void*),
-    void* arg,
-    sched_policy_t policy,
-    int priority
-);
+typedef struct {
+    process_t* proc;
+    void (*entry)(void*);
+    void* arg;
+
+    sched_policy_t policy;
+
+    union {
+        struct {
+            int nice;
+        } normal;
+
+        struct {
+            int priority;
+        } rt;
+
+        struct {
+            size_t runtime;  // Execution budget
+            size_t period;   // Period window
+        } dl;
+    };
+} thread_create_args_t;
+
+thread_t* thread_create(thread_create_args_t* args);
+
 void thread_destroy(thread_t* t);
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
