@@ -8,6 +8,7 @@
 #include "boot/limine.h"
 #include "cpu/exception.h"
 #include "cpu/smp.h"
+#include "libs/handles.h"
 #include "libs/log.h"
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"
@@ -18,8 +19,8 @@
 #include "memory/vmm.h"
 #include "sched/scheduler.h"
 
-static atomic_uint next_pid = 1;
-static atomic_uint next_tid = 1;
+static handle_table_t pid_handle_tbl;
+static handle_table_t tid_handle_tbl;
 
 process_t* process_create(bool is_kernel) {
     process_t* proc = (process_t*)kmalloc(sizeof(process_t));
@@ -32,8 +33,12 @@ process_t* process_create(bool is_kernel) {
 
     memset(proc, 0, sizeof(process_t));
 
-    proc->pid = atomic_load_explicit(&next_pid, memory_order_relaxed);
-    atomic_fetch_add_explicit(&next_pid, 1, memory_order_relaxed);
+    if (is_kernel) {
+        handle_table_init(&pid_handle_tbl);
+        handle_table_init(&tid_handle_tbl);
+    }
+
+    proc->pid = handle_alloc(&pid_handle_tbl, proc);
 
     proc->thread_tree = RB_ROOT;
     create_spinlock(&proc->lock);
@@ -101,6 +106,7 @@ void process_destroy(process_t* proc) {
     }
 
     thread_t* curr = smp_current_core()->curr_thread;
+    handle_free(&pid_handle_tbl, proc->pid);
 
     KLOG_INFO("PROC: destroyed pid=%u\n", proc->pid);
 
@@ -165,8 +171,7 @@ thread_t* thread_create(
 
     memset(t, 0, sizeof(thread_t));
 
-    t->tid = atomic_load_explicit(&next_tid, memory_order_relaxed);
-    atomic_fetch_add_explicit(&next_tid, 1, memory_order_relaxed);
+    t->tid = handle_alloc(&tid_handle_tbl, t);
 
     t->owner        = proc;
     t->state        = THREAD_READY;
@@ -247,7 +252,7 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
     }
 
     memset(child, 0, sizeof(thread_t));
-    child->tid   = atomic_fetch_add_explicit(&next_tid, 1, memory_order_relaxed);
+    child->tid   = handle_alloc(&tid_handle_tbl, child);
     child->owner = target_proc;
     child->state = THREAD_READY;
 
