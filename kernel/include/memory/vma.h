@@ -69,6 +69,7 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t addr, uint32_t error_code);
 vm_area_t* vmm_find_vma(vm_space_t* space, uintptr_t addr);
 
 extern vm_space_t kernel_space;
+extern uintptr_t shared_zero_page;
 
 #ifdef __cplusplus
 }

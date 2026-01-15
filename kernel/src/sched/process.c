@@ -7,18 +7,19 @@
 #include "boot/boot.h"
 #include "boot/limine.h"
 #include "cpu/exception.h"
-#include "libs/list.h"
+#include "cpu/smp.h"
 #include "libs/log.h"
+#include "libs/rb_tree.h"
+#include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 #include "memory/vmm.h"
+#include "sched/scheduler.h"
 
 static atomic_uint next_pid = 1;
 static atomic_uint next_tid = 1;
-
-static struct list_node global_process_list = LIST_INIT(global_process_list);
 
 process_t* process_create(bool is_kernel) {
     process_t* proc = (process_t*)kmalloc(sizeof(process_t));
@@ -34,8 +35,8 @@ process_t* process_create(bool is_kernel) {
     proc->pid = atomic_load_explicit(&next_pid, memory_order_relaxed);
     atomic_fetch_add_explicit(&next_pid, 1, memory_order_relaxed);
 
-    list_init(&proc->thread_list);
-    list_init(&proc->global_list);
+    proc->thread_tree = RB_ROOT;
+    create_spinlock(&proc->lock);
 
     if (is_kernel) {
         // Shared kernel map
@@ -58,8 +59,6 @@ process_t* process_create(bool is_kernel) {
         vmm_init_space(&proc->space, &proc->map, user_va_start, user_va_end);
     }
 
-    list_push_back(&global_process_list, &proc->global_list);
-
     KLOG_INFO("PROC: created pid=%u kernel=%u\n", proc->pid, is_kernel);
 
     return proc;
@@ -70,32 +69,68 @@ void process_destroy(process_t* proc) {
         return;
     }
 
-    while (!list_empty(&proc->thread_list)) {
-        struct list_node* node = proc->thread_list.next;
-        thread_t* t            = container_of(node, thread_t, process_node);
+    acquire_spinlock(&proc->lock);
+
+    while (proc->thread_tree.rb_node) {
+        struct rb_node* node = rb_first(&proc->thread_tree);
+
+        thread_t* t = rb_entry(node, thread_t, process_node);
+
+        if (t == smp_current_core()->curr_thread) {
+            rb_erase(&t->process_node, &proc->thread_tree);
+            RB_CLEAR_NODE(&t->process_node);
+            proc->thread_count--;
+            continue;
+        }
+
+        rb_erase(&t->process_node, &proc->thread_tree);
+        RB_CLEAR_NODE(&t->process_node);
+        proc->thread_count--;
+
+        release_spinlock(&proc->lock);
+
         thread_destroy(t);
+
+        acquire_spinlock(&proc->lock);
     }
+
+    release_spinlock(&proc->lock);
 
     if (!proc->is_kernel) {
         pagemap_release(&proc->map);
     }
 
-    kfree(proc, sizeof(process_t));
+    thread_t* curr = smp_current_core()->curr_thread;
 
     KLOG_INFO("PROC: destroyed pid=%u\n", proc->pid);
+
+    if (curr && curr->owner == proc) {
+        curr->owner = nullptr;
+        kfree(proc, sizeof(process_t));
+        thread_destroy(curr);
+    }
+
+    kfree(proc, sizeof(process_t));
 }
 
-process_t* process_find_by_pid(int pid) {
-    struct list_node* node;
+static void process_insert_thread(process_t* p, thread_t* t) {
+    struct rb_node** link  = &p->thread_tree.rb_node;
+    struct rb_node* parent = nullptr;
 
-    list_for_each(node, &global_process_list) {
-        process_t* p = container_of(node, process_t, global_list);
-        if (p->pid == pid) {
-            return p;
+    while (*link) {
+        parent = *link;
+
+        thread_t* entry = rb_entry(parent, thread_t, process_node);
+
+        if (t->tid < entry->tid) {
+            link = &parent->rb_left;
+        } else {
+            link = &parent->rb_right;
         }
     }
 
-    return nullptr;
+    rb_link_node(&t->process_node, parent, link);
+    rb_insert_color(&t->process_node, &p->thread_tree);
 }
 
 static const char* thread_state_to_str(thread_state_t state) {
@@ -113,7 +148,13 @@ static const char* thread_state_to_str(thread_state_t state) {
     }
 }
 
-thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg) {
+thread_t* thread_create(
+    process_t* proc,
+    void (*entry)(void*),
+    void* arg,
+    sched_policy_t policy,
+    int priority
+) {
     thread_t* t = (thread_t*)kmalloc(sizeof(thread_t));
 
     if (!t) {
@@ -127,8 +168,20 @@ thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg) {
     t->tid = atomic_load_explicit(&next_tid, memory_order_relaxed);
     atomic_fetch_add_explicit(&next_tid, 1, memory_order_relaxed);
 
-    t->owner = proc;
-    t->state = THREAD_READY;
+    t->owner        = proc;
+    t->state        = THREAD_READY;
+    t->assigned_cpu = UINT32_MAX;
+    t->policy       = policy;
+
+    if (policy == SCHED_NORMAL) {
+        t->nice = 0;
+    } else {
+        t->priorty = priority;
+
+        if (policy == SCHED_RR) {
+            t->time_slice = 0;
+        }
+    }
 
     if (!arch_thread_init(t, entry, arg)) {
         if (errno == 0) {
@@ -140,10 +193,16 @@ thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg) {
         return nullptr;
     }
 
-    list_push_back(&proc->thread_list, &t->process_node);
+    if (proc) {
+        acquire_spinlock(&proc->lock);
+
+        process_insert_thread(proc, t);
+        proc->thread_count++;
+
+        release_spinlock(&proc->lock);
+    }
 
     const char* state = thread_state_to_str(t->state);
-
     KLOG_DEBUG("THREAD: created tid=%u pid=%u state=%s\n", t->tid, proc->pid, state);
 
     return t;
@@ -154,22 +213,34 @@ void thread_destroy(thread_t* t) {
         return;
     }
 
-    if (t->sched_node.next) {
-        list_remove(&t->sched_node);
+    scheduler_remove_thread(t);
+
+    if (t->owner) {
+        acquire_spinlock(&t->owner->lock);
+
+        if (!RB_EMPTY_NODE(&t->process_node)) {
+            rb_erase(&t->process_node, &t->owner->thread_tree);
+            RB_CLEAR_NODE(&t->process_node);
+            t->owner->thread_count--;
+        }
+
+        release_spinlock(&t->owner->lock);
     }
 
-    if (t->process_node.next) {
-        list_remove(&t->process_node);
+    KLOG_DEBUG("THREAD: destroyed tid=%u pid=%u\n", t->tid, t->owner ? t->owner->pid : 0);
+
+    if (t == smp_current_core()->curr_thread) {
+        t->state = THREAD_TERMINATED;
+        scheduler_yield();
     }
 
     arch_thread_destroy(t);
     kfree(t, sizeof(thread_t));
-
-    KLOG_DEBUG("THREAD: destroyed tid=%u pid=%u\n", t->tid, t->owner ? t->owner->pid : 0);
 }
 
 thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf) {
-    thread_t* child = thread_create(parent->owner, nullptr, nullptr);
+    thread_t* child =
+        thread_create(parent->owner, nullptr, nullptr, parent->policy, parent->priorty);
 
     if (!child) {
         return nullptr;

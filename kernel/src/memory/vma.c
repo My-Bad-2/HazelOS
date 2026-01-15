@@ -112,7 +112,7 @@ static int global_slab_alloc_bulk(vm_area_t** out, int count) {
         uintptr_t start = (uintptr_t)page + sizeof(vma_slab_page_t);
         uintptr_t end   = (uintptr_t)page + PAGE_SIZE_SMALL;
 
-        if (!is_aligned(start, _Alignof(vm_area_t)) != 0) {
+        if (!is_aligned(start, _Alignof(vm_area_t))) {
             start = align_down(start, _Alignof(vm_area_t));
         }
 

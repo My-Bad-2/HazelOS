@@ -18,6 +18,7 @@
 #include "memory/pagemap.h"
 #include "memory/paging.h"
 #include "memory/vma.h"
+#include "sched/scheduler.h"
 
 typedef struct {
     isr_handler_t handler;
@@ -504,4 +505,6 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
     if (trigger == IRQ_TRIGGER_LEVEL) {
         send_eoi(tf->vector);
     }
+
+    scheduler_check_reschedule(tf);
 }

@@ -38,7 +38,7 @@ static void timer_handler(interrupt_trapframe_t*, void*) {
     timer_manager_tick(&cpu->timer_manager);
 
     if (scheduler_is_initialized()) {
-        scheduler_handler();
+        schedule();
     }
 }
 

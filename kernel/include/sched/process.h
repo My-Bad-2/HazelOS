@@ -1,13 +1,14 @@
 #ifndef KERNEL_SCHED_PROCESS_H
 #define KERNEL_SCHED_PROCESS_H 1
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "cpu/exception.h"
 #include "drivers/timer.h"
-#include "libs/list.h"
 #include "libs/rb_tree.h"
+#include "libs/spinlock.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 
@@ -19,21 +20,24 @@ typedef enum {
     THREAD_TERMINATED,
 } thread_state_t;
 
+typedef enum { SCHED_NORMAL, SCHED_FIFO, SCHED_RR } sched_policy_t;
+
 typedef struct process {
     uint32_t pid;
-    bool is_kernel;
+    uint32_t thread_count;
 
     vm_space_t space;
     pagemap_t map;
 
-    struct list_node thread_list;
-    struct list_node global_list;
+    spinlock_t lock;
+    struct rb_root thread_tree;
+
+    bool is_kernel;
 } process_t;
 
 process_t* process_create(bool is_kernel);
 void process_destroy(process_t* proc);
 
-process_t* process_find_by_pid(int pid);
 process_t* get_kernel_process(void);
 
 typedef struct thread {
@@ -55,18 +59,28 @@ typedef struct thread {
 
     uint32_t assigned_cpu;
     int nice;
+    int nice_idx;
 
-    size_t weight;
+    sched_policy_t policy;
+    int priorty;
+
+    size_t arrival_time;
+    size_t time_slice;
 
     struct rb_node rb_node;
-    struct list_node sched_node;
-    struct list_node process_node;
+    struct rb_node process_node;
 
     timer_event_t sleep_timer;
     void* fpu_buffer;
 } thread_t;
 
-thread_t* thread_create(process_t* proc, void (*entry)(void*), void* arg);
+thread_t* thread_create(
+    process_t* proc,
+    void (*entry)(void*),
+    void* arg,
+    sched_policy_t policy,
+    int priority
+);
 void thread_destroy(thread_t* t);
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);

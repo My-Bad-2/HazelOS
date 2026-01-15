@@ -24,20 +24,22 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     uint32_t cpu_idx;
     uint32_t lapic_id;
 
+    uint32_t thread_count;
+    uint32_t balance_counter;
+
     atomic_int is_online;
-    int is_bsp;
+    bool is_bsp;
+    bool reschedule_needed;
 
 #ifdef __x86_64__
     gdt_table_t gdt;
     tss_t tss;
 #endif
 
-    struct rb_root cfs_tree;
-    struct rb_node* cfs_cache;
-
+    struct rb_root_cached cfs_tree;
     size_t min_vruntime;
-    uint32_t thread_count;
-    uint32_t balance_counter;
+
+    struct rb_root_cached rt_tree;
 
     thread_t* curr_thread;
     thread_t* idle_thread;
