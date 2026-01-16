@@ -91,6 +91,7 @@ void smp_init(void) {
     memset(cpu_datas, 0, num_cpus * sizeof(per_cpu_data_t));
 
     acpi_early_init();
+    topology_detect(cpu_datas);
 
     for (uint32_t i = 0; i < num_cpus; ++i) {
         struct limine_mp_info* info = mp_request.response->cpus[i];
@@ -128,6 +129,8 @@ void smp_init(void) {
             KLOG_DEBUG("SMP: cpu=%u online\n", data->cpu_idx);
         }
     }
+
+    topology_map_siblings(&cpu_datas, num_cpus);
 
     initialized = true;
 

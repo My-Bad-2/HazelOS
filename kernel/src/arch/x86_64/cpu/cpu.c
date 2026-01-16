@@ -57,3 +57,7 @@ bool cpu_has_subfeature(struct cpu_subfeatures feat) {
 cpuid_registers_t cpu_read_value(uint32_t leaf) {
     return call_cpuid(leaf, 0);
 }
+
+cpuid_registers_t cpu_read_subleaf_value(uint32_t leaf, uint32_t subleaf) {
+    return call_cpuid(leaf, subleaf);
+}

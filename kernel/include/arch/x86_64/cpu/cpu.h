@@ -167,6 +167,7 @@ bool cpu_has_feature(struct cpu_features feat);
 bool cpu_has_subfeature(struct cpu_subfeatures feat);
 
 cpuid_registers_t cpu_read_value(uint32_t leaf);
+cpuid_registers_t cpu_read_subleaf_value(uint32_t leaf, uint32_t subleaf);
 
 #ifdef __cplusplus
 }

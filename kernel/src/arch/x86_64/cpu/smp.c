@@ -39,6 +39,8 @@ void arch_commit_cpu_state(per_cpu_data_t* cpu) {
     ioapic_init();
     simd_init();
 
+    topology_detect(cpu);
+
     uint64_t gs_val = (uint64_t)cpu;
     write_msr(X86_MSR_IA32_GS_BASE, gs_val);
 

@@ -858,8 +858,9 @@ void scheduler_yield(void) {
     thread_t* curr = cpu->curr_thread;
 
     if (curr && curr != cpu->idle_thread) {
+        size_t now = get_time_now();
         if (curr->policy == SCHED_DEADLINE) {
-            curr->dl_deadline  = get_time_now() + curr->dl_period;
+            curr->dl_deadline  = now + curr->dl_period;
             curr->dl_remaining = curr->dl_runtime;
         } else if (curr->policy == SCHED_NORMAL) {
             size_t penalty  = yield_penalty;
@@ -870,7 +871,7 @@ void scheduler_yield(void) {
             // RT tasks are sorted by Priority + Arrival Time. To yield, we simply rest the "Arrival
             // Time" to now. This makes the thread appear newer than others at the same priority,
             // effectively moving it to the back of the line.
-            curr->arrival_time = get_time_now();
+            curr->arrival_time = now;
         }
 
         curr->state = THREAD_READY;

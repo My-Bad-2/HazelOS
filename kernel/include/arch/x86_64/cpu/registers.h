@@ -291,6 +291,41 @@
 #define INVPCID_ALL_CONTEXT               2  // Invalidate all entries for all PCIDs (including Global)
 #define INVPCID_ALL_CONTEXT_RETAIN_GLOBAL 3  // Invalidate all entries for all PCIDs (excluding Global)
 
+// Basic Leaves
+#define CPUID_VENDOR_INFO               0x00
+#define CPUID_FEATURE_INFO              0x01
+#define CPUID_CACHE_TLB_DESCRIPTORS     0x02
+#define CPUID_DETERMINISTIC_CACHE       0x04
+#define CPUID_MONITOR_MWAIT             0x05
+#define CPUID_THERMAL_POWER_MGMT        0x06
+#define CPUID_EXTENDED_FEATURES         0x07
+#define CPUID_ARCH_PERF_MON             0x0a
+#define CPUID_EXTENDED_TOPOLOGY         0x0b
+#define CPUID_XSAVE_FEATURES            0x0d
+#define CPUID_RDT_MONITORING            0x0f
+#define CPUID_RDT_ALLOCATION            0x10
+#define CPUID_HYBRID_INFO               0x1a // For Alder/Raptor Lake
+
+// Primary Topology Leaf
+#define CPUID_V2_EXTENDED_TOPOLOGY    0x1f
+
+// Level Types returned in ECX[15:8]
+#define CPUID_TOPOLOGY_LEVEL_INVALID  0x00
+#define CPUID_TOPOLOGY_LEVEL_SMT      0x01
+#define CPUID_TOPOLOGY_LEVEL_CORE     0x02
+#define CPUID_TOPOLOGY_LEVEL_MODULE   0x03
+#define CPUID_TOPOLOGY_LEVEL_TILE     0x04
+#define CPUID_TOPOLOGY_LEVEL_DIE      0x05
+
+// Extended Leaves
+#define CPUID_EXT_MAX_FUNCTION          0x80000000
+#define CPUID_EXT_FEATURE_INFO          0x80000001
+#define CPUID_BRAND_STRING_1            0x80000002
+#define CPUID_BRAND_STRING_2            0x80000003
+#define CPUID_BRAND_STRING_3            0x80000004
+#define CPUID_EXT_L2_CACHE_INFO         0x80000006
+#define CPUID_EXT_ADDR_SIZE             0x80000008
+
 // clang-format on
 
 #ifndef __ASSEMBLER__

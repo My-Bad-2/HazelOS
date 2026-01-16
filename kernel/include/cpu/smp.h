@@ -1,5 +1,5 @@
-#ifndef KERNEL_CPU_H
-#define KERNEL_CPU_H 1
+#ifndef KERNEL_SMP_H
+#define KERNEL_SMP_H 1
 
 #include <stdatomic.h>
 #include <stddef.h>
@@ -11,11 +11,14 @@
 
 #ifdef __x86_64__
 #include "cpu/gdt.h"
+#include "cpu/topology.h"
 #endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+struct cpu_topology;
 
 typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     struct per_cpu_data* self;
@@ -35,6 +38,8 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
 #ifdef __x86_64__
     gdt_table_t gdt;
     tss_t tss;
+
+    struct cpu_topology topology;
 #endif
 
     struct rb_root_cached cfs_tree;
@@ -58,6 +63,10 @@ void arch_commit_cpu_state(per_cpu_data_t* cpu);
 per_cpu_data_t* smp_current_core(void);
 per_cpu_data_t* smp_get_core(uint32_t idx);
 uint32_t smp_current_core_idx(void);
+
+void topology_detect(per_cpu_data_t* cpu);
+void topology_init_masks(per_cpu_data_t** all_cpus, size_t count);
+void topology_map_siblings(per_cpu_data_t** all_cpus, size_t count);
 
 #ifdef __cplusplus
 }
