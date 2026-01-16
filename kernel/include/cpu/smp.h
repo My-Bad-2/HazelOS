@@ -29,6 +29,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
 
     uint32_t thread_count;
     uint32_t balance_counter;
+    size_t cpu_load;
 
     atomic_int is_online;
     bool is_bsp;

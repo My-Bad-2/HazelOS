@@ -28,6 +28,14 @@ static inline void cpumask_set(cpu_mask_t* mask, size_t cpu_id) {
     mask->bits[cpu_id / 64] |= (1ul << (cpu_id % 64));
 }
 
+static inline size_t cpumask_get(cpu_mask_t* mask, size_t cpu_id) {
+    if (cpu_id >= mask->size) {
+        return 0;
+    }
+
+    return mask->bits[cpu_id / 64] & ~(1ul << (cpu_id % 64));
+}
+
 static inline void cpumask_clear_cpu(cpu_mask_t* mask, size_t cpu_id) {
     if (cpu_id >= mask->size) {
         return;

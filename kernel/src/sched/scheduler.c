@@ -11,6 +11,7 @@
 #include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "cpu/lapic.h"
+#include "cpu/mask.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
 #include "drivers/arch_timer.h"
@@ -25,6 +26,14 @@
 #define CACHE_HOT_THRESHOLD   1
 
 #define DEFAULT_NICE 0
+
+#define PELT_HALF_LIFE_MS 32
+#define PELT_MAX_LOAD     1024
+#define MIGRATION_COST_NS 50000  // 50us
+
+#define COST_IDLE_CORE   0     // Gold standard
+#define COST_SMT_THREAD  500   // Sibling is busy (50% capacity penalty)
+#define COST_BUSY_THREAD 1000  // CPU is fully utilized
 
 static process_t* kernel_proc = nullptr;
 static bool initialized       = false;
@@ -58,6 +67,18 @@ static const uint32_t prio_to_wmult[40] = {
     /*  14 */ 0x05AF3107, /*  15 */ 0x071AFD49,
     /*  16 */ 0x08E1BC9B, /*  17 */ 0x0B1A2BC2,
     /*  18 */ 0x0DE0B6B3, /*  19 */ 0x1158E460,
+};
+
+// misc/scripts/calculate_pelt.py
+static const uint16_t pelt_decay_factors[32] = {
+    /*  0ms */ 0x8000, /*  1ms */ 0x7d42, /*  2ms */ 0x7a93, /*  3ms */ 0x77f2,
+    /*  4ms */ 0x7560, /*  5ms */ 0x72dd, /*  6ms */ 0x7066, /*  7ms */ 0x6dfe,
+    /*  8ms */ 0x6ba2, /*  9ms */ 0x6954, /* 10ms */ 0x6712, /* 11ms */ 0x64dd,
+    /* 12ms */ 0x62b4, /* 13ms */ 0x6096, /* 14ms */ 0x5e84, /* 15ms */ 0x5c7e,
+    /* 16ms */ 0x5a82, /* 17ms */ 0x5892, /* 18ms */ 0x56ac, /* 19ms */ 0x54d1,
+    /* 20ms */ 0x52ff, /* 21ms */ 0x5138, /* 22ms */ 0x4f7b, /* 23ms */ 0x4dc7,
+    /* 24ms */ 0x4c1c, /* 25ms */ 0x4a7a, /* 26ms */ 0x48e2, /* 27ms */ 0x4752,
+    /* 28ms */ 0x45cb, /* 29ms */ 0x444c, /* 30ms */ 0x42d5, /* 31ms */ 0x4167,
 };
 
 void arch_switch_context(switch_context_t** prev, switch_context_t* next);
@@ -271,6 +292,24 @@ static void safe_remove_cached(struct rb_root_cached* root, thread_t* t) {
     rb_init_node(&t->rb_node);
 }
 
+static inline size_t decay_load(size_t load, size_t delta_ms) {
+    if (delta_ms == 0) {
+        return load;
+    }
+
+    // 2048 ms = 64 half lives
+    if (delta_ms >= 2048) {
+        return 0;
+    }
+
+    size_t half_lives = delta_ms / 32;
+    size_t remainder  = delta_ms % 32;
+
+    // Formula: (Load * Factor) / 0x8000
+    size_t decayed = (load * pelt_decay_factors[remainder]) >> 15;
+    return decayed >> half_lives;
+}
+
 static thread_t* pick_next_thread(per_cpu_data_t* cpu) {
     struct rb_node* node = rb_first_cached(&cpu->dl_tree);
 
@@ -299,6 +338,117 @@ static inline size_t get_time_now(void) {
     return timer_get_time();
 }
 
+static void update_thread_load(thread_t* t) {
+    size_t now = get_time_now();
+
+    size_t delta_ns = now - t->last_load_update;
+    size_t delta_ms = delta_ns / 1000000;
+
+    if (delta_ms == 0) {
+        return;
+    }
+
+    t->last_load_update = now;
+
+    size_t decayed_load = decay_load(t->avg_load, delta_ms);
+
+    // If running: Contribute 1024 (Full load) else 0
+    size_t contribution = 0;
+    if (t->state == THREAD_RUNNING) {
+        size_t decayed_max = decay_load(PELT_MAX_LOAD, delta_ms);
+        contribution       = PELT_MAX_LOAD - decayed_max;
+    }
+
+    t->avg_load = decayed_load + contribution;
+
+    if (t->avg_load > PELT_MAX_LOAD) {
+        t->avg_load = PELT_MAX_LOAD;
+    }
+}
+
+static uint32_t select_best_cpu(thread_t* t) {
+    per_cpu_data_t* curr_cpu = smp_current_core();
+
+    if (curr_cpu->thread_count == 1 && (t->affinity_mask & (1ul << curr_cpu->cpu_idx))) {
+        return curr_cpu->cpu_idx;
+    }
+
+    if (t->assigned_cpu != -1 && (t->affinity_mask & (1ul << t->assigned_cpu))) {
+        per_cpu_data_t* prev = smp_current_core();
+
+        if (prev->thread_count == 0) {
+            return t->assigned_cpu;
+        }
+
+        size_t sibs        = cpumask_get(&prev->topology.core_siblings, prev->cpu_idx);
+        bool are_sibs_busy = false;
+
+        while (sibs) {
+            int idx = ctz(sibs);
+
+            if (smp_get_core((uint32_t)idx)->thread_count > 0) {
+                are_sibs_busy = true;
+            }
+
+            sibs &= ~(1ul << idx);
+        }
+
+        if (!are_sibs_busy) {
+            return t->assigned_cpu;
+        }
+    }
+
+    uint32_t best_cpu = (uint32_t)(-1);
+    size_t min_cost   = UINT64_MAX;
+
+    for (uint32_t i = 0; i < cpu_count; ++i) {
+        if (!((t->affinity_mask >> i) & 1)) {
+            continue;
+        }
+
+        per_cpu_data_t* cpu = smp_get_core(i);
+        size_t curr_cost    = 0;
+
+        curr_cost += cpu->cpu_load;
+        curr_cost += ((size_t)cpu->thread_count * 100);
+
+        size_t sibs = cpumask_get(&cpu->topology.core_siblings, i);
+
+        while (sibs) {
+            int idx                 = ctz(sibs);
+            per_cpu_data_t* sibling = smp_get_core((uint32_t)idx);
+
+            if (sibling->thread_count > 1) {
+                curr_cost += COST_SMT_THREAD;
+                curr_cost += (sibling->cpu_load / 2);
+            }
+
+            sibs &= ~(1ul << idx);
+        }
+
+        if (i != t->assigned_cpu) {
+            per_cpu_data_t* last = smp_get_core(t->assigned_cpu);
+
+            if (last && cpumask_test(&cpu->topology.llc_siblings, t->assigned_cpu)) {
+                curr_cost += (MIGRATION_COST_NS / 2000);  // Small penalty on L3 hit
+            } else {
+                curr_cost += (MIGRATION_COST_NS / 1000);
+            }
+        }
+
+        if (curr_cost < min_cost) {
+            min_cost = curr_cost;
+            best_cpu = i;
+        }
+    }
+
+    if (best_cpu == (uint32_t)-1) {
+        return (t->assigned_cpu != -1) ? t->assigned_cpu : 0;
+    }
+
+    return best_cpu;
+}
+
 void scheduler_add_thread(thread_t* t) {
     if (!t) {
         errno = EINVAL;
@@ -306,9 +456,10 @@ void scheduler_add_thread(thread_t* t) {
         return;
     }
 
+    update_thread_load(t);
+
     if (t->assigned_cpu == UINT32_MAX) {
-        uint32_t cpu    = t->tid % cpu_count;
-        t->assigned_cpu = cpu;
+        t->assigned_cpu = select_best_cpu(t);
     }
 
     per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
@@ -341,6 +492,7 @@ void scheduler_add_thread(thread_t* t) {
         rt_insert(cpu, t);
     }
 
+    cpu->cpu_load += t->avg_load;
     cpu->thread_count++;
 
     if (cpu->curr_thread) {
@@ -446,6 +598,12 @@ void scheduler_remove_thread(thread_t* t) {
         }
     } else {
         t->state = THREAD_TERMINATED;
+    }
+
+    if (cpu->cpu_load >= t->avg_load) {
+        cpu->cpu_load -= t->avg_load;
+    } else {
+        cpu->cpu_load = 0;
     }
 
     release_interrupt_lock(&cpu->lock);

@@ -62,6 +62,8 @@ typedef struct thread {
     size_t last_start_time;
 
     uint32_t assigned_cpu;
+    uint32_t affinity_mask;
+
     int nice;
     int nice_idx;
 
@@ -75,6 +77,9 @@ typedef struct thread {
     size_t dl_period;
     size_t dl_runtime;
     size_t dl_remaining;
+
+    size_t avg_load;
+    size_t last_load_update;
 
     struct rb_node rb_node;
     struct rb_node process_node;
