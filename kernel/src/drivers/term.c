@@ -6,15 +6,13 @@
 
 #include "boot/boot.h"
 #include "boot/limine.h"
-#include "libs/log.h"
 #include "libs/math.h"
 #include "libs/mmio.h"
 #include "memory/heap.h"
 
-extern const uint8_t font8x16[];
-
 static uint8_t* shadow_buffer = nullptr;
 static uint8_t* fb_address    = nullptr;
+static term_font_t* curr_font = nullptr;
 
 static uint64_t fb_width  = 0;
 static uint64_t fb_height = 0;
@@ -39,6 +37,10 @@ static size_t cursor_y  = 0;
 static size_t dirty_min_y = 0;
 static size_t dirty_max_y = 0;
 static bool is_dirty      = false;
+
+static size_t font_w      = 8;
+static size_t font_h      = 16;
+static size_t font_stride = 1;
 
 typedef struct {
     uint64_t fg;          // Current Active FG
@@ -129,7 +131,7 @@ static uint64_t get_standard_color(int idx, bool bright) {
     return rgb_to_native(r, g, b);
 }
 
-void term_init(void) {
+void term_init(term_font_t* font) {
     if (!framebuffer_request.response) {
         return;
     }
@@ -137,14 +139,20 @@ void term_init(void) {
     struct limine_framebuffer* fb = framebuffer_request.response->framebuffers[0];
 
     fb_address = fb->address;
-    fb_height  = fb->height;
-    fb_width   = fb->width;
-    fb_pitch   = fb->pitch;
-    fb_bpp     = (uint8_t)(fb->bpp / 8);
-    fb_size    = fb_height * fb_width * fb_bpp;
+    curr_font  = font;
 
-    term_cols = fb_width / 8;
-    term_rows = fb_height / 16;
+    font_w      = font->width;
+    font_h      = font->height;
+    font_stride = font->stride;
+
+    fb_height = fb->height;
+    fb_width  = fb->width;
+    fb_pitch  = fb->pitch;
+    fb_bpp    = (uint8_t)(fb->bpp / 8);
+    fb_size   = fb_height * fb_width * fb_bpp;
+
+    term_cols = fb_width / font_w;
+    term_rows = fb_height / font_h;
 
     if (fb->memory_model == LIMINE_FRAMEBUFFER_RGB) {
         r_size  = fb->red_mask_size;
@@ -166,13 +174,8 @@ void term_init(void) {
 
     shadow_buffer = kmalloc(fb_size);
 
-    KLOG_DEBUG("shadow = %p\n", shadow_buffer);
-    KLOG_DEBUG("shadow = %p\n", fb_address);
-    KLOG_DEBUG("fb_size = 0x%lx\n", fb_size);
-
     memset(shadow_buffer, 0, fb_size);
     memset(fb_address, 0, fb_size);
-    KLOG_DEBUG("fb_size = 0x%lx\n", fb_size);
 
     cursor_x = cursor_y = 0;
     dirty_max_y         = 0;
@@ -252,19 +255,22 @@ static void term_fill_rect(size_t x, size_t y, size_t w, size_t h, uint64_t colo
 }
 
 static void term_scroll(void) {
-    size_t row_bytes    = fb_pitch * 16;
+    size_t row_bytes    = fb_pitch * font_h;
     size_t screen_bytes = fb_pitch * fb_height;
     size_t move_bytes   = screen_bytes - row_bytes;
 
     memmove(shadow_buffer, shadow_buffer + row_bytes, move_bytes);
 
-    term_fill_rect(0, fb_height - 16, fb_width, 16, style.default_bg);
+    term_fill_rect(0, fb_height - font_h, fb_width, font_h, style.default_bg);
     mark_dirty(0, fb_height);
 }
 
 static void term_draw_char(char ch, size_t cx, size_t cy) {
-    const uint8_t* glyph = &font8x16[(size_t)ch * 16];
-    size_t base_offset   = (cy * 16 * fb_pitch) + (cx * 8 * fb_bpp);
+    const uint8_t* glyph = curr_font->data + ((uint8_t)ch * font_h * font_stride);
+
+    size_t screen_y_start = cy * font_h;
+    size_t screen_x_start = cx * font_w;
+    size_t base_offset    = (screen_y_start * fb_pitch) + (screen_x_start * fb_bpp);
 
     uint64_t fg = style.fg;
     uint64_t bg = style.bg;
@@ -275,17 +281,24 @@ static void term_draw_char(char ch, size_t cx, size_t cy) {
         bg           = tmp;
     }
 
-    for (size_t y = 0; y < 16; ++y) {
-        uint8_t row = glyph[y];
+    const size_t underline_row = (font_h > 2) ? font_h - 2 : font_h - 1;
 
-        if (style.underline && y == 14) {
-            row = 0xff;
-        }
+    for (size_t y = 0; y < font_h; ++y) {
+        const uint8_t* glyph_row = glyph + (y * font_stride);
+        size_t offset            = base_offset + (y * fb_pitch);
 
-        size_t offset = base_offset + (y * fb_pitch);
+        bool is_underline_px = style.underline && (y == underline_row);
 
-        for (size_t x = 0; x < 8; ++x) {
-            bool on        = (row >> (7 - x)) & 1;
+        for (size_t x = 0; x < font_w; ++x) {
+            size_t byte_idx = x / 8;
+            size_t bit_idx  = 7 - (x % 8);
+
+            bool on = (glyph_row[byte_idx] >> bit_idx) & 1;
+
+            if (is_underline_px) {
+                on = true;
+            }
+
             uint64_t color = on ? fg : bg;
 
             if (fb_bpp == 4) {
@@ -305,13 +318,13 @@ static void term_draw_char(char ch, size_t cx, size_t cy) {
         }
     }
 
-    mark_dirty(cy * 16, 16);
+    mark_dirty(cy * font_h, font_h);
 }
 
 static void ansi_insert_line(int n) {
-    size_t start_y_px = cursor_y * 16;
-    size_t total_h_px = (term_rows - cursor_y) * 16;
-    size_t move_px    = (size_t)n * 16;
+    size_t start_y_px = cursor_y * font_h;
+    size_t total_h_px = (term_rows - cursor_y) * font_h;
+    size_t move_px    = (size_t)n * font_h;
 
     if (move_px >= total_h_px) {
         term_fill_rect(0, start_y_px, fb_width, total_h_px, style.bg);
@@ -328,9 +341,9 @@ static void ansi_insert_line(int n) {
 }
 
 static void ansi_delete_line(int n) {
-    size_t start_y_px = cursor_y * 16;
-    size_t total_h_px = (term_rows - cursor_y) * 16;
-    size_t move_px    = (size_t)n * 16;
+    size_t start_y_px = cursor_y * font_h;
+    size_t total_h_px = (term_rows - cursor_y) * font_h;
+    size_t move_px    = (size_t)n * font_h;
 
     if (move_px >= total_h_px) {
         term_fill_rect(0, start_y_px, fb_width, total_h_px, style.bg);
@@ -347,15 +360,15 @@ static void ansi_delete_line(int n) {
 }
 
 static void ansi_delete_char(int n) {
-    size_t row_off    = cursor_y * 16 * fb_pitch;
-    size_t start_x_px = cursor_x * 8;
-    size_t move_px    = (size_t)n * 8;
-    size_t total_w_px = (term_cols - cursor_x) * 8;
+    size_t row_off    = cursor_y * font_h * fb_pitch;
+    size_t start_x_px = cursor_x * font_w;
+    size_t move_px    = (size_t)n * font_w;
+    size_t total_w_px = (term_cols - cursor_x) * font_w;
 
     if (move_px >= total_w_px) {
-        term_fill_rect(start_x_px, cursor_y * 16, total_w_px, 16, style.bg);
+        term_fill_rect(start_x_px, cursor_y * font_h, total_w_px, font_h, style.bg);
     } else {
-        for (size_t y = 0; y < 16; y++) {
+        for (size_t y = 0; y < font_h; y++) {
             uint8_t* line = shadow_buffer + row_off + (y * fb_pitch);
             uint8_t* dst  = line + (start_x_px * fb_bpp);
             uint8_t* src  = dst + (move_px * fb_bpp);
@@ -363,23 +376,23 @@ static void ansi_delete_char(int n) {
             memmove(dst, src, (total_w_px - move_px) * fb_bpp);
         }
 
-        size_t clear_x = (term_cols - (size_t)n) * 8;
-        term_fill_rect(clear_x, cursor_y * 16, (size_t)n * 8, 16, style.bg);
+        size_t clear_x = (term_cols - (size_t)n) * font_w;
+        term_fill_rect(clear_x, cursor_y * font_h, (size_t)n * font_w, font_h, style.bg);
     }
 
-    mark_dirty(cursor_y * 16, 16);
+    mark_dirty(cursor_y * font_h, font_h);
 }
 
 static void ansi_insert_char(int n) {
-    size_t row_off    = cursor_y * 16 * fb_pitch;
-    size_t start_x_px = cursor_x * 8;
-    size_t move_px    = (size_t)n * 8;
-    size_t total_w_px = (term_cols - cursor_x) * 8;
+    size_t row_off    = cursor_y * font_h * fb_pitch;
+    size_t start_x_px = cursor_x * font_w;
+    size_t move_px    = (size_t)n * font_w;
+    size_t total_w_px = (term_cols - cursor_x) * font_w;
 
     if (move_px >= total_w_px) {
-        term_fill_rect(start_x_px, cursor_y * 16, total_w_px, 16, style.bg);
+        term_fill_rect(start_x_px, cursor_y * font_h, total_w_px, font_h, style.bg);
     } else {
-        for (size_t y = 0; y < 16; y++) {
+        for (size_t y = 0; y < font_h; y++) {
             uint8_t* line = shadow_buffer + row_off + (y * fb_pitch);
             uint8_t* src  = line + (start_x_px * fb_bpp);
             uint8_t* dst  = src + (move_px * fb_bpp);
@@ -387,10 +400,10 @@ static void ansi_insert_char(int n) {
             memmove(dst, src, (total_w_px - move_px) * fb_bpp);
         }
 
-        term_fill_rect(start_x_px, cursor_y * 16, (size_t)n * 8, 16, style.bg);
+        term_fill_rect(start_x_px, cursor_y * font_h, (size_t)n * font_w, font_h, style.bg);
     }
 
-    mark_dirty(cursor_y * 16, 16);
+    mark_dirty(cursor_y * font_h, font_h);
 }
 
 static int get_param(int idx, int default_val) {
@@ -475,7 +488,7 @@ static void term_writec(char c) {
                 cursor_x--;
             }
         } else if (c == '\t') {
-            cursor_x = align_down(cursor_x, 8);
+            cursor_x = align_down(cursor_x, 4);
         } else {
             if (cursor_x >= term_cols) {
                 cursor_x = 0;
@@ -571,19 +584,19 @@ static void term_writec(char c) {
                         cursor_y = 0;
                     } else if (m == 0) {  // Cursor Down
                         term_fill_rect(
-                            cursor_x * 8,
-                            cursor_y * 16,
-                            fb_width - (cursor_x * 8),
-                            16,
+                            cursor_x * font_w,
+                            cursor_y * font_h,
+                            fb_width - (cursor_x * font_w),
+                            font_h,
                             style.bg
                         );
 
                         if (cursor_y < term_rows - 1) {
                             term_fill_rect(
                                 0,
-                                (cursor_y + 1) * 16,
+                                (cursor_y + 1) * font_h,
                                 fb_width,
-                                (term_rows - cursor_y - 1) * 16,
+                                (term_rows - cursor_y - 1) * font_h,
                                 style.bg
                             );
                         }
@@ -595,17 +608,23 @@ static void term_writec(char c) {
                 case 'K':  // Erase Line
                 {
                     int m       = get_param(0, 0);
-                    size_t y_px = cursor_y * 16;
+                    size_t y_px = cursor_y * font_h;
 
                     if (m == 0) {
-                        term_fill_rect(cursor_x * 8, y_px, fb_width - (cursor_x * 8), 16, style.bg);
+                        term_fill_rect(
+                            cursor_x * font_w,
+                            y_px,
+                            fb_width - (cursor_x * font_w),
+                            font_h,
+                            style.bg
+                        );
                     } else if (m == 1) {
-                        term_fill_rect(0, y_px, cursor_x * 8, 16, style.bg);
+                        term_fill_rect(0, y_px, cursor_x * font_w, font_h, style.bg);
                     } else if (m == 2) {
-                        term_fill_rect(0, y_px, fb_width, 16, style.bg);
+                        term_fill_rect(0, y_px, fb_width, font_h, style.bg);
                     }
 
-                    mark_dirty(y_px, 16);
+                    mark_dirty(y_px, font_h);
                     break;
                 }
                 case 'L':

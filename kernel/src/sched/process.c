@@ -248,13 +248,7 @@ thread_t* thread_create(thread_create_args_t* args) {
     const char* state = thread_state_to_str(t->state);
     uint32_t pid      = args->proc ? args->proc->pid : 0;
 
-    KLOG_DEBUG(
-        "THREAD: created tid=%u pid=%u state=%s policty=%d\n",
-        t->tid,
-        pid,
-        state,
-        t->policy
-    );
+    KLOG_DEBUG("THREAD: created tid=%u pid=%u state=%s policy=%d\n", t->tid, pid, state, t->policy);
 
     return t;
 }

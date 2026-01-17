@@ -1026,8 +1026,6 @@ void scheduler_sleep(size_t ms) {
         schedule();
 
         acquire_interrupt_lock(&cpu->lock);
-
-        timer_cancel(&curr->sleep_timer);
     }
 
     release_interrupt_lock(&cpu->lock);

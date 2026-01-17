@@ -1,10 +1,9 @@
 import sys
 import os
+import math
 from PIL import Image, ImageFont, ImageDraw
 
 # Standard VGA dimensions used by the kernel console
-CHAR_WIDTH: int = 8
-CHAR_HEIGHT: int = 16
 FIRST_CHAR: int = 0
 LAST_CHAR: int = 255
 NUM_CHARS: int = LAST_CHAR - FIRST_CHAR + 1
@@ -122,7 +121,9 @@ def draw_manual_block(draw: ImageDraw.ImageDraw, code: int, w: int, h: int) -> b
     return False
 
 
-def generate_font(ttf_path: str, output_path: str, font_size: int) -> None:
+def generate_font(
+    ttf_path: str, output_path: str, char_w: int, char_h: int, font_size: int
+) -> None:
     try:
         # Load the image
         font = ImageFont.truetype(ttf_path, font_size)
@@ -130,7 +131,11 @@ def generate_font(ttf_path: str, output_path: str, font_size: int) -> None:
         print(f"Error: Could not open font file `{ttf_path}`")
         sys.exit(1)
 
+    bytes_per_row = math.ceil(char_w / 8)
+    total_bytes = NUM_CHARS * char_h * bytes_per_row
+
     print(f"Processing: {ttf_path}")
+    print(f"Dimensions: {char_w}x{char_h}")
     print(f"Output    : {output_path}")
     print(f"Font Size : {font_size}px")
 
@@ -138,33 +143,33 @@ def generate_font(ttf_path: str, output_path: str, font_size: int) -> None:
     # descent: distance from baseline to bottom of lowest descender
     ascent, descent = font.getmetrics()
     font_height = ascent + descent
-
-    # Center the glyph vertically within the fixed-height cell
-    base_y_offset = (CHAR_HEIGHT - font_height) // 2
+    base_y_offset = (char_h - font_height) // 2
 
     arr = []
     arr.append(f"// Generated from {os.path.basename(ttf_path)}")
-    arr.append(f"// Font Size: {CHAR_WIDTH}x{CHAR_HEIGHT}")
-    arr.append(f"#include <stdint.h>")
+    arr.append(f"// Font Size: {char_w}x{char_h} ({bytes_per_row} bytes stride)")
+    arr.append(f'#include "drivers/term.h"')
     arr.append("")
-    arr.append(f"const uint8_t font8x16[{NUM_CHARS * CHAR_HEIGHT}] = {{")
+    arr.append(f"static const uint8_t font_data[{total_bytes}] = {{")
 
     for i in range(FIRST_CHAR, LAST_CHAR + 1):
-        char = chr(i)
-
-        image = Image.new("1", (CHAR_WIDTH, CHAR_HEIGHT), 0)
+        image = Image.new("1", (char_w, char_h), 0)
         draw = ImageDraw.Draw(image)
 
-        is_manual = draw_manual_block(draw, i, CHAR_WIDTH, CHAR_HEIGHT)
+        is_manual = draw_manual_block(draw, i, char_w, char_h)
 
         if not is_manual:
-            char = chr(CP437_MAP.get(i, i))
+            char_code = i
+
+            if i in CP437_MAP:
+                char_code = CP437_MAP[i]
+
+            char = chr(char_code)
             bbox = font.getbbox(char)
 
             if bbox:
                 text_width = bbox[2] - bbox[0]
-                # Center Horizontally
-                x_pos = (CHAR_WIDTH - text_width) // 2 - bbox[0]
+                x_pos = (char_w - text_width) // 2 - bbox[0]
             else:
                 x_pos = 0
 
@@ -177,32 +182,50 @@ def generate_font(ttf_path: str, output_path: str, font_size: int) -> None:
 
             draw.text((x_pos, y_pos), char, font=font, fill=1)
 
-        byte_list = []
         pixels = image.load()
+        byte_list = []
 
-        # Pack 1-bit pixels into bytes for C array storage (row-major)    
-        for y in range(CHAR_HEIGHT):
-            byte_val = 0
-            for x in range(CHAR_WIDTH):
-                if pixels[x, y]:
-                    byte_val |= 1 << (7 - x)
+        # Pack 1-bit pixels into bytes for C array storage (row-major)
+        for y in range(char_h):
+            for b in range(bytes_per_row):
+                val = 0
+                for bit in range(8):
+                    px_x = (b * 8) + bit
+                    if px_x < char_w:
+                        if pixels[px_x, y]:
+                            val |= 1 << (7 - bit)
 
-            byte_list.append(f"0x{byte_val:02x}")
+                byte_list.append(f"0x{val:02x}")
 
-        arr.append(f"   {', '.join(byte_list)}, // char {i}")
+        arr.append(f"   {', '.join(byte_list)}, // character {i}")
+
     arr.append("};")
+    arr.append("")
+
+    arr.append(f"static term_font_t term_font = {{")
+    arr.append(f"   .data = font_data,")
+    arr.append(f"   .width = {char_w},")
+    arr.append(f"   .height = {char_h},")
+    arr.append(f"   .stride = {bytes_per_row}")
+    arr.append(f"}};")
 
     with open(output_path, "w") as f:
         f.write("\n".join(arr))
 
-    print(f"Done! {output_path} generated with VGA block support.")
+    print(f"Done! Saved to {output_path}.")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python ttf_to_array.py <input.ttf> <output.c> [font_size]")
+        print(
+            "Usage: python ttf_to_array.py <input.ttf> <output.c> <width> <height> <font_size>"
+        )
+        print("Example: python ttf_to_array.py arial.ttf font16x32.c 16 32 28")
     else:
-        f_size = 14
-        if len(sys.argv) > 3:
-            f_size = int(sys.argv[3])
-        generate_font(sys.argv[1], sys.argv[2], f_size)
+        generate_font(
+            sys.argv[1],
+            sys.argv[2],
+            int(sys.argv[3]),
+            int(sys.argv[4]),
+            int(sys.argv[5]),
+        )

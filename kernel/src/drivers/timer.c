@@ -102,8 +102,6 @@ void timer_arm_periodic(
 
 bool timer_cancel(timer_event_t* timer) {
     if (!timer->owner) {
-        errno = ENOENT;
-        KLOG_WARN("TIMER: cancel on timer with no owner\n");
         return false;
     }
 
