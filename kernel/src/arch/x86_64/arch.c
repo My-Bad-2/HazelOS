@@ -4,6 +4,7 @@
 
 #include "compiler.h"
 #include "cpu/cpu.h"
+#include "drivers/term.h"
 #include "drivers/uart.h"
 
 void arch_disable_interrupts(void) {
@@ -23,8 +24,12 @@ void arch_write(const char* str) {
         return;
     }
 
-    for (size_t i = 0; str[i] != '\0'; ++i) {
-        drivers_uart_writec(COM_PORT1, str[i]);
+    if (term_is_initialized()) {
+        term_write(str);
+    } else {
+        for (size_t i = 0; str[i] != '\0'; ++i) {
+            drivers_uart_writec(COM_PORT1, str[i]);
+        }
     }
 }
 

@@ -74,3 +74,10 @@ volatile struct limine_rsdp_request rsdp_request = {
     .revision = 0,
     .response = nullptr,
 };
+
+[[gnu::section(".requests")]]
+volatile struct limine_framebuffer_request framebuffer_request = {
+    .id       = LIMINE_FRAMEBUFFER_REQUEST_ID,
+    .revision = 1,
+    .response = nullptr,
+};
