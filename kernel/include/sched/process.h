@@ -95,8 +95,6 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     void* user_stack;
 
     timer_event_t sleep_timer;
-    interrupt_trapframe_t tf;
-
     void* fpu_buffer;
 } thread_t;
 

@@ -22,19 +22,32 @@ struct cpu_topology;
 
 typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     struct per_cpu_data* self;
+    thread_t* curr_thread;
     uintptr_t stack_top;
+    thread_t* idle_thread;
+
+    interrupt_lock_t lock;
 
     uint32_t cpu_idx;
     uint32_t lapic_id;
 
-    uint32_t thread_count;
-    uint32_t balance_counter;
-    size_t cpu_load;
-
-    atomic_int is_online;
     bool is_bsp;
     bool reschedule_needed;
     bool is_nohz_active;
+    uint8_t _pad0;
+
+    size_t min_vruntime;
+
+    struct rb_root_cached cfs_tree;
+    struct rb_root_cached rt_tree;
+    struct rb_root_cached dl_tree;
+
+    timer_manager_t timer_manager;
+
+    atomic_size_t cpu_load;
+    uint32_t thread_count;
+    uint32_t balance_counter;
+    atomic_int is_online;
 
 #ifdef __x86_64__
     gdt_table_t gdt;
@@ -42,18 +55,6 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
 
     struct cpu_topology topology;
 #endif
-
-    struct rb_root_cached cfs_tree;
-    size_t min_vruntime;
-
-    struct rb_root_cached rt_tree;
-    struct rb_root_cached dl_tree;
-
-    thread_t* curr_thread;
-    thread_t* idle_thread;
-
-    interrupt_lock_t lock;
-    timer_manager_t timer_manager;
 } per_cpu_data_t;
 
 void smp_init(void);

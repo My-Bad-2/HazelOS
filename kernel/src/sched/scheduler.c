@@ -1,6 +1,7 @@
 #include "sched/scheduler.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -149,9 +150,9 @@ void scheduler_init(void) {
         cpu->rt_tree  = RB_ROOT_CACHED;
 
         cpu->min_vruntime      = 0;
-        cpu->cpu_load          = 0;
         cpu->balance_counter   = 0;
         cpu->reschedule_needed = false;
+        atomic_store_explicit(&cpu->cpu_load, 0, memory_order_relaxed);
 
         thread_t* idle = thread_create(&idle_args);
 
@@ -188,10 +189,12 @@ static void remove_from_runqueue(per_cpu_data_t* cpu, thread_t* t) {
 
     rb_init_node(&t->rb_node);
 
-    if (cpu->cpu_load >= t->avg_load) {
-        cpu->cpu_load -= t->avg_load;
+    size_t cpu_load = atomic_load_explicit(&cpu->cpu_load, memory_order_relaxed);
+
+    if (cpu_load >= t->avg_load) {
+        atomic_fetch_sub_explicit(&cpu->cpu_load, t->avg_load, memory_order_relaxed);
     } else {
-        cpu->cpu_load = 0;
+        atomic_store_explicit(&cpu->cpu_load, 0, memory_order_relaxed);
     }
 }
 
@@ -247,7 +250,7 @@ static void add_to_runqueue(per_cpu_data_t* cpu, thread_t* t) {
     rb_link_node(&t->rb_node, parent, link);
     rb_insert_color_cached(&t->rb_node, root, is_leftmost);
 
-    cpu->cpu_load += t->avg_load;
+    atomic_fetch_add_explicit(&cpu->cpu_load, t->avg_load, memory_order_relaxed);
 }
 
 static inline void update_dl_entity(thread_t* curr, size_t delta) {
@@ -287,30 +290,6 @@ static inline size_t decay_load(size_t load, size_t delta_ms) {
     // Formula: (Load * Factor) / 0x8000
     size_t decayed = (load * pelt_decay_factors[remainder]) >> 15;
     return decayed >> half_lives;
-}
-
-static thread_t* pick_next_thread(per_cpu_data_t* cpu) {
-    struct rb_node* node = rb_first_cached(&cpu->dl_tree);
-
-    if (node) {
-        goto found;
-    }
-
-    node = rb_first_cached(&cpu->rt_tree);
-
-    if (node) {
-        goto found;
-    }
-
-    node = rb_first_cached(&cpu->cfs_tree);
-
-    if (node) {
-        goto found;
-    }
-
-    return nullptr;
-found:
-    return rb_entry(node, thread_t, rb_node);
 }
 
 static void update_thread_load(thread_t* t) {
@@ -384,7 +363,7 @@ static uint32_t select_best_cpu(thread_t* t) {
         per_cpu_data_t* cpu = smp_get_core(i);
         size_t curr_cost    = 0;
 
-        curr_cost += cpu->cpu_load;
+        curr_cost += atomic_load_explicit(&cpu->cpu_load, memory_order_relaxed);
         curr_cost += ((size_t)cpu->thread_count * 100);
 
         size_t sibs = cpumask_get(&cpu->topology.core_siblings, i);
@@ -395,7 +374,7 @@ static uint32_t select_best_cpu(thread_t* t) {
 
             if (sibling->thread_count > 0) {
                 curr_cost += COST_SMT_THREAD;
-                curr_cost += (sibling->cpu_load / 2);
+                curr_cost += (atomic_load_explicit(&sibling->cpu_load, memory_order_relaxed) / 2);
             }
 
             sibs &= ~(1ul << idx);
@@ -605,10 +584,12 @@ void scheduler_remove_thread(thread_t* t) {
     } else {
         t->state = THREAD_TERMINATED;
 
-        if (cpu->cpu_load >= t->avg_load) {
-            cpu->cpu_load -= t->avg_load;
+        size_t cpu_load = atomic_load_explicit(&cpu->cpu_load, memory_order_relaxed);
+
+        if (cpu_load >= t->avg_load) {
+            atomic_fetch_sub_explicit(&cpu->cpu_load, t->avg_load, memory_order_relaxed);
         } else {
-            cpu->cpu_load = 0;
+            atomic_store_explicit(&cpu->cpu_load, 0, memory_order_relaxed);
         }
     }
 
@@ -641,7 +622,7 @@ static void balance_load(void) {
     per_cpu_data_t* busiest_cpu = nullptr;
     size_t max_load             = 0;
 
-    if (this_cpu->cpu_load > PELT_MAX_LOAD) {
+    if (atomic_load_explicit(&this_cpu->cpu_load, memory_order_relaxed) > PELT_MAX_LOAD) {
         return;
     }
 
@@ -651,30 +632,34 @@ static void balance_load(void) {
         }
 
         per_cpu_data_t* remote = smp_get_core(i);
+        size_t remote_load     = atomic_load_explicit(&remote->cpu_load, memory_order_relaxed);
 
         // Skip idle CPUs
-        if (remote->cpu_load == 0) {
+        if (remote_load == 0) {
             continue;
         }
 
-        if (remote->cpu_load > max_load) {
-            max_load    = remote->cpu_load;
+        if (remote_load > max_load) {
+            max_load    = remote_load;
             busiest_cpu = remote;
         }
     }
 
 // Only migrate if imbalance is >25% to avoid "Bouncing"
 #define IMBALANCE_THRESHOLD(local) ((local) + ((local) >> 2))
+    size_t curr_load = atomic_load_explicit(&this_cpu->cpu_load, memory_order_relaxed);
 
     // Only proceed if the busiest CPU is significantly overloaded compared to us.
-    if (!busiest_cpu || max_load <= IMBALANCE_THRESHOLD(this_cpu->cpu_load)) {
+    if (!busiest_cpu || max_load <= IMBALANCE_THRESHOLD(curr_load)) {
         return;
     }
 
     double_lock_cpu(this_cpu, busiest_cpu);
 
+    size_t busiest_load = atomic_load_explicit(&busiest_cpu->cpu_load, memory_order_relaxed);
+
     // The situation might have changed while we waited for locks, so re-verify for safety.
-    if (busiest_cpu->cpu_load <= IMBALANCE_THRESHOLD(this_cpu->cpu_load)) {
+    if (busiest_load <= IMBALANCE_THRESHOLD(curr_load)) {
         double_unlock_cpu(this_cpu, busiest_cpu);
         return;
     }
@@ -739,30 +724,49 @@ static void balance_load(void) {
 #undef IMBALANCE_THRESHOLD
 }
 
+static thread_t* pick_next_thread(per_cpu_data_t* cpu) {
+    struct rb_node* node = rb_first_cached(&cpu->dl_tree);
+
+    if (node) {
+        return rb_entry(node, thread_t, rb_node);
+    }
+
+    node = rb_first_cached(&cpu->rt_tree);
+
+    if (node) {
+        return rb_entry(node, thread_t, rb_node);
+    }
+
+    node = rb_first_cached(&cpu->cfs_tree);
+
+    if (node) {
+        return rb_entry(node, thread_t, rb_node);
+    }
+
+    // If we are here, we are jobless. Let's try stealing from our neighbors.
+    if ((cpu->balance_counter & 63) == 0) {
+        release_interrupt_lock(&cpu->lock);
+
+        balance_load();
+
+        acquire_interrupt_lock(&cpu->lock);
+
+        node = rb_first_cached(&cpu->cfs_tree);
+
+        if (node) {
+            return rb_entry(node, thread_t, rb_node);
+        }
+    }
+
+    return cpu->idle_thread;
+}
+
 static inline size_t min_vruntime(size_t a, size_t b) {
     return (a < b) ? a : b;
 }
 
 static inline size_t max_vruntime(size_t a, size_t b) {
     return (a > b) ? a : b;
-}
-
-static size_t get_time_slice(per_cpu_data_t* cpu) {
-    size_t thread_count = cpu->thread_count;
-
-    if (thread_count == 0) {
-        return MIN_GRANULARITY_NS;
-    }
-
-    size_t slice = TARGET_LATENCY_NS / thread_count;
-
-    // If we have too many threads, we extend the latency period rather than thrashing the cpu with
-    // tiny time slices.
-    if (slice < MIN_GRANULARITY_NS) {
-        slice = MIN_GRANULARITY_NS;
-    }
-
-    return slice;
 }
 
 static void check_nohz_mode(per_cpu_data_t* cpu, thread_t* next) {
@@ -863,10 +867,6 @@ void schedule(void) {
     }
 
     thread_t* next = pick_next_thread(cpu);
-
-    if (!next) {
-        next = cpu->idle_thread;
-    }
 
     // Re-enable after IPI is implemented
     // check_nohz_mode(cpu, next);

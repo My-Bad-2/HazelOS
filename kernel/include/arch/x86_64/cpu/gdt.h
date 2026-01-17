@@ -29,7 +29,7 @@ typedef struct [[gnu::packed]] {
     uint32_t reserved;
 } tss_descriptor_t;
 
-typedef struct [[gnu::packed]] {
+typedef struct [[gnu::aligned(16)]] {
     uint32_t reserved0;
     uint64_t rsp[3];
     uint64_t reserved1;
@@ -39,7 +39,7 @@ typedef struct [[gnu::packed]] {
     uint16_t iomap_base;
 } tss_t;
 
-typedef struct [[gnu::packed]] {
+typedef struct [[gnu::aligned(16)]] {
     gdt_entry_t entries[GDT_ENTRY_COUNT];
     tss_descriptor_t tss;
 } gdt_table_t;
