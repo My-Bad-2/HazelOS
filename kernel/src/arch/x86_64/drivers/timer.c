@@ -42,6 +42,12 @@ static void timer_handler(interrupt_trapframe_t*, void*) {
     }
 }
 
+static void reschedule_handler(interrupt_trapframe_t*, void*) {
+    if (scheduler_is_initialized()) {
+        schedule();
+    }
+}
+
 void timer_tick(void) {
     static bool warned;
 
@@ -186,6 +192,14 @@ void timer_init(void) {
         DELIVERY_MODE_LOWEST_PRIO,
         DESTMODE_PHYSICAL,
         0
+    );
+
+    res = register_interrupt_handler(
+        INTERRUPT_IPI_RESCHEDULE,
+        reschedule_handler,
+        nullptr,
+        IRQ_TRIGGER_EDGE,
+        IRQ_POLARITY_HIGH
     );
 
     if (res != 0) {

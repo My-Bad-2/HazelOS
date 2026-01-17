@@ -193,34 +193,36 @@ thread_t* thread_create(thread_create_args_t* args) {
 
     switch (t->policy) {
         case SCHED_DEADLINE:
-            t->dl_runtime = args->dl.runtime;
-            t->dl_period  = args->dl.period;
+            DL_DEADLINE(t) = args->dl.runtime;
+            DL_PERIOD(t)   = args->dl.period;
             break;
         case SCHED_NORMAL:
             if (args->normal.nice < -20) {
-                t->nice = -20;
+                CFS_NICE(t) = -20;
             } else if (args->normal.nice > 19) {
-                t->nice = 19;
+                CFS_NICE(t) = 19;
             } else {
-                t->nice = args->normal.nice;
+                CFS_NICE(t) = args->normal.nice;
             }
 
-            t->nice_idx = t->nice + 20;
+            CFS_NICE_IDX(t) = CFS_NICE(t) + 20;
             break;
         case SCHED_FIFO:
         case SCHED_RR:
-            t->priorty = args->rt.priority;
-            if (t->priorty < 0) {
-                t->priorty = 0;
+            RT_PRIORITY(t) = args->rt.priority;
+            if (RT_PRIORITY(t) < 0) {
+                RT_PRIORITY(t) = 0;
             }
 
-            if (t->priorty > 99) {
-                t->priorty = 99;
+            if (RT_PRIORITY(t) > 99) {
+                RT_PRIORITY(t) = 99;
             }
 
             if (t->policy == SCHED_RR) {
-                t->time_slice = 0;
+                RT_SLICE(t) = 0;
             }
+            break;
+        default:
             break;
     }
 
@@ -313,16 +315,18 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
 
     switch (parent->policy) {
         case SCHED_DEADLINE:
-            child->dl_period  = parent->dl_period;
-            child->dl_runtime = parent->dl_runtime;
+            DL_PERIOD(child)  = DL_PERIOD(parent);
+            DL_RUNTIME(child) = DL_RUNTIME(parent);
             break;
         case SCHED_NORMAL:
-            child->nice     = parent->nice;
-            child->nice_idx = parent->nice_idx;
+            CFS_NICE(child)     = CFS_NICE(parent);
+            CFS_NICE_IDX(child) = CFS_NICE_IDX(parent);
             break;
         case SCHED_FIFO:
         case SCHED_RR:
-            child->priorty = parent->priorty;
+            RT_PRIORITY(child) = RT_PRIORITY(parent);
+            break;
+        default:
             break;
     }
 

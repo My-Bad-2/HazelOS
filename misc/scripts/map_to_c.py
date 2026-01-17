@@ -14,14 +14,14 @@ def generate_symbol_table(nm_path, elf_path, output_c_path):
     symbols = []
     for line in output.splitlines():
         parts = line.split()
-        
+
         if len(parts) < 3:
             continue
 
         addr_str = parts[0]
         type_char = parts[1].upper()
         name = " ".join(parts[2:])
-        
+
         if "kernel_symbols" in name or "kernel_symbol_count" in name:
             continue
 

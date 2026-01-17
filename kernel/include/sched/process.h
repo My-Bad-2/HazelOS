@@ -44,56 +44,82 @@ void process_destroy(process_t* proc);
 
 process_t* get_kernel_process(void);
 
-typedef struct thread {
-    uint32_t tid;
-    thread_state_t state;
+union sched_entity {
+    struct {
+        size_t vruntime;
+        size_t total_runtime;
+        int nice;
+        int nice_idx;
+    } cfs;
+
+    struct {
+        size_t arrival_time;
+        size_t time_slice;
+        int priority;
+    } rt;
+
+    struct {
+        size_t deadline;
+        size_t period;
+        size_t runtime;
+        size_t remaining;
+    } dl;
+};
+
+typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     process_t* owner;
 
-    interrupt_trapframe_t tf;
-
-    uintptr_t context_rsp;
-    uintptr_t kernel_stack_top;
-
-    void* kernel_stack;
-    void* user_stack;
-
-    size_t vruntime;
-    size_t total_runtime;
-    size_t last_start_time;
-
+    uint32_t tid;
     uint32_t assigned_cpu;
+
+    uint16_t state;
+    uint8_t policy;
+    uint8_t on_rq;
+
     uint32_t affinity_mask;
 
-    int nice;
-    int nice_idx;
-
-    sched_policy_t policy;
-    int priorty;
-
-    size_t arrival_time;
-    size_t time_slice;
-
-    size_t dl_deadline;
-    size_t dl_period;
-    size_t dl_runtime;
-    size_t dl_remaining;
+    union sched_entity sched;
 
     size_t avg_load;
     size_t last_load_update;
 
+    uintptr_t context_rsp;
+    uintptr_t kernel_stack_top;
+
+    size_t last_start_time;
+
     struct rb_node rb_node;
     struct rb_node process_node;
 
+    void* kernel_stack;
+    void* user_stack;
+
     timer_event_t sleep_timer;
+    interrupt_trapframe_t tf;
+
     void* fpu_buffer;
 } thread_t;
+
+#define CFS_VRUNTIME(t)      ((t)->sched.cfs.vruntime)
+#define CFS_TOTAL_RUNTIME(t) ((t)->sched.cfs.total_runtime)
+#define CFS_NICE(t)          ((t)->sched.cfs.nice)
+#define CFS_NICE_IDX(t)      ((t)->sched.cfs.nice_idx)
+
+#define RT_ARRIVAL(t)  ((t)->sched.rt.arrival_time)
+#define RT_SLICE(t)    ((t)->sched.rt.time_slice)
+#define RT_PRIORITY(t) ((t)->sched.rt.priority)
+
+#define DL_DEADLINE(t)  ((t)->sched.dl.deadline)
+#define DL_PERIOD(t)    ((t)->sched.dl.period)
+#define DL_RUNTIME(t)   ((t)->sched.dl.runtime)
+#define DL_REMAINING(t) ((t)->sched.dl.remaining)
 
 typedef struct {
     process_t* proc;
     void (*entry)(void*);
     void* arg;
 
-    sched_policy_t policy;
+    uint8_t policy;
 
     union {
         struct {

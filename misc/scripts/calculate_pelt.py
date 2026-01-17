@@ -1,11 +1,12 @@
 import math
 
+
 def calculate_pelt_factors():
     FIXED_1 = 32768
-    
-    # Formula: Factor = 0.5 ^ (i / 32)    
+
+    # Formula: Factor = 0.5 ^ (i / 32)
     print("static const uint16_t pelt_decay_factors[32] = {")
-    
+
     for i in range(32):
         decay = math.pow(0.5, i / 32.0)
         value = int(round(decay * FIXED_1))
@@ -16,6 +17,7 @@ def calculate_pelt_factors():
             print()
 
     print("};")
+
 
 if __name__ == "__main__":
     calculate_pelt_factors()

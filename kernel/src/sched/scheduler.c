@@ -31,6 +31,11 @@
 #define PELT_MAX_LOAD     1024
 #define MIGRATION_COST_NS 50000  // 50us
 
+#define MIN_GRANULARITY_NS 2500000ul   // 2.5ms
+#define TARGET_LATENCY_NS  20000000ul  // 20ms
+#define RR_QUANTUM_NS      10000000ul  // 10ms
+#define YIELD_PENALTY_NS   2000000ul   // 2ms
+
 #define COST_IDLE_CORE   0     // Gold standard
 #define COST_SMT_THREAD  500   // Sibling is busy (50% capacity penalty)
 #define COST_BUSY_THREAD 1000  // CPU is fully utilized
@@ -39,11 +44,6 @@ static process_t* kernel_proc = nullptr;
 static bool initialized       = false;
 
 static uint32_t cpu_count = 0;
-
-static size_t cfs_min_granularity = 0;
-static size_t yield_penalty       = 0;
-static size_t target_latency      = 0;
-static size_t RR_QUANTUM          = 0;
 
 // misc/scripts/calculate_wmult.py
 static const uint32_t prio_to_wmult[40] = {
@@ -107,19 +107,20 @@ static inline size_t calculate_weighted_delta(size_t delta, int nice_idx) {
     return (size_t)(v >> 32);
 }
 
+static inline size_t get_time_now(void) {
+    return timer_get_time();
+}
+
 static void sleep_callback(void* ctx) {
     thread_t* t = (thread_t*)ctx;
 
-    if (t->state != THREAD_SLEEPING) {
-        return;
+    if (t && t->state == THREAD_SLEEPING) {
+        scheduler_unblock(t);
     }
-
-    scheduler_unblock(t);
 }
 
 void scheduler_init(void) {
     kernel_proc = process_create(true);
-    cpu_count   = (uint32_t)mp_request.response->cpu_count;
 
     if (!kernel_proc) {
         if (errno == 0) {
@@ -130,47 +131,44 @@ void scheduler_init(void) {
         return;
     }
 
-    thread_create_args_t args = {
+    cpu_count = (uint32_t)mp_request.response->cpu_count;
+
+    thread_create_args_t idle_args = {
         .proc   = kernel_proc,
         .entry  = idle_task_entry,
         .arg    = nullptr,
         .policy = SCHED_NORMAL,
-        .normal = {.nice = -19},
+        .normal = {.nice = 19},
     };
 
     for (uint32_t i = 0; i < cpu_count; ++i) {
         per_cpu_data_t* cpu = smp_get_core(i);
 
-        acquire_interrupt_lock(&cpu->lock);
+        cpu->cfs_tree = RB_ROOT_CACHED;
+        cpu->dl_tree  = RB_ROOT_CACHED;
+        cpu->rt_tree  = RB_ROOT_CACHED;
 
-        thread_t* idle = thread_create(&args);
-
-        if (!idle) {
-            int err = errno ? errno : EINVAL;
-            KLOG_ERROR("SCHED: failed to create idle thread cpu=%u errno=%d\n", i, err);
-            release_interrupt_lock(&cpu->lock);
-            return;
-        }
-
-        cpu->cfs_tree     = RB_ROOT_CACHED;
-        cpu->min_vruntime = 0;
-
-        cpu->idle_thread  = idle;
-        cpu->curr_thread  = idle;
-        cpu->thread_count = 1;
-
+        cpu->min_vruntime      = 0;
+        cpu->cpu_load          = 0;
         cpu->balance_counter   = 0;
         cpu->reschedule_needed = false;
 
-        release_interrupt_lock(&cpu->lock);
+        thread_t* idle = thread_create(&idle_args);
+
+        if (!idle) {
+            int err = errno ? errno : EINVAL;
+            PANIC("SCHED: failed to create idle thread cpu=%u errno=%d\n", i, err);
+        }
+
+        idle->state         = THREAD_READY;
+        idle->assigned_cpu  = i;
+        idle->affinity_mask = (1u << i);
+        idle->on_rq         = false;
+
+        cpu->idle_thread  = idle;
+        cpu->curr_thread  = idle;
+        cpu->thread_count = 0;
     }
-
-    const size_t ticks_per_ns = timer_get_hz() / 1000000000ul;
-
-    cfs_min_granularity = ticks_per_ns * 2500000ul;   // 2.5 ms
-    yield_penalty       = ticks_per_ns * 5000000ul;   // 5 ms
-    target_latency      = ticks_per_ns * 20000000ul;  // 20 ms
-    RR_QUANTUM          = ticks_per_ns * 10000000ul;  // 10ms
 
     timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
 
@@ -179,117 +177,98 @@ void scheduler_init(void) {
     KLOG_INFO("SCHED: initialized cpus=%u\n", cpu_count);
 }
 
-static int cfs_cmp(thread_t* a, thread_t* b) {
-    if (a->vruntime < b->vruntime) {
-        return -1;
-    }
-
-    if (a->vruntime > b->vruntime) {
-        return 1;
-    }
-
-    return (a->tid < b->tid) ? -1 : 1;
-}
-
-static int rt_cmp(thread_t* a, thread_t* b) {
-    if (a->priorty > b->priorty) {
-        return -1;
-    }
-
-    if (a->priorty < b->priorty) {
-        return 1;
-    }
-
-    return (a->arrival_time < b->arrival_time) ? -1 : 1;
-}
-
-static int dl_cmp(thread_t* a, thread_t* b) {
-    if (a->dl_deadline < b->dl_deadline) {
-        return -1;
-    }
-
-    if (a->dl_deadline > b->dl_deadline) {
-        return 1;
-    }
-
-    return (a->tid < b->tid) ? -1 : 1;
-}
-
-static void cfs_insert(per_cpu_data_t* cpu, thread_t* t) {
-    struct rb_node** link  = &cpu->cfs_tree.rb_root.rb_node;
-    struct rb_node* parent = nullptr;
-    bool is_leftmost       = true;
-
-    while (*link) {
-        parent          = *link;
-        thread_t* entry = rb_entry(parent, thread_t, rb_node);
-
-        if (cfs_cmp(t, entry) < 0) {
-            link = &parent->rb_left;
-        } else {
-            link        = &parent->rb_right;
-            is_leftmost = false;
-        }
-    }
-
-    rb_link_node(&t->rb_node, parent, link);
-    rb_insert_color_cached(&t->rb_node, &cpu->cfs_tree, is_leftmost);
-}
-
-static void rt_insert(per_cpu_data_t* cpu, thread_t* t) {
-    struct rb_node** link  = &cpu->rt_tree.rb_root.rb_node;
-    struct rb_node* parent = nullptr;
-    bool is_leftmost       = true;
-
-    while (*link) {
-        parent          = *link;
-        thread_t* entry = rb_entry(parent, thread_t, rb_node);
-
-        if (rt_cmp(t, entry) < 0) {
-            link = &parent->rb_left;
-        } else {
-            link        = &parent->rb_right;
-            is_leftmost = false;
-        }
-    }
-
-    rb_link_node(&t->rb_node, parent, link);
-    rb_insert_color_cached(&t->rb_node, &cpu->rt_tree, is_leftmost);
-}
-
-static void dl_insert(per_cpu_data_t* cpu, thread_t* t) {
-    struct rb_node** link  = &cpu->dl_tree.rb_root.rb_node;
-    struct rb_node* parent = nullptr;
-    bool is_leftmost       = true;
-
-    while (*link) {
-        parent          = *link;
-        thread_t* entry = rb_entry(parent, thread_t, rb_node);
-
-        if (dl_cmp(t, entry) < 0) {
-            link = &parent->rb_left;
-        } else {
-            link        = &parent->rb_right;
-            is_leftmost = false;
-        }
-    }
-
-    rb_link_node(&t->rb_node, parent, link);
-    rb_insert_color_cached(&t->rb_node, &cpu->dl_tree, is_leftmost);
-}
-
-static void update_dl_entity(thread_t* curr, size_t delta) {
-    if (curr->dl_remaining > delta) {
-        curr->dl_remaining -= delta;
+static void remove_from_runqueue(per_cpu_data_t* cpu, thread_t* t) {
+    if (t->policy == SCHED_DEADLINE) {
+        rb_erase_cached(&t->rb_node, &cpu->dl_tree);
+    } else if (t->policy == SCHED_NORMAL) {
+        rb_erase_cached(&t->rb_node, &cpu->cfs_tree);
     } else {
-        curr->dl_remaining += curr->dl_period;
-        curr->dl_remaining = curr->dl_runtime;
+        rb_erase_cached(&t->rb_node, &cpu->rt_tree);
+    }
+
+    rb_init_node(&t->rb_node);
+
+    if (cpu->cpu_load >= t->avg_load) {
+        cpu->cpu_load -= t->avg_load;
+    } else {
+        cpu->cpu_load = 0;
     }
 }
 
-static void safe_remove_cached(struct rb_root_cached* root, thread_t* t) {
-    rb_erase_cached(&t->rb_node, root);
-    rb_init_node(&t->rb_node);
+static inline bool sched_before(thread_t* t, thread_t* entry) {
+    if (t->policy == SCHED_DEADLINE) {
+        if (DL_DEADLINE(t) != DL_DEADLINE(entry)) {
+            return DL_DEADLINE(t) < DL_DEADLINE(entry);
+        }
+    } else if (t->policy == SCHED_NORMAL) {
+        if (CFS_VRUNTIME(t) != CFS_VRUNTIME(entry)) {
+            return CFS_VRUNTIME(t) < CFS_VRUNTIME(entry);
+        }
+    } else {
+        if (RT_PRIORITY(t) != RT_PRIORITY(entry)) {
+            return RT_PRIORITY(t) > RT_PRIORITY(entry);
+        }
+
+        if (RT_ARRIVAL(t) != RT_ARRIVAL(entry)) {
+            return RT_ARRIVAL(t) < RT_ARRIVAL(entry);
+        }
+    }
+
+    return t->tid < entry->tid;
+}
+
+static void add_to_runqueue(per_cpu_data_t* cpu, thread_t* t) {
+    struct rb_root_cached* root = nullptr;
+
+    if (t->policy == SCHED_DEADLINE) {
+        root = &cpu->dl_tree;
+    } else if (t->policy == SCHED_NORMAL) {
+        root = &cpu->cfs_tree;
+    } else {
+        root = &cpu->rt_tree;
+    }
+
+    struct rb_node** link  = &root->rb_root.rb_node;
+    struct rb_node* parent = nullptr;
+    bool is_leftmost       = true;
+
+    while (*link) {
+        parent          = *link;
+        thread_t* entry = rb_entry(parent, thread_t, rb_node);
+
+        if (sched_before(t, entry)) {
+            link = &parent->rb_left;
+        } else {
+            link        = &parent->rb_right;
+            is_leftmost = false;
+        }
+    }
+
+    rb_link_node(&t->rb_node, parent, link);
+    rb_insert_color_cached(&t->rb_node, root, is_leftmost);
+
+    cpu->cpu_load += t->avg_load;
+}
+
+static inline void update_dl_entity(thread_t* curr, size_t delta) {
+    if (curr->policy != SCHED_DEADLINE) {
+        return;
+    }
+
+    if (DL_REMAINING(curr) > delta) {
+        DL_RUNTIME(curr) -= delta;
+    } else {
+        DL_REMAINING(curr) = DL_RUNTIME(curr);
+        DL_DEADLINE(curr) += DL_PERIOD(curr);
+
+        size_t now = get_time_now();
+
+        if (DL_DEADLINE(curr) < now) {
+            DL_DEADLINE(curr) = now + DL_PERIOD(curr);
+        }
+
+        smp_current_core()->reschedule_needed = true;
+    }
 }
 
 static inline size_t decay_load(size_t load, size_t delta_ms) {
@@ -332,10 +311,6 @@ static thread_t* pick_next_thread(per_cpu_data_t* cpu) {
     return nullptr;
 found:
     return rb_entry(node, thread_t, rb_node);
-}
-
-static inline size_t get_time_now(void) {
-    return timer_get_time();
 }
 
 static void update_thread_load(thread_t* t) {
@@ -418,7 +393,7 @@ static uint32_t select_best_cpu(thread_t* t) {
             int idx                 = ctz(sibs);
             per_cpu_data_t* sibling = smp_get_core((uint32_t)idx);
 
-            if (sibling->thread_count > 1) {
+            if (sibling->thread_count > 0) {
                 curr_cost += COST_SMT_THREAD;
                 curr_cost += (sibling->cpu_load / 2);
             }
@@ -449,6 +424,74 @@ static uint32_t select_best_cpu(thread_t* t) {
     return best_cpu;
 }
 
+// Priority: Deadline (3) > RT (2) > CFS (1) > Idle/Other (0)
+static inline int sched_get_class(const thread_t* t) {
+    int class = 0;
+    if (!t) {
+        goto cleanup;
+    }
+
+    if (t->policy == SCHED_DEADLINE) {
+        class = 3;
+        goto cleanup;
+    }
+
+    if (t->policy == SCHED_FIFO || t->policy == SCHED_RR) {
+        class = 2;
+        goto cleanup;
+    }
+
+    if (t->policy == SCHED_NORMAL) {
+        class = 1;
+    }
+
+cleanup:
+    return class;
+}
+
+static bool sched_should_preempt(thread_t* t, thread_t* curr) {
+    if (!curr) {
+        return true;
+    }
+
+    if (curr->state != THREAD_RUNNING) {
+        return true;
+    }
+
+    int new_class  = sched_get_class(t);
+    int curr_class = sched_get_class(curr);
+
+    // Rule 1: Higher Scheduling class always preempts lower
+    if (new_class > curr_class) {
+        return true;
+    }
+
+    if (new_class < curr_class) {
+        return false;
+    }
+
+    switch (new_class) {
+        case 3:
+            // Preempt if new thread has an earlier deadline
+            return DL_DEADLINE(t) < DL_DEADLINE(curr);
+        case 2:
+            // preempt if new thread is of higher priority
+            return RT_PRIORITY(t) > RT_PRIORITY(curr);
+        case 1:
+            // Wakup Granularity: Preempt only if difference is significant
+            if (CFS_VRUNTIME(t) < CFS_VRUNTIME(curr)) {
+                size_t diff = CFS_VRUNTIME(curr) - CFS_VRUNTIME(t);
+                return diff > MIN_GRANULARITY_NS;
+            }
+
+            return false;
+        default:
+            break;
+    }
+
+    return true;
+}
+
 void scheduler_add_thread(thread_t* t) {
     if (!t) {
         errno = EINVAL;
@@ -463,17 +506,23 @@ void scheduler_add_thread(thread_t* t) {
     }
 
     per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
+    t->state            = THREAD_READY;
+    t->on_rq            = true;
 
-    t->state = THREAD_READY;
+    if (t->policy == SCHED_NORMAL) {
+        if (CFS_NICE(t) < -20) {
+            CFS_NICE(t) = -20;
+        }
 
-    if (t->nice == 0) {
-        t->nice = 0;
+        if (CFS_NICE(t) > 19) {
+            CFS_NICE(t) = 19;
+        }
+
+        CFS_NICE_IDX(t) = CFS_NICE(t) + 20;
     }
 
-    t->nice_idx = t->nice + 20;
-
-    if (t->policy == SCHED_RR) {
-        t->time_slice = RR_QUANTUM;
+    if (t->policy == SCHED_RR && RT_SLICE(t) == 0) {
+        RT_SLICE(t) = RR_QUANTUM_NS;
     }
 
     acquire_interrupt_lock(&cpu->lock);
@@ -481,67 +530,23 @@ void scheduler_add_thread(thread_t* t) {
     size_t now = get_time_now();
 
     if (t->policy == SCHED_DEADLINE) {
-        t->dl_deadline  = now + t->dl_period;
-        t->dl_remaining = t->dl_runtime;
-        dl_insert(cpu, t);
+        DL_DEADLINE(t)  = now + DL_PERIOD(t);
+        DL_REMAINING(t) = DL_RUNTIME(t);
     } else if (t->policy == SCHED_NORMAL) {
-        t->vruntime = cpu->min_vruntime + 100000;
-        cfs_insert(cpu, t);
+        const size_t penalty = 100000;  // 100us
+        CFS_VRUNTIME(t)      = cpu->min_vruntime + penalty;
     } else {
-        t->arrival_time = now;
-        rt_insert(cpu, t);
+        RT_ARRIVAL(t) = now;
     }
 
-    cpu->cpu_load += t->avg_load;
+    add_to_runqueue(cpu, t);
     cpu->thread_count++;
 
-    if (cpu->curr_thread) {
-        bool preempt = false;
+    if (cpu->curr_thread && sched_should_preempt(t, cpu->curr_thread)) {
+        cpu->reschedule_needed = true;
 
-        thread_t* curr = cpu->curr_thread;
-
-        // Priority Levels: DL (3) > RT (2) > CFS (1)
-        int t_class = 0;
-        if (t->policy == SCHED_DEADLINE) {
-            t_class = 3;
-        } else if (t->policy != SCHED_NORMAL) {
-            t_class = 2;
-        }
-
-        int curr_class = 1;
-        if (curr->policy == SCHED_DEADLINE) {
-            curr_class = 3;
-        } else if (curr->policy != SCHED_NORMAL) {
-            curr_class = 2;
-        }
-
-        if (t_class > curr_class) {
-            preempt = true;
-        } else if (t_class == curr_class) {
-            if (t_class == 3) {
-                // DL vs DL: Earliest Deadline wins
-                if (t->dl_deadline < curr->dl_deadline) {
-                    preempt = true;
-                }
-            } else if (t_class == 2) {
-                // RT vs RT: Higher Priority wins
-                if (t->priorty > curr->priorty) {
-                    preempt = true;
-                }
-            } else {
-                if (t->vruntime < cpu->curr_thread->vruntime) {
-                    size_t diff = cpu->curr_thread->vruntime - t->vruntime;
-
-                    if (diff > cfs_min_granularity) {
-                        preempt = true;
-                    }
-                }
-            }
-        }
-
-        if (preempt) {
-            cpu->reschedule_needed = true;
-            // TODO: Send IPI to reschedule
+        if (cpu != smp_current_core()) {
+            smp_send_reschedule_ipi(cpu);
         }
     }
 
@@ -561,6 +566,7 @@ void scheduler_remove_thread(thread_t* t) {
         uint32_t expected_cpu = *(volatile uint32_t*)&t->assigned_cpu;
 
         if (expected_cpu == UINT32_MAX) {
+            t->state = THREAD_TERMINATED;
             return;
         }
 
@@ -575,131 +581,162 @@ void scheduler_remove_thread(thread_t* t) {
         arch_pause();
     }
 
-    bool is_curr = (t == cpu->curr_thread);
+    bool is_running = (t == cpu->curr_thread);
+    bool on_rq      = t->on_rq;
 
-    bool on_rq = !RB_EMPTY_NODE(&t->rb_node) && (t->state == THREAD_READY);
-
-    if (is_curr) {
+    if (is_running) {
         // Thread is currently running on a cpu. Since we can't simply remove it, hence we mark it
         // as terminated and let the scheduler handle the rest.
-        t->state = THREAD_TERMINATED;
+        t->state               = THREAD_TERMINATED;
+        cpu->reschedule_needed = true;
 
         if (cpu != smp_current_core()) {
-            // Send IPI
+            smp_send_reschedule_ipi(cpu);
         }
     } else if (on_rq) {
-        // Thread is waiting in the run queue
-        if (t->policy == SCHED_DEADLINE) {
-            safe_remove_cached(&cpu->dl_tree, t);
-        } else if (t->policy == SCHED_NORMAL) {
-            safe_remove_cached(&cpu->cfs_tree, t);
-        } else {
-            safe_remove_cached(&cpu->rt_tree, t);
+        remove_from_runqueue(cpu, t);
+
+        t->on_rq = false;
+        t->state = THREAD_TERMINATED;
+
+        if (cpu->thread_count > 0) {
+            cpu->thread_count--;
         }
     } else {
         t->state = THREAD_TERMINATED;
-    }
 
-    if (cpu->cpu_load >= t->avg_load) {
-        cpu->cpu_load -= t->avg_load;
-    } else {
-        cpu->cpu_load = 0;
+        if (cpu->cpu_load >= t->avg_load) {
+            cpu->cpu_load -= t->avg_load;
+        } else {
+            cpu->cpu_load = 0;
+        }
     }
 
     release_interrupt_lock(&cpu->lock);
 }
 
-static inline bool is_imbalance_valid(uint32_t my_load, uint32_t victim_load) {
-    if (victim_load <= 1) {
-        return false;
+static inline void double_lock_cpu(per_cpu_data_t* cpu1, per_cpu_data_t* cpu2) {
+    if (cpu1->cpu_idx < cpu2->cpu_idx) {
+        acquire_interrupt_lock(&cpu1->lock);
+        acquire_interrupt_lock(&cpu2->lock);
+    } else {
+        acquire_interrupt_lock(&cpu2->lock);
+        acquire_interrupt_lock(&cpu1->lock);
     }
+}
 
-    return (victim_load - my_load) >= 2;
+static void double_unlock_cpu(per_cpu_data_t* cpu1, per_cpu_data_t* cpu2) {
+    if (cpu1->cpu_idx < cpu2->cpu_idx) {
+        release_interrupt_lock(&cpu1->lock);
+        release_interrupt_lock(&cpu2->lock);
+    } else {
+        release_interrupt_lock(&cpu2->lock);
+        release_interrupt_lock(&cpu1->lock);
+    }
 }
 
 static void balance_load(void) {
     per_cpu_data_t* this_cpu = smp_current_core();
-    uint32_t my_load         = this_cpu->thread_count;
 
-    per_cpu_data_t* victim = nullptr;
-    uint32_t max_load      = 0;
+    per_cpu_data_t* busiest_cpu = nullptr;
+    size_t max_load             = 0;
+
+    if (this_cpu->cpu_load > PELT_MAX_LOAD) {
+        return;
+    }
 
     for (uint32_t i = 0; i < cpu_count; ++i) {
         if (i == this_cpu->cpu_idx) {
             continue;
         }
 
-        per_cpu_data_t* cpu = smp_get_core(i);
-        uint32_t load       = cpu->thread_count;
+        per_cpu_data_t* remote = smp_get_core(i);
 
-        if (load > (this_cpu->thread_count + 1) && load > max_load) {
-            max_load = load;
-            victim   = cpu;
+        // Skip idle CPUs
+        if (remote->cpu_load == 0) {
+            continue;
+        }
+
+        if (remote->cpu_load > max_load) {
+            max_load    = remote->cpu_load;
+            busiest_cpu = remote;
         }
     }
 
-    // Only steal if victim has more than 1 threads
-    if (!victim || !is_imbalance_valid(my_load, max_load)) {
+// Only migrate if imbalance is >25% to avoid "Bouncing"
+#define IMBALANCE_THRESHOLD(local) ((local) + ((local) >> 2))
+
+    // Only proceed if the busiest CPU is significantly overloaded compared to us.
+    if (!busiest_cpu || max_load <= IMBALANCE_THRESHOLD(this_cpu->cpu_load)) {
         return;
     }
 
-    // Deadlock-free locking
-    per_cpu_data_t* first  = (this_cpu->cpu_idx < victim->cpu_idx) ? this_cpu : victim;
-    per_cpu_data_t* second = (this_cpu->cpu_idx < victim->cpu_idx) ? victim : this_cpu;
-
-    acquire_interrupt_lock(&first->lock);
-    acquire_interrupt_lock(&second->lock);
+    double_lock_cpu(this_cpu, busiest_cpu);
 
     // The situation might have changed while we waited for locks, so re-verify for safety.
-    if (!is_imbalance_valid(this_cpu->thread_count, victim->thread_count)) {
-        release_interrupt_lock(&second->lock);
-        release_interrupt_lock(&second->lock);
+    if (busiest_cpu->cpu_load <= IMBALANCE_THRESHOLD(this_cpu->cpu_load)) {
+        double_unlock_cpu(this_cpu, busiest_cpu);
         return;
     }
 
-    uint32_t curr_diff       = victim->thread_count - this_cpu->thread_count;
-    uint32_t threads_to_move = curr_diff / 2;
+    // Find a victim thread to steal. We only steal from the CFS tree, preferably the 'Rightmost'
+    // node (Highest VRuntime). These threads are usually the furthest in the future hence moving
+    // them doesn't hurt our perfomance than compared to moving the "Leftmost" thread.
+    struct rb_node* node = rb_last(&busiest_cpu->cfs_tree.rb_root);
+    thread_t* victim     = nullptr;
 
-    if (threads_to_move > 4) {
-        threads_to_move = 4;
-    }
-
-    uint32_t moved_count = 0;
-
-    struct rb_node* node = rb_last(&victim->cfs_tree.rb_root);
-
-    while (node && moved_count < threads_to_move) {
+    while (node) {
         thread_t* t = rb_entry(node, thread_t, rb_node);
 
-        node = rb_prev(node);
+        // Can this thread run on our CPU?
+        bool affinity_ok = (t->affinity_mask & (1ul << this_cpu->cpu_idx));
 
-        if (t->state == THREAD_READY && t->policy == SCHED_NORMAL) {
-            safe_remove_cached(&victim->cfs_tree, t);
-            victim->thread_count--;
+        // Is it currently running?
+        bool is_running = (t->state == THREAD_RUNNING);
 
-            // We cannot just copy vruntime. Victim's timeline might be totally different from ours.
-            // Formula: NewVRuntime = OutMin + (OldVRuntime - VictimMin)
-            int64_t lag = (int64_t)t->vruntime - (int64_t)victim->min_vruntime;
-
-            t->vruntime = (size_t)((int64_t)this_cpu->min_vruntime + lag);
-
-            t->assigned_cpu = this_cpu->cpu_idx;
-            cfs_insert(this_cpu, t);
-            this_cpu->thread_count++;
-
-            moved_count++;
-
-            KLOG_INFO(
-                "SCHED: cpu %zu stole thread %zu from cpu %zu\n",
-                this_cpu->cpu_idx,
-                t->tid,
-                victim->cpu_idx
-            );
+        if (affinity_ok && !is_running) {
+            victim = t;
+            break;
         }
+
+        node = rb_prev(node);
     }
 
-    release_interrupt_lock(&second->lock);
-    release_interrupt_lock(&first->lock);
+    if (victim) {
+        remove_from_runqueue(busiest_cpu, victim);
+        busiest_cpu->thread_count--;
+
+        victim->assigned_cpu = this_cpu->cpu_idx;
+        victim->on_rq        = true;
+
+        // When moving across CPUs, the vruntime base might be different. So, we normalize vruntime
+        // to the new CPU's timeline to prevent unfair switches. Formula: vruntime = (vruntime -
+        // old_min_vruntim) + new_min_vruntime
+        int64_t vruntime_norm = (int64_t)CFS_VRUNTIME(victim) - (int64_t)busiest_cpu->min_vruntime;
+
+        if (vruntime_norm < 0) {
+            vruntime_norm = 0;
+        }
+
+        CFS_VRUNTIME(victim) = (size_t)((int64_t)this_cpu->min_vruntime + vruntime_norm);
+
+        add_to_runqueue(this_cpu, victim);
+        this_cpu->thread_count++;
+
+        if (CFS_VRUNTIME(victim) < CFS_VRUNTIME(this_cpu->curr_thread)) {
+            this_cpu->reschedule_needed = true;
+        }
+
+        KLOG_INFO(
+            "SCHED: cpu %zu stole thread %zu from cpu %zu\n",
+            this_cpu->cpu_idx,
+            victim->tid,
+            busiest_cpu->cpu_idx
+        );
+    }
+
+    double_unlock_cpu(this_cpu, busiest_cpu);
+#undef IMBALANCE_THRESHOLD
 }
 
 static inline size_t min_vruntime(size_t a, size_t b) {
@@ -714,15 +751,15 @@ static size_t get_time_slice(per_cpu_data_t* cpu) {
     size_t thread_count = cpu->thread_count;
 
     if (thread_count == 0) {
-        return cfs_min_granularity;
+        return MIN_GRANULARITY_NS;
     }
 
-    size_t slice = target_latency / thread_count;
+    size_t slice = TARGET_LATENCY_NS / thread_count;
 
     // If we have too many threads, we extend the latency period rather than thrashing the cpu with
     // tiny time slices.
-    if (slice < cfs_min_granularity) {
-        slice = cfs_min_granularity;
+    if (slice < MIN_GRANULARITY_NS) {
+        slice = MIN_GRANULARITY_NS;
     }
 
     return slice;
@@ -741,6 +778,49 @@ static void check_nohz_mode(per_cpu_data_t* cpu, thread_t* next) {
     }
 }
 
+static void update_curr_stats(per_cpu_data_t* cpu, thread_t* curr, size_t now) {
+    if (!curr || curr == cpu->idle_thread) {
+        return;
+    }
+
+    size_t delta = (now > curr->last_start_time) ? (now - curr->last_start_time) : 0;
+
+    update_thread_load(curr);
+
+    if (curr->policy == SCHED_NORMAL) {
+        CFS_TOTAL_RUNTIME(curr) += delta;
+
+        size_t wdelta = calculate_weighted_delta(delta, CFS_NICE_IDX(curr));
+        CFS_VRUNTIME(curr) += wdelta;
+
+        // Tracks the miniumum vruntime in the system to prevent new tasks from getting an unfair
+        // advantage
+        size_t v_min         = CFS_VRUNTIME(curr);
+        struct rb_node* left = rb_first_cached(&cpu->cfs_tree);
+
+        if (left) {
+            thread_t* t = rb_entry(left, thread_t, rb_node);
+
+            if (CFS_VRUNTIME(t) < v_min) {
+                v_min = CFS_VRUNTIME(t);
+            }
+        }
+
+        if (v_min > cpu->min_vruntime) {
+            cpu->min_vruntime = v_min;
+        }
+    } else if (curr->policy == SCHED_DEADLINE) {
+        update_dl_entity(curr, delta);
+    } else if (curr->policy == SCHED_RR) {
+        if (RT_SLICE(curr) <= delta) {
+            RT_SLICE(curr)   = RR_QUANTUM_NS;
+            RT_ARRIVAL(curr) = now;
+        } else {
+            RT_SLICE(curr) -= delta;
+        }
+    }
+}
+
 void schedule(void) {
     per_cpu_data_t* cpu = smp_current_core();
 
@@ -752,12 +832,12 @@ void schedule(void) {
 
     // If we were in NO_HZ mode, receiving this interrupt means a "Wakeup" event happend. We must
     // ensure the tick is running if we have multiple threads now.
-    if (cpu->is_nohz_active && cpu->thread_count > 1) {
-        lapic_timer_start(1);
-        cpu->is_nohz_active = false;
-    }
+    // if (cpu->is_nohz_active && cpu->thread_count > 0) {
+    // lapic_timer_start(1);
+    // cpu->is_nohz_active = false;
+    // }
 
-    if ((++cpu->balance_counter & (1024 - 1)) == 0) {
+    if ((++cpu->balance_counter & 0x3ff) == 0) {
         balance_load();
     }
 
@@ -770,98 +850,42 @@ void schedule(void) {
 
     acquire_interrupt_lock(&cpu->lock);
 
-    thread_t* next = nullptr;
-    size_t slice   = get_time_slice(cpu);
+    if (curr && curr != cpu->idle_thread && (curr->state == THREAD_RUNNING)) {
+        update_curr_stats(cpu, curr, now);
 
-    if (curr && (curr->state == THREAD_RUNNING)) {
-        size_t delta = (now > curr->last_start_time) ? (now - curr->last_start_time) : 0;
+        if (curr->state == THREAD_RUNNING) {
+            curr->state = THREAD_READY;
 
-        if (delta < slice) {
-            release_interrupt_lock(&cpu->lock);
-            return;
-        }
-    }
-
-    if (curr && curr != cpu->idle_thread) {
-        size_t delta = now - curr->last_start_time;
-
-        if (now < curr->last_start_time) {
-            delta = 0;
-        }
-
-        if (curr->policy == SCHED_DEADLINE) {
-            update_dl_entity(curr, delta);
-
-            if (curr->state == THREAD_RUNNING) {
-                curr->state = THREAD_READY;
-            }
-
-            dl_insert(cpu, curr);
-        } else if (curr->policy == SCHED_NORMAL) {
-            size_t weighted_delta = calculate_weighted_delta(delta, curr->nice_idx);
-            curr->total_runtime += delta;
-
-            size_t v_floor            = curr->vruntime;
-            struct rb_node* left_node = rb_first_cached(&cpu->cfs_tree);
-
-            if (left_node) {
-                thread_t* left = rb_entry(left_node, thread_t, rb_node);
-                v_floor        = min_vruntime(v_floor, left->vruntime);
-            }
-
-            cpu->min_vruntime = max_vruntime(cpu->min_vruntime, v_floor);
-
-            if (curr->state == THREAD_RUNNING || curr->state == THREAD_READY) {
-                curr->state = THREAD_READY;
-                cfs_insert(cpu, curr);
-            } else {
-                cpu->thread_count--;
-            }
+            add_to_runqueue(cpu, curr);
         } else {
-            if (curr->policy == SCHED_RR) {
-                if (curr->time_slice <= delta) {
-                    curr->time_slice   = RR_QUANTUM;
-                    curr->arrival_time = now;
-                } else {
-                    curr->time_slice -= delta;
-                }
-            }
-
-            if (curr->state == THREAD_RUNNING || curr->state == THREAD_READY) {
-                curr->state = THREAD_READY;
-                rt_insert(cpu, curr);
-            } else {
-                cpu->thread_count--;
-            }
+            cpu->thread_count--;
         }
     }
 
-    next = pick_next_thread(cpu);
+    thread_t* next = pick_next_thread(cpu);
 
     if (!next) {
         next = cpu->idle_thread;
     }
 
-    check_nohz_mode(cpu, next);
-
-    if (next) {
-        if (next->policy == SCHED_DEADLINE) {
-            safe_remove_cached(&cpu->dl_tree, next);
-        } else if (next->policy == SCHED_NORMAL) {
-            safe_remove_cached(&cpu->cfs_tree, next);
-        } else {
-            safe_remove_cached(&cpu->rt_tree, next);
-        }
-
-        prefetch((void*)next->context_rsp, 1, 3);
-    }
+    // Re-enable after IPI is implemented
+    // check_nohz_mode(cpu, next);
 
     if (curr == next) {
         curr->state           = THREAD_RUNNING;
         curr->last_start_time = now;
 
+        if (curr != cpu->idle_thread) {
+            remove_from_runqueue(cpu, curr);
+        }
+
         release_interrupt_lock(&cpu->lock);
         return;
+    }
+
+    if (next != cpu->idle_thread) {
+        remove_from_runqueue(cpu, next);
+        next->on_rq = false;
     }
 
     cpu->curr_thread      = next;
@@ -876,13 +900,13 @@ void schedule(void) {
         write_cr3(next_proc->map.phys_root);
     }
 
-    release_interrupt_lock(&cpu->lock);
-
 #ifdef __x86_64__
     update_tss_rsp0(&cpu->tss, next->kernel_stack_top);
 #endif
 
     thread_restore_fpu(next);
+
+    release_interrupt_lock(&cpu->lock);
 
     arch_switch_context(
         (switch_context_t**)&curr->context_rsp,
@@ -896,34 +920,64 @@ void scheduler_block(void) {
     acquire_interrupt_lock(&cpu->lock);
 
     thread_t* curr = cpu->curr_thread;
-    curr->state    = THREAD_BLOCKED;
+    if (curr && curr != cpu->idle_thread) {
+        curr->state            = THREAD_BLOCKED;
+        cpu->reschedule_needed = true;
+    }
 
     release_interrupt_lock(&cpu->lock);
-    scheduler_yield();
+    schedule();
 }
 
 void scheduler_unblock(thread_t* t) {
+    if (!t) {
+        return;
+    }
+
+    if (t->assigned_cpu == UINT32_MAX) {
+        t->assigned_cpu = select_best_cpu(t);
+    }
+
     per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
 
     acquire_interrupt_lock(&cpu->lock);
 
-    const size_t latency_bonus = (cfs_min_granularity * 10) / 4;
-    size_t target_vruntime     = cpu->min_vruntime;
-
-    if (target_vruntime > latency_bonus) {
-        target_vruntime -= latency_bonus;
-    } else {
-        target_vruntime = 0;
+    if (t->state != THREAD_BLOCKED && t->state != THREAD_SLEEPING) {
+        release_interrupt_lock(&cpu->lock);
+        return;
     }
 
-    if (t->vruntime < target_vruntime) {
-        t->vruntime = target_vruntime;
+    if (t->policy == SCHED_NORMAL) {
+        size_t thresh = (MIN_GRANULARITY_NS * 2);
+        size_t v_min  = cpu->min_vruntime;
+
+        size_t v_target = (v_min > thresh) ? (v_min - thresh) : 0;
+
+        if (CFS_VRUNTIME(t) < v_target) {
+            CFS_VRUNTIME(t) = v_target;
+        }
+    } else if (t->policy == SCHED_DEADLINE) {
+        size_t now = get_time_now();
+
+        if (DL_DEADLINE(t) < now) {
+            DL_DEADLINE(t)  = now + DL_PERIOD(t);
+            DL_REMAINING(t) = DL_RUNTIME(t);
+        }
     }
 
-    if (t->state == THREAD_BLOCKED || t->state == THREAD_SLEEPING) {
-        t->state = THREAD_READY;
+    t->state = THREAD_READY;
+    t->on_rq = true;
 
-        cfs_insert(cpu, t);
+    add_to_runqueue(cpu, t);
+
+    cpu->thread_count++;
+
+    if (cpu->curr_thread && sched_should_preempt(t, cpu->curr_thread)) {
+        cpu->reschedule_needed = true;
+
+        if (cpu != smp_current_core()) {
+            smp_send_reschedule_ipi(cpu);
+        }
     }
 
     release_interrupt_lock(&cpu->lock);
@@ -933,15 +987,50 @@ void scheduler_sleep(size_t ms) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* curr      = cpu->curr_thread;
 
+    if (!curr || curr == cpu->idle_thread) {
+        return;
+    }
+
+    size_t now           = get_time_now();
+    size_t target_wakeup = now + (ms * 1000000);
+
     acquire_interrupt_lock(&cpu->lock);
-    if (curr && curr != cpu->idle_thread) {
-        timer_arm_oneshot(&cpu->timer_manager, &curr->sleep_timer, ms, sleep_callback, curr);
-        curr->state = THREAD_SLEEPING;
+
+    while (true) {
+        now = get_time_now();
+
+        if (now >= target_wakeup) {
+            break;
+        }
+
+        size_t remaining_ns = target_wakeup - now;
+        size_t remaining_ms = remaining_ns / 1000000;
+
+        if (remaining_ms == 0) {
+            remaining_ms = 1;
+        }
+
+        timer_arm_oneshot(
+            &cpu->timer_manager,
+            &curr->sleep_timer,
+            remaining_ms,
+            sleep_callback,
+            curr
+        );
+
+        curr->state            = THREAD_SLEEPING;
+        cpu->reschedule_needed = true;
+
+        release_interrupt_lock(&cpu->lock);
+
+        schedule();
+
+        acquire_interrupt_lock(&cpu->lock);
+
+        timer_cancel(&curr->sleep_timer);
     }
 
     release_interrupt_lock(&cpu->lock);
-
-    scheduler_yield();
 }
 
 void scheduler_renice(thread_t* t, int nice) {
@@ -953,17 +1042,37 @@ void scheduler_renice(thread_t* t, int nice) {
         nice = 19;
     }
 
-    if (*(volatile int*)&t->nice == nice) {
+    if (t->policy == SCHED_NORMAL && CFS_NICE(t) == nice) {
         return;
     }
 
     per_cpu_data_t* cpu = nullptr;
-    size_t flags        = 0;
 
     while (true) {
         uint32_t expected_cpu = *(volatile uint32_t*)&t->assigned_cpu;
-        cpu                   = smp_get_core(expected_cpu);
 
+        if (expected_cpu == UINT32_MAX) {
+            if (t->policy == SCHED_NORMAL) {
+                CFS_NICE(t)     = nice;
+                CFS_NICE_IDX(t) = nice + 20;
+            } else if (t->policy != SCHED_DEADLINE) {
+                int new_prio = 50 - nice;
+
+                if (new_prio < 0) {
+                    new_prio = 0;
+                }
+
+                if (new_prio > 99) {
+                    new_prio = 99;
+                }
+
+                RT_PRIORITY(t) = new_prio;
+            }
+
+            return;
+        }
+
+        cpu = smp_get_core(expected_cpu);
         acquire_interrupt_lock(&cpu->lock);
 
         if (t->assigned_cpu == expected_cpu) {
@@ -974,35 +1083,53 @@ void scheduler_renice(thread_t* t, int nice) {
         arch_pause();
     }
 
-    bool on_rq = (t->state == THREAD_READY) && !RB_EMPTY_NODE(&t->rb_node);
+    bool was_on_rq = t->on_rq;
 
-    if (t->nice != nice && t->policy == SCHED_NORMAL) {
-        if (on_rq) {
-            safe_remove_cached(&cpu->cfs_tree, t);
-        }
+    if (was_on_rq) {
+        remove_from_runqueue(cpu, t);
+    }
 
+    if (t->policy == SCHED_NORMAL) {
         // Lag = Thread_VRuntime - System_Min_VRuntime
-        int64_t vruntime_lag = (int64_t)t->vruntime - (int64_t)cpu->min_vruntime;
+        int64_t vruntime_lag = (int64_t)CFS_VRUNTIME(t) - (int64_t)cpu->min_vruntime;
 
         // Formula: NewLag = OldLag * (NewInverseWeight / OldInverseWeight)
-        uint32_t old_wmult = prio_to_wmult[t->nice_idx];
+        uint32_t old_wmult = prio_to_wmult[CFS_NICE_IDX(t)];
         uint32_t new_wmult = prio_to_wmult[nice + 20];
 
         if (vruntime_lag != 0) {
             vruntime_lag = (int64_t)((uint128_t)vruntime_lag * new_wmult) / old_wmult;
         }
 
-        t->vruntime = (size_t)((int64_t)cpu->min_vruntime + vruntime_lag);
-        t->nice     = nice;
-        t->nice_idx = nice + 20;
+        CFS_VRUNTIME(t) = (size_t)((int64_t)cpu->min_vruntime + vruntime_lag);
+        CFS_NICE(t)     = nice;
+        CFS_NICE_IDX(t) = nice + 20;
+    } else if (t->policy == SCHED_DEADLINE) {
+        KLOG_WARN("SCHED: Ignoriing renice on Deadline task TID=%d\n", t->tid);
+    } else {
+        int new_prio = 50 - nice;
 
-        if (on_rq) {
-            cfs_insert(cpu, t);
+        if (new_prio < 0) {
+            new_prio = 0;
         }
+
+        if (new_prio > 99) {
+            new_prio = 99;
+        }
+
+        RT_PRIORITY(t) = new_prio;
     }
 
-    if (t->policy != SCHED_NORMAL) {
-        t->priorty = -nice + 20;
+    if (was_on_rq) {
+        add_to_runqueue(cpu, t);
+
+        if (cpu->curr_thread && sched_should_preempt(t, cpu->curr_thread)) {
+            cpu->reschedule_needed = true;
+
+            if (cpu != smp_current_core()) {
+                smp_send_reschedule_ipi(cpu);
+            }
+        }
     }
 
     release_interrupt_lock(&cpu->lock);
@@ -1017,22 +1144,28 @@ void scheduler_yield(void) {
 
     if (curr && curr != cpu->idle_thread) {
         size_t now = get_time_now();
-        if (curr->policy == SCHED_DEADLINE) {
-            curr->dl_deadline  = now + curr->dl_period;
-            curr->dl_remaining = curr->dl_runtime;
-        } else if (curr->policy == SCHED_NORMAL) {
-            size_t penalty  = yield_penalty;
-            size_t wpenalty = calculate_weighted_delta(penalty, curr->nice_idx);
 
-            curr->vruntime += wpenalty;
+        if (curr->policy == SCHED_DEADLINE) {
+            DL_REMAINING(curr) = DL_RUNTIME(curr);
+            DL_DEADLINE(curr) += DL_PERIOD(curr);
+
+            if (DL_DEADLINE(curr) < now) {
+                DL_DEADLINE(curr) = now + DL_PERIOD(curr);
+            }
+        } else if (curr->policy == SCHED_NORMAL) {
+            const size_t penalty_ns = 2000000;  // 2ms
+            size_t wpenalty         = calculate_weighted_delta(penalty_ns, CFS_NICE_IDX(curr));
+
+            CFS_VRUNTIME(curr) += wpenalty;
         } else {
-            // RT tasks are sorted by Priority + Arrival Time. To yield, we simply rest the "Arrival
-            // Time" to now. This makes the thread appear newer than others at the same priority,
-            // effectively moving it to the back of the line.
-            curr->arrival_time = now;
+            RT_ARRIVAL(curr) = now;
+
+            if (curr->policy == SCHED_RR) {
+                RT_SLICE(curr) = RR_QUANTUM_NS;
+            }
         }
 
-        curr->state = THREAD_READY;
+        cpu->reschedule_needed = true;
     }
 
     release_interrupt_lock(&cpu->lock);

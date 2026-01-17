@@ -22,7 +22,7 @@ set(
 	-Wformat=2
 	-Wformat-truncation
 	-Wmissing-include-dirs
-	-Wcast-align
+	# -Wcast-align
 	-Wswitch-enum
 	-Wsign-conversion
 	-Wdisabled-optimization
