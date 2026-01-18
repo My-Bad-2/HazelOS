@@ -27,6 +27,7 @@ static uint32_t vmm_get_segment_flags(uint32_t elf_flags) {
     return flags;
 }
 
+// NOLINTNEXTLINE
 void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_delta) {
     Elf64_Ehdr* ehdr = (Elf64_Ehdr*)kernel_base;
 

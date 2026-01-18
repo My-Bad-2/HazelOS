@@ -81,3 +81,12 @@ volatile struct limine_framebuffer_request framebuffer_request = {
     .revision = 1,
     .response = nullptr,
 };
+
+[[gnu::section(".requests")]]
+volatile struct limine_module_request module_request = {
+    .id                    = LIMINE_MODULE_REQUEST_ID,
+    .revision              = 1,
+    .response              = nullptr,
+    .internal_module_count = 0,
+    .internal_modules      = nullptr,
+};

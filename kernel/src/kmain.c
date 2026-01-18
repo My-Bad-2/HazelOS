@@ -1,6 +1,7 @@
 #include "arch.h"
 #include "cpu/smp.h"
 #include "drivers/drivers.h"
+#include "drivers/loader.h"
 #include "libs/log.h"
 #include "memory/memory.h"
 #include "sched/scheduler.h"
@@ -26,6 +27,7 @@ void kmain(void) {
 #endif
 
     KLOG_INFO("Hello, World!\n");
+    // launch_user_init();
 
     arch_halt(true);
 }

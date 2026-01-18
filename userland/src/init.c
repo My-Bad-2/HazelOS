@@ -1,1 +1,4 @@
-void user_start() {}
+void user_start() {
+    while (true) {
+    }
+}
