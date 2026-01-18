@@ -104,7 +104,7 @@ static void vmm_map_memory(pagemap_t* map) {
                 phys_end = align_up(phys_end, args.page_size);
             }
 
-            if (!pagemap_map(map, args)) {
+            if (!pagemap_map(map, &args)) {
                 int err = errno ? errno : EIO;
                 errno   = err;
                 KLOG_ERROR(

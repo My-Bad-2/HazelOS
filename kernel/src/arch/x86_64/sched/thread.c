@@ -126,8 +126,8 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         ustack->tf.rip = (uint64_t)entry;
         ustack->tf.rdi = (uint64_t)arg;
 
-        ustack->tf.cs = offsetof(gdt_table_t, entries) + (1 * sizeof(gdt_entry_t));
-        ustack->tf.ss = offsetof(gdt_table_t, entries) + (2 * sizeof(gdt_entry_t));
+        ustack->tf.cs = USER_CODE | 3;
+        ustack->tf.ss = USER_DATA | 3;
 
         ustack->tf.rflags = X86_FLAGS_IF | X86_FLAGS_RESERVED_ONES;
         ustack->tf.rsp    = rsp;

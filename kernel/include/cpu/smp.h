@@ -23,8 +23,10 @@ struct cpu_topology;
 typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     struct per_cpu_data* self;
     thread_t* curr_thread;
-    uintptr_t stack_top;
     thread_t* idle_thread;
+
+    uintptr_t kstack_top;
+    uintptr_t scratch_user_rsp;
 
     interrupt_lock_t lock;
 
@@ -45,6 +47,10 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     timer_manager_t timer_manager;
 
     atomic_size_t cpu_load;
+    size_t last_load_update;  // Timestamp of last update
+    size_t runnable_sum;      // Accumulated runnable time in current window
+    size_t period_contrib;    // Partial time in current 1ms window
+
     uint32_t thread_count;
     uint32_t balance_counter;
     atomic_int is_online;

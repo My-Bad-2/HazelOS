@@ -108,7 +108,7 @@ void hpet_init(void) {
 
     pagemap_t* map = vmm_get_kernel_pagemap();
 
-    if (!pagemap_map(map, args)) {
+    if (!pagemap_map(map, &args)) {
         PANIC("Failed to map HPET's virtual base");
         return;
     }

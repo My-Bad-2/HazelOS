@@ -957,7 +957,7 @@ void* vmm_alloc(
                 .skip_flush = false,
             };
 
-            if (!pagemap_map(space->map, margs)) {
+            if (!pagemap_map(space->map, &margs)) {
                 if (errno == 0) {
                     errno = EFAULT;
                 }
@@ -975,7 +975,7 @@ void* vmm_alloc(
                         .length    = page_size,
                     };
 
-                    pagemap_unmap(space->map, uargs);
+                    pagemap_unmap(space->map, &uargs);
                     pmm_dec_ref((void*)shared_zero_page);
                 }
 
@@ -1009,7 +1009,7 @@ void* vmm_alloc(
                             .length    = page_size,
                         };
 
-                        pagemap_unmap(space->map, uargs);
+                        pagemap_unmap(space->map, &uargs);
                         pmm_free((void*)p, frames_per_page);
                     }
                 }
@@ -1030,7 +1030,7 @@ void* vmm_alloc(
                 .skip_flush = false,
             };
 
-            if (!pagemap_map(space->map, margs)) {
+            if (!pagemap_map(space->map, &margs)) {
                 if (errno == 0) {
                     errno = EFAULT;
                 }
@@ -1054,7 +1054,7 @@ void* vmm_alloc(
                             .length    = page_size,
                         };
 
-                        pagemap_unmap(space->map, uargs);
+                        pagemap_unmap(space->map, &uargs);
                         pmm_free((void*)p, frames_per_page);
                     }
                 }
@@ -1170,7 +1170,7 @@ void* vmm_alloc_at(
                 .skip_flush = false,
             };
 
-            if (!pagemap_map(space->map, margs)) {
+            if (!pagemap_map(space->map, &margs)) {
                 if (errno == 0) {
                     errno = EFAULT;
                 }
@@ -1188,7 +1188,7 @@ void* vmm_alloc_at(
                         .length    = page_size,
                     };
 
-                    pagemap_unmap(space->map, uargs);
+                    pagemap_unmap(space->map, &uargs);
                     pmm_dec_ref((void*)shared_zero_page);
                 }
 
@@ -1222,7 +1222,7 @@ void* vmm_alloc_at(
                             .length    = page_size,
                         };
 
-                        pagemap_unmap(space->map, uargs);
+                        pagemap_unmap(space->map, &uargs);
                         pmm_free((void*)p, frames_per_page);
                     }
                 }
@@ -1243,7 +1243,7 @@ void* vmm_alloc_at(
                 .skip_flush = false,
             };
 
-            if (!pagemap_map(space->map, margs)) {
+            if (!pagemap_map(space->map, &margs)) {
                 if (errno == 0) {
                     errno = EFAULT;
                 }
@@ -1267,7 +1267,7 @@ void* vmm_alloc_at(
                             .length    = page_size,
                         };
 
-                        pagemap_unmap(space->map, uargs);
+                        pagemap_unmap(space->map, &uargs);
                         pmm_free((void*)p, frames_per_page);
                     }
                 }
@@ -1368,7 +1368,7 @@ void vmm_free(vm_space_t* space, void* ptr, size_t size) {
                 .length    = vma->page_size,
             };
 
-            pagemap_unmap(space->map, u_args);
+            pagemap_unmap(space->map, &u_args);
             pmm_free((void*)phys, vma->page_size / PAGE_SIZE_SMALL);
         } else {
             errno = EFAULT;

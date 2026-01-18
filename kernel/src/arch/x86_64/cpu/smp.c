@@ -9,12 +9,13 @@
 #include "cpu/pic.h"
 #include "cpu/registers.h"
 #include "cpu/simd.h"
+#include "cpu/syscalls.h"
 #include "libs/log.h"
 
 void arch_init_cpu_state(per_cpu_data_t* cpu) {
     ASSERT(cpu);
 
-    tss_init(&cpu->tss, cpu->stack_top);
+    tss_init(&cpu->tss, cpu->kstack_top);
     gdt_init(&cpu->gdt, &cpu->tss);
     idt_init();
 
@@ -38,6 +39,7 @@ void arch_commit_cpu_state(per_cpu_data_t* cpu) {
     lapic_init();
     ioapic_init();
     simd_init();
+    syscall_init();
 
     topology_detect(cpu);
 

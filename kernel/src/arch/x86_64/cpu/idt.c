@@ -32,7 +32,7 @@ static void set_idt_gate(int vector, void* handler, uint8_t ist, uint8_t type_at
     entry->offset_middle = (handler_addr >> 16) & 0xffff;
     entry->offset_high   = (handler_addr >> 32) & 0xffffffff;
 
-    entry->segment_selector = offsetof(gdt_table_t, entries) + (1 * sizeof(gdt_entry_t));
+    entry->segment_selector = KERNEL_CODE;
 
     entry->ist        = ist;
     entry->attributes = type_attr;

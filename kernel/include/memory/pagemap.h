@@ -65,9 +65,9 @@ typedef struct {
     cache_type_t cache;
 } pagemap_protect_args_t;
 
-bool pagemap_map(pagemap_t* map, pagemap_map_args_t args);
-void pagemap_unmap(pagemap_t* map, pagemap_unmap_args_t args);
-void pagemap_protect(pagemap_t* map, pagemap_protect_args_t args);
+bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args);
+void pagemap_unmap(pagemap_t* map, pagemap_unmap_args_t* args);
+void pagemap_protect(pagemap_t* map, pagemap_protect_args_t* args);
 bool pagemap_shatter(pagemap_t* map, uintptr_t virt_addr);
 bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr);
 

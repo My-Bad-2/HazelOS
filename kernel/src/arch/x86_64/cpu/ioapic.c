@@ -88,7 +88,7 @@ static void map_ioapic_mmio(ioapic_t* ioapic, size_t index) {
 
         pagemap_t* map = vmm_get_kernel_pagemap();
 
-        if (!pagemap_map(map, args)) {
+        if (!pagemap_map(map, &args)) {
             errno = EIO;
             PANIC("IOAPIC: failed to map MMIO phys=0x%lx -> %p errno=%d\n", phys_base, virt, errno);
         }

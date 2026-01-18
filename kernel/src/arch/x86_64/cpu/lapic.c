@@ -184,7 +184,7 @@ void lapic_init(void) {
 
         pagemap_t* map = vmm_get_kernel_pagemap();
 
-        if (!pagemap_map(map, args)) {
+        if (!pagemap_map(map, &args)) {
             PANIC(
                 "LAPIC: failed to map MMIO base=0x%lx -> %p errno=%d\n",
                 phys_base,

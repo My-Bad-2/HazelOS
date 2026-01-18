@@ -56,7 +56,7 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t addr, uint32_t error_code) {
             .skip_flush = false,
         };
 
-        if (!pagemap_map(space->map, margs)) {
+        if (!pagemap_map(space->map, &margs)) {
             pmm_free(phys, frames_needed);
             release_interrupt_lock(&space->lock);
             return false;
@@ -88,7 +88,7 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t addr, uint32_t error_code) {
                     .cache     = vma->cache,
                 };
 
-                pagemap_protect(space->map, pargs);
+                pagemap_protect(space->map, &pargs);
 
                 release_interrupt_lock(&space->lock);
                 return true;
@@ -121,7 +121,7 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t addr, uint32_t error_code) {
                 .skip_flush = false,
             };
 
-            pagemap_map(space->map, margs);
+            pagemap_map(space->map, &margs);
             release_interrupt_lock(&space->lock);
             return true;
         }

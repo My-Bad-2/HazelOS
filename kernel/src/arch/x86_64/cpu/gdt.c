@@ -63,8 +63,10 @@ static inline void set_tss_descriptor(tss_descriptor_t* desc, uintptr_t base, ui
 void gdt_init(gdt_table_t* gdt, tss_t* tss) {
     ASSERT(gdt);
 
+    // 0: Null
     set_gdt_entry(&gdt->entries[0], 0, 0, 0, 0);
 
+    // 1: Kernel Code
     set_gdt_entry(
         &gdt->entries[1],
         0,
@@ -73,6 +75,7 @@ void gdt_init(gdt_table_t* gdt, tss_t* tss) {
         GDT_FLAG_PAGE_GRAN | GDT_FLAG_LONG_MODE
     );
 
+    // 2: Kernel Data
     set_gdt_entry(
         &gdt->entries[2],
         0,
@@ -81,16 +84,28 @@ void gdt_init(gdt_table_t* gdt, tss_t* tss) {
         GDT_FLAG_PAGE_GRAN
     );
 
+    // 3: User Code 32 (For SYSRET)
     set_gdt_entry(
         &gdt->entries[3],
+        0,
+        0xfffff,
+        GDT_ACCESS_PRESENT | GDT_ACCESS_SEGMENT | GDT_ACCESS_READWRITE | GDT_ACCESS_EXECUTABLE |
+            GDT_ACCESS_RING3,
+        GDT_FLAG_PAGE_GRAN
+    );
+
+    // 4: User Data
+    set_gdt_entry(
+        &gdt->entries[4],
         0,
         0xfffff,
         GDT_ACCESS_PRESENT | GDT_ACCESS_SEGMENT | GDT_ACCESS_READWRITE | GDT_ACCESS_RING3,
         GDT_FLAG_PAGE_GRAN
     );
 
+    // 5: User Code
     set_gdt_entry(
-        &gdt->entries[4],
+        &gdt->entries[3],
         0,
         0xfffff,
         GDT_ACCESS_PRESENT | GDT_ACCESS_SEGMENT | GDT_ACCESS_READWRITE | GDT_ACCESS_EXECUTABLE |
@@ -186,9 +201,9 @@ void gdt_load(gdt_table_t* entry) {
     gdtr.base  = (uintptr_t)entry;
     gdtr.limit = sizeof(gdt_table_t) - 1;
 
-    uint16_t cs         = offsetof(gdt_table_t, entries) + (1 * sizeof(gdt_entry_t));
-    uint16_t ss         = offsetof(gdt_table_t, entries) + (2 * sizeof(gdt_entry_t));
-    uint16_t tss_offset = offsetof(gdt_table_t, tss);
+    uint16_t cs         = KERNEL_CODE;
+    uint16_t ss         = KERNEL_DATA;
+    uint16_t tss_offset = TSS_BASE;
 
     flush_gdt(&gdtr, cs, ss);
     flush_tss(tss_offset);

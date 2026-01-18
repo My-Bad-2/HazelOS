@@ -37,6 +37,9 @@
 #define RR_QUANTUM_NS      10000000ul  // 10ms
 #define YIELD_PENALTY_NS   2000000ul   // 2ms
 
+#define LOAD_AVG_PERIOD 32
+#define LOAD_AVG_MAX    47742
+
 #define COST_IDLE_CORE   0     // Gold standard
 #define COST_SMT_THREAD  500   // Sibling is busy (50% capacity penalty)
 #define COST_BUSY_THREAD 1000  // CPU is fully utilized
@@ -80,6 +83,19 @@ static const uint16_t pelt_decay_factors[32] = {
     /* 20ms */ 0x52ff, /* 21ms */ 0x5138, /* 22ms */ 0x4f7b, /* 23ms */ 0x4dc7,
     /* 24ms */ 0x4c1c, /* 25ms */ 0x4a7a, /* 26ms */ 0x48e2, /* 27ms */ 0x4752,
     /* 28ms */ 0x45cb, /* 29ms */ 0x444c, /* 30ms */ 0x42d5, /* 31ms */ 0x4167,
+};
+
+// CPU PELT Lookup Table (Half-life: 32ms)
+// Base Factor (y): 0.97857206
+static const uint32_t runnable_avg_yN_inv[] = {
+    0xffffffff, 0xfa83b2db, 0xf5257d15, 0xefe4b99b,  // 0-3
+    0xeac0c6e7, 0xe5b906e7, 0xe0ccdeec, 0xdbfbb797,  // 4-7
+    0xd744fcca, 0xd2a81d91, 0xce248c15, 0xc9b9bd86,  // 8-11
+    0xc5672a11, 0xc12c4cca, 0xbd08a39f, 0xb8fbaf47,  // 12-15
+    0xb504f333, 0xb123f581, 0xad583eea, 0xa9a15ab4,  // 16-19
+    0xa5fed6a9, 0xa2704303, 0x9ef53260, 0x9b8d39b9,  // 20-23
+    0x9837f051, 0x94f4efa8, 0x91c3d373, 0x8ea4398b,  // 24-27
+    0x8b95c1e3, 0x88980e80, 0x85aac367, 0x82cd8698,  // 28-31
 };
 
 void arch_switch_context(switch_context_t** prev, switch_context_t* next);
@@ -290,6 +306,22 @@ static inline size_t decay_load(size_t load, size_t delta_ms) {
     // Formula: (Load * Factor) / 0x8000
     size_t decayed = (load * pelt_decay_factors[remainder]) >> 15;
     return decayed >> half_lives;
+}
+
+static inline size_t decay_cpu_load(size_t val, size_t n) {
+    if (n == 0) {
+        return val;
+    }
+
+    if (n >= 32) {
+        val >>= (n / 32);
+        n %= 32;
+    }
+
+    size_t factor = runnable_avg_yN_inv[n];
+    val           = (size_t)(((uint128_t)val * factor) >> 32);
+
+    return val;
 }
 
 static void update_thread_load(thread_t* t) {
@@ -825,6 +857,45 @@ static void update_curr_stats(per_cpu_data_t* cpu, thread_t* curr, size_t now) {
     }
 }
 
+static void update_cpu_load(per_cpu_data_t* cpu, size_t now) {
+    if (cpu->last_load_update == 0) {
+        cpu->last_load_update = now;
+        return;
+    }
+
+    int64_t delta_ns = (int64_t)now - (int64_t)cpu->last_load_update;
+
+    if (delta_ns < 0) {
+        delta_ns = 0;
+    }
+
+    size_t delta_us = (size_t)delta_ns / 1000;
+
+    if (delta_us == 0) {
+        return;
+    }
+
+    cpu->last_load_update = now;
+
+    bool is_active = (cpu->curr_thread != cpu->idle_thread);
+    cpu->period_contrib += delta_us;
+
+    if (cpu->period_contrib >= 1024) {
+        size_t periods = cpu->period_contrib >> 10;
+        cpu->period_contrib &= (1024 - 1);
+
+        size_t old_load = cpu->cpu_load;
+        size_t new_load = decay_cpu_load(old_load, periods);
+
+        if (is_active) {
+            size_t decayed_max = decay_cpu_load(LOAD_AVG_MAX, periods);
+            new_load += (LOAD_AVG_MAX - decayed_max);
+        }
+
+        cpu->cpu_load = new_load;
+    }
+}
+
 void schedule(void) {
     per_cpu_data_t* cpu = smp_current_core();
 
@@ -854,6 +925,7 @@ void schedule(void) {
 
     acquire_interrupt_lock(&cpu->lock);
 
+    update_cpu_load(cpu, now);
     if (curr && curr != cpu->idle_thread && (curr->state == THREAD_RUNNING)) {
         update_curr_stats(cpu, curr, now);
 

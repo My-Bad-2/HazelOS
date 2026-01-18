@@ -315,16 +315,20 @@ get_page_table_entry(pagemap_t* map, uintptr_t virt_addr, int target_lvl, bool a
     return &table->entries[i1];
 }
 
-bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
-    if (args.page_size == PAGE_SIZE_LARGE && !pml3_translation) {
-        args.page_size = PAGE_SIZE_MEDIUM;
+bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args) {
+    if (!args) {
+        return false;
     }
 
-    uintptr_t virt_start = (uintptr_t)args.virt_addr;
-    uintptr_t phys_addr  = (uintptr_t)args.phys_addr;
+    if (args->page_size == PAGE_SIZE_LARGE && !pml3_translation) {
+        args->page_size = PAGE_SIZE_MEDIUM;
+    }
 
-    size_t length = args.length;
-    size_t flags  = convert_generic_flags(args.flags, args.cache, args.page_size);
+    uintptr_t virt_start = (uintptr_t)args->virt_addr;
+    uintptr_t phys_addr  = (uintptr_t)args->phys_addr;
+
+    size_t length = args->length;
+    size_t flags  = convert_generic_flags(args->flags, args->cache, args->page_size);
 
     if (length == 0) {
         errno = EINVAL;
@@ -332,8 +336,8 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
         return false;
     }
 
-    size_t page_size = args.page_size;
-    int target_level = get_target_level(args.page_size);
+    size_t page_size = args->page_size;
+    int target_level = get_target_level(args->page_size);
 
     // Track if we allocated memory locally so we can free it if mappings fails
     bool allocated_locally = false;
@@ -422,8 +426,8 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
         uint64_t entry = curr_phys & ~0xffful;
         entry |= flags;
 
-        if (args.pkey > 0) {
-            entry |= ((uint64_t)(args.pkey & 0xf) << 59);
+        if (args->pkey > 0) {
+            entry |= ((uint64_t)(args->pkey & 0xf) << 59);
         }
 
         *pte = entry;
@@ -472,7 +476,7 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t args) {
         }
     }
 
-    if (!args.skip_flush && pagemap_is_active(map)) {
+    if (!args->skip_flush && pagemap_is_active(map)) {
         if (aligned_length > (PAGE_SIZE_MEDIUM * 16)) {
             reload_mapping(map);
         } else {
@@ -551,16 +555,20 @@ static bool unmap_worker(
     return is_table_empty(table);
 }
 
-void pagemap_unmap(pagemap_t* map, pagemap_unmap_args_t args) {
-    if (args.length == 0) {
+void pagemap_unmap(pagemap_t* map, pagemap_unmap_args_t* args) {
+    if (!args) {
+        return;
+    }
+
+    if (args->length == 0) {
         errno = EINVAL;
         KLOG_WARN("Paging: unmap zero length request\n");
         return;
     }
 
     // Align to page boundaries
-    uintptr_t virt_start = align_down((uintptr_t)args.virt_addr, PAGE_SIZE_SMALL);
-    uintptr_t virt_end   = align_up(virt_start + args.length, PAGE_SIZE_SMALL);
+    uintptr_t virt_start = align_down((uintptr_t)args->virt_addr, PAGE_SIZE_SMALL);
+    uintptr_t virt_end   = align_up(virt_start + args->length, PAGE_SIZE_SMALL);
 
     if (virt_end < virt_start) {
         virt_end = UINTPTR_MAX;
@@ -578,13 +586,13 @@ void pagemap_unmap(pagemap_t* map, pagemap_unmap_args_t args) {
         paging_max_levels,
         virt_start,
         virt_end,
-        args.free_phys
+        args->free_phys
     );
 
     // A single 2MB huge paeg contains 512 4KB pages. Executing 512 invlpg instructions is
     // expensive. A full CR3 write is often cheaper.
     if (pagemap_is_active(map)) {
-        if (args.length > PAGE_SIZE_MEDIUM * 16) {
+        if (args->length > PAGE_SIZE_MEDIUM * 16) {
             reload_mapping(map);
         } else {
             // For small ranges (e.g. 4KB to 1.9MB), individual invalidation is better to preserve
@@ -681,11 +689,15 @@ not_found:
     return 0;
 }
 
-void pagemap_protect(pagemap_t* map, pagemap_protect_args_t args) {
-    uintptr_t virt_addr = (uintptr_t)args.virt_addr;
+void pagemap_protect(pagemap_t* map, pagemap_protect_args_t* args) {
+    if (!args) {
+        return;
+    }
+
+    uintptr_t virt_addr = (uintptr_t)args->virt_addr;
     uintptr_t phys_curr = map->phys_root;
     pagetable_t* table  = (pagetable_t*)to_higher_half(phys_curr);
-    size_t flags        = convert_generic_flags(args.flags, args.cache, PAGE_SIZE_LARGE);
+    size_t flags        = convert_generic_flags(args->flags, args->cache, PAGE_SIZE_LARGE);
 
     size_t preserved_bits = 0;
     uint64_t entry        = 0;
@@ -761,7 +773,7 @@ void pagemap_protect(pagemap_t* map, pagemap_protect_args_t args) {
         goto cleanup;
     }
 
-    flags              = convert_generic_flags(args.flags, args.cache, PAGE_SIZE_SMALL);
+    flags              = convert_generic_flags(args->flags, args->cache, PAGE_SIZE_SMALL);
     preserved_bits     = entry & X86_PAGE_PRESERVED_BITS & ~X86_PAGE_FLAG_HUGE;
     table->entries[i1] = preserved_bits | flags;
 

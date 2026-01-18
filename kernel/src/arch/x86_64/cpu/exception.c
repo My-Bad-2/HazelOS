@@ -508,3 +508,8 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
 
     scheduler_check_reschedule(tf);
 }
+
+// NOLINTNEXTLINE(misc-use-internal-linkage)
+void x86_nmi_handler(interrupt_trapframe_t*) {
+    PANIC("EXCEPTION: NMI called!");
+}

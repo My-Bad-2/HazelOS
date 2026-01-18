@@ -42,7 +42,7 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
         PANIC("SMP: failed to allocate kernel stack cpu=%u errno=%d", cpu->cpu_idx, errno);
     }
 
-    cpu->stack_top = (uintptr_t)stack + KSTACK_SIZE;
+    cpu->kstack_top = (uintptr_t)stack + KSTACK_SIZE;
 
     create_interrupt_lock(&cpu->lock);
 
@@ -54,7 +54,7 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
         cpu->cpu_idx,
         cpu->is_bsp,
         cpu->lapic_id,
-        cpu->stack_top
+        cpu->kstack_top
     );
 }
 

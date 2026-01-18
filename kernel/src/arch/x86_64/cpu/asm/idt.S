@@ -1,6 +1,9 @@
+#include <cpu/registers.h>
+
 .section .text.isr
 
 .extern x86_exception_handler
+.extern x86_nmi_handler
 .global isr_restore_path
 .type isr_common_stub, @function
 isr_common_stub:
@@ -23,8 +26,12 @@ isr_common_stub:
     pushq %r14
     pushq %r15
 
-    testb $3, 144(%rsp)  # Check bottom 2 bits (RPL). If != 0, it's User Mode.
+    cmpq $2, X86_IFRAME_OFFSET_VECTOR(%rsp)
+    je .nmi_stub
+
+    testb $3, X86_IFRAME_OFFSET_CS(%rsp)  # Check bottom 2 bits (RPL). If != 0, it's User Mode.
     jz 1f
+    xorq %rbp, %rbp
     swapgs               # Switch GS to Kernel Per-CPU Data
 1:
     movq %rsp, %rdi
@@ -38,7 +45,7 @@ isr_common_stub:
     leave
 
 isr_restore_path:
-    testb $3, 144(%rsp)
+    testb $3, X86_IFRAME_OFFSET_CS(%rsp)
     jz 1f
     swapgs               # Switch GS back to User TLS
 1:
@@ -62,6 +69,37 @@ isr_restore_path:
     # Clean Stack (Remove Vector + Error Code)
     addq $16, %rsp
     iretq
+.nmi_stub:
+    movq $1, %rbx
+    testb $3, X86_IFRAME_OFFSET_CS(%rsp)
+    jnz .do_nmi_swap
+
+    # We are in Ring 0, but GS might still be User GS
+    movl $X86_MSR_IA32_GS_BASE, %ecx
+    rdmsr
+
+    pushq %rbp          # Save the RBP of the interrupted code
+    movq %rsp, %rbp     # Set RBP to current stack
+
+    # If GS Base is Canonical Kernel address (0xffff...), it is negative
+    testl %edx, %edx
+    js .nmi_skip_swap
+.do_nmi_swap:
+    swapgs
+.call_nmi_handler:
+    movq %rsp, %rdi
+    call x86_nmi_handler
+
+    leave
+
+    testq %rbx, %rbx
+    jz .nmi_done
+    swapgs
+.nmi_done:
+    jmp isr_restore_path
+.nmi_skip_swap:
+    xorq %rbx, %rbx
+    jmp .call_nmi_handler
 
 .macro make_stub number
     .align 8

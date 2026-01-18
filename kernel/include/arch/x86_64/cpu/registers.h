@@ -11,6 +11,33 @@
 
 // clang-format off
 
+#define X86_IFRAME_OFFSET_RDI (0 * 8)
+#define X86_IFRAME_OFFSET_RSI (1 * 8)
+#define X86_IFRAME_OFFSET_RBP (2 * 8)
+#define X86_IFRAME_OFFSET_RBX (3 * 8)
+#define X86_IFRAME_OFFSET_RDX (4 * 8)
+#define X86_IFRAME_OFFSET_RCX (5 * 8)
+#define X86_IFRAME_OFFSET_RAX (6 * 8)
+#define X86_IFRAME_OFFSET_R8  (7 * 8)
+#define X86_IFRAME_OFFSET_R9  (8 * 8)
+#define X86_IFRAME_OFFSET_R10 (9 * 8)
+#define X86_IFRAME_OFFSET_R11 (10 * 8)
+#define X86_IFRAME_OFFSET_R12 (11 * 8)
+#define X86_IFRAME_OFFSET_R13 (12 * 8)
+#define X86_IFRAME_OFFSET_R14 (13 * 8)
+#define X86_IFRAME_OFFSET_R15 (14 * 8)
+
+#define X86_IFRAME_OFFSET_VECTOR   (15 * 8)
+#define X86_IFRAME_OFFSET_ERR_CODE (16 * 8)
+
+#define X86_IFRAME_OFFSET_IP      (17 * 8)
+#define X86_IFRAME_OFFSET_CS      (18 * 8)
+#define X86_IFRAME_OFFSET_FLAGS   (19 * 8)
+#define X86_IFRAME_OFFSET_USER_SP (20 * 8)
+#define X86_IFRAME_OFFSET_USER_SS (21 * 8)
+
+#define X86_IFRAME_SIZE (22 * 8)
+
 // This header is intended to be included in both C and ASM
 #define X86_CR0_PE               0x00000001ul  // protected mode enable
 #define X86_CR0_MP               0x00000002ul  // monitor coprocessor

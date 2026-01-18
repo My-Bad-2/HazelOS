@@ -1,13 +1,21 @@
 #ifndef KERNEL_CPU_GDT_H
 #define KERNEL_CPU_GDT_H 1
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define GDT_ENTRY_COUNT 5
+#define GDT_ENTRY_COUNT 6
+
+#define KERNEL_CODE (offsetof(gdt_table_t, entries) + (1 * sizeof(gdt_entry_t)))
+#define KERNEL_DATA (offsetof(gdt_table_t, entries) + (2 * sizeof(gdt_entry_t)))
+#define USER_CODE32 (offsetof(gdt_table_t, entries) + (3 * sizeof(gdt_entry_t)))
+#define USER_DATA   (offsetof(gdt_table_t, entries) + (4 * sizeof(gdt_entry_t)))
+#define USER_CODE   (offsetof(gdt_table_t, entries) + (5 * sizeof(gdt_entry_t)))
+#define TSS_BASE    (offsetof(gdt_table_t, tss))
 
 typedef struct [[gnu::packed]] {
     uint16_t limit_low;

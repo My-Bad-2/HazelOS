@@ -61,7 +61,7 @@ void* uacpi_kernel_map(uacpi_phys_addr addr, uacpi_size len) {
         .page_size = PAGE_SIZE_SMALL,
     };
 
-    if (!pagemap_map(kernel_pagemap, args)) {
+    if (!pagemap_map(kernel_pagemap, &args)) {
         PANIC("UACPI: Failed to map UACPI address 0x%016lx -> %p\n", addr, virt);
     }
 
@@ -86,7 +86,7 @@ void uacpi_kernel_unmap(void* addr, uacpi_size len) {
         .free_phys = false,
     };
 
-    pagemap_unmap(kernel_pagemap, args);
+    pagemap_unmap(kernel_pagemap, &args);
 }
 
 void uacpi_kernel_log(uacpi_log_level lvl, const uacpi_char* fmt) {

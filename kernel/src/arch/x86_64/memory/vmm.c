@@ -88,7 +88,7 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
             args.page_size = PAGE_SIZE_MEDIUM;
         }
 
-        if (!pagemap_map(map, args)) {
+        if (!pagemap_map(map, &args)) {
             int err = errno ? errno : ENOMEM;
             errno   = err;
             PANIC(
