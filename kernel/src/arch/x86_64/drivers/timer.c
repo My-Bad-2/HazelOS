@@ -13,7 +13,7 @@
 #include "libs/log.h"
 #include "sched/scheduler.h"
 
-static clock_source_t source;
+static clock_source_t source = CLOCK_PIT;
 
 static bool warned_invalid_mode   = false;
 static bool warned_invalid_source = false;

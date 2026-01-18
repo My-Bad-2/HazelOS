@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "drivers/arch_timer.h"
-#include "libs/list.h"
+#include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 
 #ifdef __cplusplus
@@ -15,13 +15,13 @@ extern "C" {
 typedef void (*timer_callback_t)(void*);
 
 typedef struct {
-    struct list_node head;
+    struct rb_root_cached root;
     size_t curr_ticks;
     spinlock_t lock;
 } timer_manager_t;
 
 typedef struct {
-    struct list_node node;
+    struct rb_node node;
 
     size_t expires_at;
     size_t interval;

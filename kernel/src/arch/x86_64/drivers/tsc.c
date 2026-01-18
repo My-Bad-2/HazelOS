@@ -20,7 +20,7 @@ static inline size_t tsc_read(void) {
     uint32_t hi = 0;
 
     asm volatile("lfence" ::: "memory");
-    asm volatile("rdtsc" : "=a"(lo), "=b"(hi));
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((size_t)hi << 32) | lo;
 }
 

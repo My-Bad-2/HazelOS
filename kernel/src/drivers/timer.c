@@ -2,24 +2,31 @@
 
 #include <errno.h>
 
-#include "libs/list.h"
 #include "libs/log.h"
+#include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 
-static void timer_insert_sorted(timer_manager_t* manager, timer_event_t* timer) {
-    struct list_node* pos;
+static bool timer_insert(timer_manager_t* manager, timer_event_t* timer) {
+    struct rb_node** link  = &manager->root.rb_root.rb_node;
+    struct rb_node* parent = nullptr;
+    bool leftmost          = true;
 
-    list_for_each(pos, &manager->head) {
-        timer_event_t* entry = container_of(pos, timer_event_t, node);
+    while (*link) {
+        parent               = *link;
+        timer_event_t* entry = rb_entry(parent, timer_event_t, node);
 
-        if (entry->expires_at > timer->expires_at) {
-            __list_add(&timer->node, pos->prev, pos);
-            return;
+        if (timer->expires_at < entry->expires_at) {
+            link = &parent->rb_left;
+        } else {
+            link     = &parent->rb_right;
+            leftmost = false;
         }
     }
 
-    // If list is empty or we are the latest, add to tail
-    list_push_back(&manager->head, &timer->node);
+    rb_link_node(&timer->node, parent, link);
+    rb_insert_color_cached(&timer->node, &manager->root, leftmost);
+
+    return leftmost;
 }
 
 static void
@@ -28,8 +35,7 @@ timer_setup(timer_event_t* timer, size_t interval, timer_callback_t callback, vo
     timer->callback = callback;
     timer->ctx      = ctx;
 
-    timer->node.next = nullptr;
-    timer->node.prev = nullptr;
+    RB_CLEAR_NODE(&timer->node);
 }
 
 void timer_manager_init(timer_manager_t* manager) {
@@ -39,7 +45,7 @@ void timer_manager_init(timer_manager_t* manager) {
         return;
     }
 
-    list_init(&manager->head);
+    manager->root       = RB_ROOT_CACHED;
     manager->curr_ticks = 0;
     create_spinlock(&manager->lock);
 
@@ -49,7 +55,7 @@ void timer_manager_init(timer_manager_t* manager) {
 void timer_arm_oneshot(
     timer_manager_t* manager,
     timer_event_t* timer,
-    uint64_t delay,
+    uint64_t delay_ns,
     timer_callback_t callback,
     void* ctx
 ) {
@@ -66,9 +72,9 @@ void timer_arm_oneshot(
     acquire_spinlock(&manager->lock);
 
     timer_setup(timer, 0, callback, ctx);
-    timer->expires_at = manager->curr_ticks + delay;
+    timer->expires_at = manager->curr_ticks + delay_ns;
     timer->owner      = manager;
-    timer_insert_sorted(manager, timer);
+    timer_insert(manager, timer);
 
     release_spinlock(&manager->lock);
 }
@@ -95,39 +101,34 @@ void timer_arm_periodic(
     timer_setup(timer, interval, callback, ctx);
     timer->expires_at = manager->curr_ticks + interval;
     timer->owner      = manager;
-    timer_insert_sorted(manager, timer);
+    timer_insert(manager, timer);
 
     release_spinlock(&manager->lock);
 }
 
 bool timer_cancel(timer_event_t* timer) {
-    if (!timer->owner) {
+    timer_manager_t* manager = timer->owner;
+
+    if (!manager) {
         return false;
     }
 
-    timer_manager_t* manager = timer->owner;
-
     acquire_spinlock(&manager->lock);
 
-    bool removed = false;
-
-    if (timer->node.next && timer->node.prev) {
-        list_remove(&timer->node);
-
-        timer->node.next = nullptr;
-        timer->node.prev = nullptr;
-        timer->owner     = nullptr;
-
-        removed = true;
+    if (timer->owner != manager) {
+        release_spinlock(&manager->lock);
+        return false;
     }
+
+    if (!RB_EMPTY_NODE(&timer->node)) {
+        rb_erase_cached(&timer->node, &manager->root);
+        RB_CLEAR_NODE(&timer->node);
+    }
+
+    timer->owner = nullptr;
 
     release_spinlock(&manager->lock);
-
-    if (removed) {
-        KLOG_DEBUG("TIMER: canceled timer manager=%p\n", (void*)manager);
-    }
-
-    return removed;
+    return true;
 }
 
 void timer_manager_tick(timer_manager_t* manager) {
@@ -138,20 +139,23 @@ void timer_manager_tick(timer_manager_t* manager) {
     }
 
     acquire_spinlock(&manager->lock);
+    size_t now = timer_get_time() / 1000000ul;
 
-    manager->curr_ticks++;
+    while (true) {
+        struct rb_node* node = rb_first_cached(&manager->root);
 
-    struct list_node* pos = nullptr;
-    struct list_node* n   = nullptr;
-
-    list_for_each_safe(pos, n, &manager->head) {
-        timer_event_t* entry = container_of(pos, timer_event_t, node);
-
-        if (entry->expires_at > manager->curr_ticks) {
+        if (!node) {
             break;
         }
 
-        list_remove(&entry->node);
+        timer_event_t* entry = rb_entry(node, timer_event_t, node);
+
+        if (entry->expires_at > now) {
+            break;
+        }
+
+        rb_erase_cached(node, &manager->root);
+        RB_CLEAR_NODE(node);
 
         if (entry->callback) {
             entry->callback(entry->ctx);
@@ -159,11 +163,10 @@ void timer_manager_tick(timer_manager_t* manager) {
 
         if (entry->interval > 0) {
             entry->expires_at += entry->interval;
-            timer_insert_sorted(manager, entry);
+
+            timer_insert(manager, entry);
         } else {
-            entry->owner     = nullptr;
-            entry->node.next = nullptr;
-            entry->node.prev = nullptr;
+            entry->owner = nullptr;
         }
     }
 
