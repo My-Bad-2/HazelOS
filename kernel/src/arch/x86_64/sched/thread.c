@@ -129,7 +129,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         ustack->tf.cs = USER_CODE | 3;
         ustack->tf.ss = USER_DATA | 3;
 
-        ustack->tf.rflags = X86_FLAGS_IF | X86_FLAGS_RESERVED_ONES;
+        ustack->tf.rflags = /* X86_FLAGS_IF | */ X86_FLAGS_RESERVED_ONES;
         ustack->tf.rsp    = rsp;
 
         ustack->ctx.rip = (uint64_t)isr_restore_path;
@@ -220,24 +220,4 @@ void thread_restore_fpu(thread_t* t) {
     if (t->fpu_buffer) {
         simd_restore(t->fpu_buffer);
     }
-}
-
-void debug_print_full_frame(interrupt_trapframe_t* f) {
-    KLOG_DEBUG("\n=== INTERRUPT TRAP FRAME DUMP ===\n");
-
-    KLOG_DEBUG("RAX: 0x%016lx  RBX: 0x%016lx  RCX: 0x%016lx\n", f->rax, f->rbx, f->rcx);
-    KLOG_DEBUG("RDX: 0x%016lx  RSI: 0x%016lx  RDI: 0x%016lx\n", f->rdx, f->rsi, f->rdi);
-    KLOG_DEBUG("RBP: 0x%016lx  R8:  0x%016lx  R9:  0x%016lx\n", f->rbp, f->r8, f->r9);
-    KLOG_DEBUG("R10: 0x%016lx  R11: 0x%016lx  R12: 0x%016lx\n", f->r10, f->r11, f->r12);
-    KLOG_DEBUG("R13: 0x%016lx  R14: 0x%016lx  R15: 0x%016lx\n", f->r13, f->r14, f->r15);
-
-    KLOG_DEBUG("Vector: 0x%02lx  Error Code: 0x%016lx\n", f->vector, f->error_code);
-
-    KLOG_DEBUG("--- IRET CONTEXT ---\n");
-    KLOG_DEBUG("RIP:    0x%016lx\n", f->rip);
-    KLOG_DEBUG("CS:     0x%04lx\n", f->cs);
-    KLOG_DEBUG("RFLAGS: 0x%016lx\n", f->rflags);
-    KLOG_DEBUG("RSP:    0x%016lx\n", f->rsp);
-    KLOG_DEBUG("SS:     0x%04lx\n", f->ss);
-    KLOG_DEBUG("=================================\n");
 }

@@ -49,7 +49,6 @@ isr_restore_path:
     testb $3, X86_IFRAME_OFFSET_CS(%rsp)
     jz 1f
     swapgs               # Switch GS back to User TLS
-    // call debug_print_full_frame
 1:
     # Restore Registers
     popq %r15
@@ -70,12 +69,6 @@ isr_restore_path:
 
     # Clean Stack (Remove Vector + Error Code)
     addq $16, %rsp
-
-//     testb $3, 8(%rsp)
-//     jz 2f
-//     call debug_print_iframe
-//     jmp .
-// 2:  
     iretq
 .nmi_stub:
     movq $1, %rbx

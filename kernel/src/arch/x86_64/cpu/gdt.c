@@ -105,7 +105,7 @@ void gdt_init(gdt_table_t* gdt, tss_t* tss) {
 
     // 5: User Code
     set_gdt_entry(
-        &gdt->entries[3],
+        &gdt->entries[5],
         0,
         0xfffff,
         GDT_ACCESS_PRESENT | GDT_ACCESS_SEGMENT | GDT_ACCESS_READWRITE | GDT_ACCESS_EXECUTABLE |

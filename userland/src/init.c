@@ -1,4 +1,3 @@
 void user_start() {
-    while (true) {
-    }
+    while (true);
 }

@@ -27,7 +27,7 @@ void kmain(void) {
 #endif
 
     KLOG_INFO("Hello, World!\n");
-    // launch_user_init();
+    launch_user_init();
 
     arch_halt(true);
 }

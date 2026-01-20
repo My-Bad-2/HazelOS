@@ -1,3 +1,4 @@
+#include "libs/log.h"
 #ifndef KERNEL_CPU_GDT_H
 #define KERNEL_CPU_GDT_H 1
 

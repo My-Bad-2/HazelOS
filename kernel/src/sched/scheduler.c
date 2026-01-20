@@ -968,13 +968,13 @@ void schedule(void) {
     process_t* next_proc = next->owner;
     process_t* curr_proc = curr ? curr->owner : nullptr;
 
-    if (next_proc && (curr_proc != next_proc)) {
-        write_cr3(next_proc->map.phys_root);
-    }
-
 #ifdef __x86_64__
     update_tss_rsp0(&cpu->tss, next->kernel_stack_top);
 #endif
+
+    if (next_proc && (curr_proc != next_proc)) {
+        write_cr3(next_proc->map.phys_root);
+    }
 
     thread_restore_fpu(next);
 

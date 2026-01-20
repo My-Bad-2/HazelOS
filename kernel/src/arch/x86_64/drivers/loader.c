@@ -6,7 +6,6 @@
 
 #include "boot/boot.h"
 #include "boot/limine.h"
-#include "cpu/smp.h"
 #include "libs/elf.h"
 #include "libs/log.h"
 #include "libs/math.h"
