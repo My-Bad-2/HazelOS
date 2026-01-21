@@ -9,6 +9,21 @@ extern "C" {
 #endif
 
 #define SYS_WRITE 1
+#define SYS_EXIT  60
+
+static inline int64_t syscall1(uint64_t id, uint64_t arg1) {
+    int64_t ret = 0;
+
+    asm volatile("syscall" : "=a"(ret) : "a"(id), "D"(arg1) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline int64_t syscall2(uint64_t id, uint64_t arg1, uint64_t arg2) {
+    int64_t ret = 0;
+
+    asm volatile("syscall" : "=a"(ret) : "a"(id), "D"(arg1), "S"(arg2) : "rcx", "r11", "memory");
+    return ret;
+}
 
 static inline int64_t syscall3(uint64_t id, uint64_t arg1, uint64_t arg2, uint64_t arg3) {
     int64_t ret = 0;

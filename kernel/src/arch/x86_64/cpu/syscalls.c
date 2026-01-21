@@ -49,7 +49,7 @@ uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
     switch (regs->rax) {
         case SYS_WRITE:
             // RDI = FD; RSI = Buffer Pointer; RDX = count
-            sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
+            regs->rax = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
             break;
         default:
             KLOG_DEBUG("Syscall %lu called!\n", num);
