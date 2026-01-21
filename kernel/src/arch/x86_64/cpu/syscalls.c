@@ -6,6 +6,7 @@
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
 #include "libs/log.h"
+#include "sched/syscalls.h"
 
 // AMD64 Technology 24593—Rev. 3.42—March 2024 Pg. no. 175 System Instructions
 #define STAR_SET_KERNEL_BASE(base) ((uint64_t)(base) << 32)
@@ -39,11 +40,21 @@ void syscall_init(void) {
                     X86_FLAGS_AF | X86_FLAGS_ZF | X86_FLAGS_SF | X86_FLAGS_OF;
 
     write_msr(X86_MSR_IA32_FMASK, mask);
+
+    syscalls_init();
 }
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
-uint64_t syscall_dispatcher(syscall_regs_t*, uint64_t num) {
-    KLOG_DEBUG("Syscall %lu called!\n", num);
+uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
+    switch (regs->rax) {
+        case SYS_WRITE:
+            // RDI = FD; RSI = Buffer Pointer; RDX = count
+            sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
+            break;
+        default:
+            KLOG_DEBUG("Syscall %lu called!\n", num);
+            break;
+    }
 
     return 0;
 }
