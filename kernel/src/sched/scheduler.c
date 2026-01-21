@@ -969,7 +969,7 @@ void schedule(void) {
     process_t* curr_proc = curr ? curr->owner : nullptr;
 
 #ifdef __x86_64__
-    update_tss_rsp0(&cpu->tss, next->kernel_stack_top);
+    update_tss_rsp(&cpu->tss, next->kernel_stack_top);
 #endif
 
     if (next_proc && (curr_proc != next_proc)) {

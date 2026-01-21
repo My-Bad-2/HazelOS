@@ -1,4 +1,3 @@
-#include "libs/log.h"
 #ifndef KERNEL_CPU_GDT_H
 #define KERNEL_CPU_GDT_H 1
 
@@ -38,7 +37,7 @@ typedef struct [[gnu::packed]] {
     uint32_t reserved;
 } tss_descriptor_t;
 
-typedef struct [[gnu::aligned(16)]] {
+typedef struct [[gnu::packed]] {
     uint32_t reserved0;
     uint64_t rsp[3];
     uint64_t reserved1;
@@ -57,7 +56,7 @@ void tss_init(tss_t* tss, uintptr_t rsp);
 void gdt_init(gdt_table_t* entry, tss_t* tss);
 void gdt_load(gdt_table_t* entry);
 
-static inline void update_tss_rsp0(tss_t* tss, uintptr_t stack_top) {
+static inline void update_tss_rsp(tss_t* tss, uintptr_t stack_top) {
     if (!tss) {
         return;
     }
