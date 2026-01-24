@@ -18,6 +18,12 @@
 #define PMM_MAX_ORDER 11  // 2^11 pages = 8MB max contiguous block
 #define PAGE_SHIFT    12
 
+#define MAX_ZONES 3
+
+#define ZONE_ID_DMA    0  // < 16 MB
+#define ZONE_ID_DMA32  1  // < 4 GB
+#define ZONE_ID_NORMAL 2  // > 4 GB
+
 #define SECTION_SHIFT     27  // 2^27 = 128MB Sections
 #define SECTION_SIZE      (1ul << SECTION_SHIFT)
 #define SECTION_MASK      (SECTION_SIZE - 1)
@@ -26,13 +32,14 @@
 #define MAX_PHYSMEM_BITS 48  // 48-bit physical address space
 #define MAX_SECTIONS     (1ul << (MAX_PHYSMEM_BITS - SECTION_SHIFT))
 
-#define ZONE_DMA_LIMIT (PAGE_SIZE_LARGE * 4)  // 4GB
+#define ZONE_DMA_LIMIT    (PAGE_SIZE_MEDIUM * 16)  // 16MB
+#define ZONE_DMA32_LIMIT  (PAGE_SIZE_LARGE * 4)    // 4GB
+#define ZONE_NORMAL_LIMIT ((uintptr_t)-1)          // 4GB - MAX
 
-#define PAGE_FLAG_USED (1 << 0)
-#define PAGE_FLAG_DMA  (1 << 1)
+#define PAGE_ZONE_MASK 0x0f
+#define PAGE_FLAG_USED (1 << 7)
 
 #define REF_SATURATION UINT16_MAX
-
 #define PCP_BATCH_SIZE 16
 
 struct free_area {
@@ -47,6 +54,7 @@ struct zone {
     struct dlist_head free_areas[PMM_MAX_ORDER + 1];
     uint16_t free_mask;
     spinlock_t lock;
+    uintptr_t limit;
     atomic_size_t free_count[PMM_MAX_ORDER + 1];
 };
 
@@ -58,13 +66,40 @@ struct [[gnu::aligned(CACHE_LINE_SIZE)]] pcp_cache {
 
 static struct mem_section* mem_sections = nullptr;
 static struct pcp_cache* pcp_caches     = nullptr;
-static struct zone zone_dma = {.free_areas = {{0}}, .free_mask = 0, .lock = {0}, .free_count = {0}};
-static struct zone zone_normal =
-    {.free_areas = {{0}}, .free_mask = 0, .lock = {0}, .free_count = {0}};
+static struct zone zones[MAX_ZONES]     = {0};
+static int active_zone_count            = 0;
+
+static struct {
+    uintptr_t limit;
+} zone_config[MAX_ZONES] = {
+    {ZONE_DMA_LIMIT},
+    {ZONE_DMA32_LIMIT},
+    {ZONE_NORMAL_LIMIT},
+};
 
 static size_t section_count           = 0;
 static atomic_size_t stat_used_bytes  = 0;
 static atomic_size_t stat_total_bytes = 0;
+
+static int get_zone_id_from_phys(uintptr_t phys) {
+    for (int i = 0; i < active_zone_count; ++i) {
+        if (phys < zones[i].limit) {
+            return i;
+        }
+    }
+
+    // Fall back to last zone
+    return active_zone_count - 1;
+}
+
+static inline void set_page_zone(struct page* page, int zone_id) {
+    page->flags &= ~PAGE_ZONE_MASK;
+    page->flags |= (zone_id & PAGE_ZONE_MASK);
+}
+
+static inline int get_page_zone_id(struct page* page) {
+    return page->flags & PAGE_ZONE_MASK;
+}
 
 static inline int get_order(size_t count) {
     if (unlikely(count == 0)) {
@@ -92,12 +127,15 @@ static inline struct page* phys_to_page(uintptr_t phys) {
         return nullptr;
     }
 
-    if (!mem_sections[sec_idx].map) {
+    if (unlikely(!mem_sections[sec_idx].map)) {
         return nullptr;
     }
 
-    struct page* ret = &mem_sections[sec_idx].map[(phys & SECTION_MASK) >> PAGE_SHIFT];
-    return ret;
+    return &mem_sections[sec_idx].map[(phys & SECTION_MASK) >> PAGE_SHIFT];
+}
+
+static int zone_to_id(struct zone* zone) {
+    return (int)(zone - zones);
 }
 
 static inline uintptr_t page_to_phys(struct page* page) {
@@ -115,13 +153,16 @@ static inline struct page* list_node_to_page(struct dlist_head* node) {
 }
 
 static void buddy_insert(struct zone* zone, struct page* page, int order) {
-    page->flags &= ~PAGE_FLAG_USED;
-    page->order = order;
+    int z_id = zone_to_id(zone);
+
+    uint8_t flags = page->flags & ~(PAGE_FLAG_USED | PAGE_ZONE_MASK);
+    page->flags   = flags | (z_id & PAGE_ZONE_MASK);
+    page->order   = order;
 
     struct dlist_head* node = page_to_list_node(page);
     dlist_add(node, &zone->free_areas[order]);
-    atomic_fetch_add_explicit(&zone->free_count[order], 1, memory_order_relaxed);
 
+    atomic_fetch_add_explicit(&zone->free_count[order], 1, memory_order_relaxed);
     mask_set(zone, order);
 }
 
@@ -135,20 +176,16 @@ static void buddy_remove(struct zone* zone, struct page* page, int order) {
     mask_clear_if_empty(zone, order);
 }
 
-static struct page* buddy_alloc_zone(struct zone* zone, int order) {
-    acquire_spinlock(&zone->lock);
-
+static struct page* buddy_alloc_locked(struct zone* zone, int order) {
     uint16_t search_mask = zone->free_mask & ~((1 << order) - 1);
 
     if (unlikely(search_mask == 0)) {
-        release_spinlock(&zone->lock);
         return nullptr;
     }
 
     int curr_order = ctz(search_mask);
 
     if (curr_order > PMM_MAX_ORDER) {
-        release_spinlock(&zone->lock);
         return nullptr;
     }
 
@@ -164,12 +201,20 @@ static struct page* buddy_alloc_zone(struct zone* zone, int order) {
         uintptr_t buddy_phys = page->phys_addr + (1ul << (curr_order + PAGE_SHIFT));
         struct page* buddy   = phys_to_page(buddy_phys);
 
+        prefetch(buddy);
+
         buddy_insert(zone, buddy, curr_order);
     }
 
     page->order = order;
     atomic_fetch_add_explicit(&stat_used_bytes, (1ul << order) * PAGE_SIZE, memory_order_relaxed);
 
+    return page;
+}
+
+static struct page* buddy_alloc_zone(struct zone* zone, int order) {
+    acquire_spinlock(&zone->lock);
+    struct page* page = buddy_alloc_locked(zone, order);
     release_spinlock(&zone->lock);
     return page;
 }
@@ -179,12 +224,15 @@ static void buddy_free_zone(struct zone* zone, struct page* page, int order) {
 
     atomic_fetch_sub_explicit(&stat_used_bytes, (1ul << order) * PAGE_SIZE, memory_order_relaxed);
 
+    int z_idx = get_page_zone_id(page);
+
     // Coalesce
     while (order < PMM_MAX_ORDER) {
         uintptr_t buddy_phys = page->phys_addr ^ (1ul << (order + PAGE_SHIFT));
         struct page* buddy   = phys_to_page(buddy_phys);
 
-        if (!buddy || (buddy->flags & PAGE_FLAG_USED) || buddy->order != order) {
+        if (!buddy || (buddy->flags & PAGE_FLAG_USED) || (buddy->order != order) ||
+            (get_page_zone_id(buddy) != z_idx)) {
             break;
         }
 
@@ -208,17 +256,21 @@ static void* pmm_alloc_slow(size_t count) {
 
     int order = get_order(count);
 
-    struct page* page = buddy_alloc_zone(&zone_normal, order);
+    for (int i = active_zone_count - 1; i >= 0; i--) {
+        struct zone* zone = &zones[i];
 
-    if (unlikely(!page)) {
-        page = buddy_alloc_zone(&zone_dma, order);
-    }
+        if ((zone->free_mask & ~((1 << order) - 1)) == 0) {
+            continue;
+        }
 
-    if (likely(page)) {
-        atomic_store_explicit(&page->ref_count, 1, memory_order_release);
-        // KLOG_DEBUG("PMM: Allocated %lu pages (order %d) at %p\n", count, order,
-        // (void*)page->phys_addr);
-        return (void*)page->phys_addr;
+        struct page* page = buddy_alloc_zone(zone, order);
+
+        if (likely(page)) {
+            atomic_store_explicit(&page->ref_count, 1, memory_order_release);
+            // KLOG_DEBUG("PMM: Allocated %lu pages (order %d) at %p\n", count, order,
+            // (void*)page->phys_addr);
+            return (void*)page->phys_addr;
+        }
     }
 
     PANIC("Failed to allocate page of count %lu order=%d\n", count, order);
@@ -226,15 +278,10 @@ static void* pmm_alloc_slow(size_t count) {
 }
 
 static void pcp_refill(struct pcp_cache* cache) {
-    for (int i = 0; i < PCP_BATCH_SIZE; ++i) {
-        void* page = pmm_alloc_slow(1);
+    void** dest = &cache->pages[cache->count];
 
-        if (!page) {
-            break;
-        }
-
-        cache->pages[cache->count++] = page;
-    }
+    size_t allocated = pmm_alloc_bulk((size_t)(PCP_BATCH_SIZE - cache->count), 0, dest);
+    cache->count += (int)allocated;
 }
 
 static void pcp_drain(struct pcp_cache* cache) {
@@ -277,9 +324,9 @@ void* pmm_alloc_aligned(size_t alignment, size_t count) {
         return nullptr;
     }
 
-    int size_order = get_order(count);
-
+    int size_order  = get_order(count);
     int align_order = 0;
+
     if (alignment > PAGE_SIZE) {
         size_t align_pages = div_roundup(alignment, PAGE_SIZE);
         align_order        = get_order(align_pages);
@@ -287,20 +334,63 @@ void* pmm_alloc_aligned(size_t alignment, size_t count) {
 
     int order = (align_order > size_order) ? align_order : size_order;
 
-    struct page* page = buddy_alloc_zone(&zone_normal, order);
+    for (int i = active_zone_count - 1; i >= 0; i--) {
+        struct zone* zone = &zones[i];
 
-    if (!page) {
-        page = buddy_alloc_zone(&zone_dma, order);
-    }
+        if ((zone->free_mask & (0xffff << order)) == 0) {
+            continue;
+        }
 
-    if (likely(page)) {
-        atomic_store_explicit(&page->ref_count, 1, memory_order_release);
-        // KLOG_DEBUG("PMM: Allocated aligned %lu pages (order %d) at %p\n", count, order,
-        // (void*)page->phys_addr);
-        return (void*)page->phys_addr;
+        acquire_spinlock(&zone->lock);
+        struct page* page = buddy_alloc_locked(zone, order);
+        release_spinlock(&zone->lock);
+
+        if (likely(page)) {
+            atomic_store_explicit(&page->ref_count, 1, memory_order_release);
+            // KLOG_DEBUG("PMM: Allocated aligned %lu pages (order %d) at %p\n", count, order,
+            // (void*)page->phys_addr);
+            return (void*)page->phys_addr;
+        }
     }
 
     return nullptr;
+}
+
+size_t pmm_alloc_bulk(size_t count, int order, void** pages) {
+    if (unlikely(count == 0)) {
+        return 0;
+    }
+
+    size_t allocated = 0;
+
+    for (int i = active_zone_count - 1; i >= 0; i--) {
+        if (allocated >= count) {
+            break;
+        }
+
+        struct zone* zone = &zones[i];
+
+        if ((zone->free_mask & (0xffff << order)) == 0) {
+            continue;
+        }
+
+        acquire_spinlock(&zone->lock);
+
+        while (allocated < count) {
+            struct page* page = buddy_alloc_locked(zone, order);
+
+            if (!page) {
+                break;
+            }
+
+            atomic_store_explicit(&page->ref_count, 1, memory_order_release);
+            pages[allocated++] = (void*)page->phys_addr;
+        }
+
+        release_spinlock(&zone->lock);
+    }
+
+    return allocated;
 }
 
 void pmm_free(void* ptr) {
@@ -367,9 +457,7 @@ void pmm_dec_ref(void* ptr) {
     ));
 
     if (new_val == 0) {
-        struct zone* zone = (page->phys_addr < ZONE_DMA_LIMIT) ? &zone_dma : &zone_normal;
-        int order         = page->order;
-
+        int order = page->order;
         KLOG_TRACE("PMM: Freeing %p (Order %d)", ptr, order);
 
         if (order == 0 && pcp_caches) {
@@ -378,7 +466,7 @@ void pmm_dec_ref(void* ptr) {
 
             acquire_irq_lock(&cache->lock);
 
-            if (likely(cache->count > 0)) {
+            if (likely(cache->count < PCP_BATCH_SIZE)) {
                 cache->pages[cache->count++] = ptr;
                 release_irq_lock(&cache->lock);
                 return;
@@ -391,6 +479,9 @@ void pmm_dec_ref(void* ptr) {
             release_irq_lock(&cache->lock);
             return;
         }
+
+        int z_idx         = get_page_zone_id(page);
+        struct zone* zone = &zones[z_idx];
 
         buddy_free_zone(zone, page, order);
     }
@@ -454,6 +545,12 @@ void pmm_init(void) {
     section_count = (highest_usable_addr + SECTION_SIZE - 1) >> SECTION_SHIFT;
 
     KLOG_INFO("PMM: Section count: %lu\n", section_count);
+
+    active_zone_count = sizeof(zone_config) / sizeof(zone_config[0]);
+
+    if (active_zone_count > MAX_ZONES) {
+        active_zone_count = MAX_ZONES;
+    }
 
     size_t cpu_count  = mp_request.response->cpu_count;
     size_t table_size = section_count * sizeof(struct mem_section);
@@ -521,9 +618,17 @@ void pmm_init(void) {
 
     boot_ptr = align_up(boot_ptr, PAGE_SIZE);
 
-    for (int i = 0; i <= PMM_MAX_ORDER; ++i) {
-        dlist_init(&zone_dma.free_areas[i]);
-        dlist_init(&zone_normal.free_areas[i]);
+    for (int i = 0; i < active_zone_count; ++i) {
+        struct zone* zone = &zones[i];
+        zones->limit      = zone_config[i].limit;
+        zones->free_mask  = 0;
+
+        create_spinlock(&zones->lock);
+
+        for (int order = 0; order <= PMM_MAX_ORDER; ++order) {
+            dlist_init(&zones->free_areas[order]);
+            dlist_init(&zones->free_areas[order]);
+        }
     }
 
     for (size_t i = 0; i < count; ++i) {
@@ -557,12 +662,10 @@ void pmm_init(void) {
                 continue;
             }
 
-            struct zone* zone = (p < ZONE_DMA_LIMIT) ? &zone_dma : &zone_normal;
+            int z_idx         = get_page_zone_id(page);
+            struct zone* zone = &zones[z_idx];
 
-            if (zone == &zone_dma) {
-                page->flags |= PAGE_FLAG_DMA;
-            }
-
+            set_page_zone(page, z_idx);
             buddy_free_zone(zone, page, 0);
         }
     }

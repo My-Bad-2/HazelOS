@@ -14,7 +14,7 @@ struct [[gnu::aligned(16)]] page {
 
     atomic_uint_fast16_t ref_count;
     uint8_t order;  // Order of the block
-    uint8_t flags;  // Status flags
+    uint8_t flags;  // Zone ID, Used, etc.
 };
 
 typedef struct pmm_stats {
@@ -26,6 +26,7 @@ typedef struct pmm_stats {
 void* pmm_alloc(size_t count);
 void* pmm_alloc_aligned(size_t alignment, size_t count);
 void* pmm_alloc_dma(size_t alignment, size_t count);
+size_t pmm_alloc_bulk(size_t count, int order, void** pages);
 
 void pmm_free(void* ptr);
 void pmm_get_stats(pmm_stats_t* stats);
