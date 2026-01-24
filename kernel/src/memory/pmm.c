@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "arch.h"
 #include "boot/boot.h"
 #include "boot/limine.h"
 #include "compiler.h"
@@ -32,6 +33,8 @@
 
 #define REF_SATURATION UINT16_MAX
 
+#define PCP_BATCH_SIZE 16
+
 struct free_area {
     struct dlist_head list;
 };
@@ -45,14 +48,19 @@ struct zone {
     uint16_t free_mask;
     spinlock_t lock;
     atomic_size_t free_count[PMM_MAX_ORDER + 1];
-    const char* name;
+};
+
+struct [[gnu::aligned(CACHE_LINE_SIZE)]] pcp_cache {
+    void* pages[PCP_BATCH_SIZE];
+    int count;
+    irq_lock_t lock;
 };
 
 static struct mem_section* mem_sections = nullptr;
-static struct zone zone_dma =
-    {.free_areas = {{0}}, .free_mask = 0, .lock = {0}, .free_count = {0}, .name = "DMA"};
+static struct pcp_cache* pcp_caches     = nullptr;
+static struct zone zone_dma = {.free_areas = {{0}}, .free_mask = 0, .lock = {0}, .free_count = {0}};
 static struct zone zone_normal =
-    {.free_areas = {{0}}, .free_mask = 0, .lock = {0}, .free_count = {0}, .name = "Normal"};
+    {.free_areas = {{0}}, .free_mask = 0, .lock = {0}, .free_count = {0}};
 
 static size_t section_count           = 0;
 static atomic_size_t stat_used_bytes  = 0;
@@ -130,12 +138,6 @@ static void buddy_remove(struct zone* zone, struct page* page, int order) {
 static struct page* buddy_alloc_zone(struct zone* zone, int order) {
     acquire_spinlock(&zone->lock);
 
-    // int curr_order = order;
-
-    // while (curr_order <= PMM_MAX_ORDER && dlist_empty(&zone->free_areas[curr_order])) {
-    //     curr_order++;
-    // }
-
     uint16_t search_mask = zone->free_mask & ~((1 << order) - 1);
 
     if (unlikely(search_mask == 0)) {
@@ -199,7 +201,7 @@ static void buddy_free_zone(struct zone* zone, struct page* page, int order) {
     release_spinlock(&zone->lock);
 }
 
-void* pmm_alloc(size_t count) {
+static void* pmm_alloc_slow(size_t count) {
     if (unlikely(count == 0)) {
         return nullptr;
     }
@@ -221,6 +223,53 @@ void* pmm_alloc(size_t count) {
 
     PANIC("Failed to allocate page of count %lu order=%d\n", count, order);
     return nullptr;
+}
+
+static void pcp_refill(struct pcp_cache* cache) {
+    for (int i = 0; i < PCP_BATCH_SIZE; ++i) {
+        void* page = pmm_alloc_slow(1);
+
+        if (!page) {
+            break;
+        }
+
+        cache->pages[cache->count++] = page;
+    }
+}
+
+static void pcp_drain(struct pcp_cache* cache) {
+    while (cache->count > 0) {
+        void* page = cache->pages[--cache->count];
+        pmm_free(page);
+    }
+}
+
+void* pmm_alloc(size_t count) {
+    if (count == 1 && pcp_caches) {
+        uint32_t cpu            = arch_get_core_idx();
+        struct pcp_cache* cache = &pcp_caches[cpu];
+
+        acquire_irq_lock(&cache->lock);
+
+        if (likely(cache->count > 0)) {
+            void* ptr = cache->pages[--cache->count];
+            release_irq_lock(&cache->lock);
+            return ptr;
+        }
+
+        pcp_refill(cache);
+
+        if (likely(cache->count > 0)) {
+            void* ptr = cache->pages[--cache->count];
+            release_irq_lock(&cache->lock);
+            return ptr;
+        }
+
+        release_irq_lock(&cache->lock);
+        return nullptr;
+    }
+
+    return pmm_alloc_slow(count);
 }
 
 void* pmm_alloc_aligned(size_t alignment, size_t count) {
@@ -322,6 +371,27 @@ void pmm_dec_ref(void* ptr) {
         int order         = page->order;
 
         KLOG_TRACE("PMM: Freeing %p (Order %d)", ptr, order);
+
+        if (order == 0 && pcp_caches) {
+            uint32_t cpu            = arch_get_core_idx();
+            struct pcp_cache* cache = &pcp_caches[cpu];
+
+            acquire_irq_lock(&cache->lock);
+
+            if (likely(cache->count > 0)) {
+                cache->pages[cache->count++] = ptr;
+                release_irq_lock(&cache->lock);
+                return;
+            }
+
+            pcp_drain(cache);
+
+            cache->pages[cache->count++] = ptr;
+
+            release_irq_lock(&cache->lock);
+            return;
+        }
+
         buddy_free_zone(zone, page, order);
     }
 }
@@ -385,17 +455,26 @@ void pmm_init(void) {
 
     KLOG_INFO("PMM: Section count: %lu\n", section_count);
 
-    uintptr_t boot_ptr = largest_region->base;
-    size_t table_size  = section_count * sizeof(struct mem_section);
+    size_t cpu_count  = mp_request.response->cpu_count;
+    size_t table_size = section_count * sizeof(struct mem_section);
+    size_t pcp_size   = cpu_count * sizeof(struct pcp_cache);
 
-    if (table_size > largest_region->length) {
-        PANIC("Out of Memory!\n");
+    if ((table_size + pcp_size) > largest_region->length) {
+        PANIC("Not enough metadata memory!\n");
     }
 
-    mem_sections = (void*)to_higher_half((uintptr_t)boot_ptr);
-    memset(mem_sections, 0, table_size);
+    uintptr_t boot_ptr = largest_region->base;
 
+    mem_sections = (void*)to_higher_half(boot_ptr);
+    memset(mem_sections, 0, table_size);
     boot_ptr += table_size;
+
+    pcp_caches = (void*)to_higher_half(boot_ptr);
+    memset(pcp_caches, 0, pcp_size);
+    boot_ptr += pcp_size;
+
+    KLOG_INFO("PMM: Allocated %lu PCP cache(s) at %p\n", cpu_count, pcp_caches);
+
     boot_ptr = align_up(boot_ptr, PAGE_SIZE);
 
     for (size_t i = 0; i < count; ++i) {
