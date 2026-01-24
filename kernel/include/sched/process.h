@@ -1,4 +1,3 @@
-#include "libs/list.h"
 #ifndef KERNEL_SCHED_PROCESS_H
 #define KERNEL_SCHED_PROCESS_H 1
 
