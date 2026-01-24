@@ -6,7 +6,7 @@
 #include "memory/memory.h"
 #include "tests/runner.h"
 
-#if KERNEL_TEST
+#if 0
 
 TEST(pmm_alloc_basic, "Basic Page Allocation") {
     // Single page

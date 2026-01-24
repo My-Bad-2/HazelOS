@@ -1,12 +1,21 @@
 #ifndef KERNEL_MEMORY_PMM_H
 #define KERNEL_MEMORY_PMM_H 1
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+struct [[gnu::aligned(16)]] page {
+    uintptr_t phys_addr;  // Physical address of the page
+
+    atomic_uint_fast16_t ref_count;
+    uint8_t order;  // Order of the block
+    uint8_t flags;  // Status flags
+};
 
 typedef struct pmm_stats {
     size_t total_memory;
@@ -22,10 +31,9 @@ void pmm_free(void* ptr, size_t count);
 void pmm_force_free(void* phys_addr, size_t count);
 void pmm_get_stats(pmm_stats_t* stats);
 
-uint16_t pmm_inc_ref(void* ptr);
-uint16_t pmm_dec_ref(void* ptr);
+void pmm_inc_ref(void* ptr);
+void pmm_dec_ref(void* ptr);
 uint16_t pmm_get_ref(void* ptr);
-void pmm_set_ref(void* ptr, uint16_t ref);
 
 void pmm_init(void);
 

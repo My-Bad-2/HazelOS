@@ -22,17 +22,19 @@
     _Generic((x), unsigned long: __builtin_ctzl, unsigned long long: __builtin_ctzll, long: __builtin_ctzl, long long: __builtin_ctzll, default: __builtin_ctz)( \
         x                                                                                                                                                        \
     )
-#define ctz(x) ((x) == 0 ? (sizeof(x) * 8) : ctz_unsafe(x))
+#define ctz(x) ((x) == 0 ? (int)(sizeof(x) * 8) : ctz_unsafe(x))
 #else
 // TODO: Implement it
 #define ctz(x)
 #endif
 
 #if __has_builtin(__builtin_clz)
-#define clz(x)                                                                                                                                                   \
+#define clz_unsafe(x)                                                                                                                                            \
     _Generic((x), unsigned long: __builtin_clzl, unsigned long long: __builtin_clzll, long: __builtin_clzl, long long: __builtin_clzll, default: __builtin_clz)( \
         x                                                                                                                                                        \
     )
+
+#define clz(x) ((x) == 0 ? (int)(sizeof(x) * 8) : clz_unsafe(x))
 #else
 // TODO: Implement it
 #define ctz(x)

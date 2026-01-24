@@ -1,1122 +1,500 @@
 #include "memory/pmm.h"
 
-#include <errno.h>
 #include <stdatomic.h>
-#include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
-#include "arch.h"
 #include "boot/boot.h"
 #include "boot/limine.h"
 #include "compiler.h"
+#include "libs/dlist.h"
 #include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/memory.h"
 
-// Page is currently sitting in a per-cpu cache stack
-#define PAGE_FLAG_CACHE_RESIDENT 0x01
+#define PAGE_SIZE     PAGE_SIZE_SMALL
+#define PMM_MAX_ORDER 11  // 2^11 pages = 8MB max contiguous block
+#define PAGE_SHIFT    12
 
-#define CACHE_SIZE 512  // 2MB cache per CPU
-#define BATCH_SIZE 256  // Transfer 1MB at a time between Global Bitmap <-> Local CPU Cache
+#define SECTION_SHIFT     27  // 2^27 = 128MB Sections
+#define SECTION_SIZE      (1ul << SECTION_SHIFT)
+#define SECTION_MASK      (SECTION_SIZE - 1)
+#define PAGES_PER_SECTION (SECTION_SIZE / PAGE_SIZE)
 
-typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
-    uintptr_t* stack;
-    size_t count;
-    size_t capacity;
-} per_cpu_cache_t;
+#define MAX_PHYSMEM_BITS 48  // 48-bit physical address space
+#define MAX_SECTIONS     (1ul << (MAX_PHYSMEM_BITS - SECTION_SHIFT))
 
-typedef struct {
-    volatile uint16_t ref_count;
-    volatile uint16_t flags;
-} page_metadata_t;
+#define ZONE_DMA_LIMIT (PAGE_SIZE_LARGE * 4)  // 4GB
 
-static struct {
-    uint64_t* bitmap;
-    uint64_t* summary_bitmap;
-    page_metadata_t* page_metadata;
+#define PAGE_FLAG_USED (1 << 0)
+#define PAGE_FLAG_DMA  (1 << 1)
 
-    size_t total_pages;
-    size_t summary_entries;
-    size_t bitmap_entries;
-    size_t used_pages;
-    size_t low_mem_threshold_idx;
-    size_t free_idx_hint;
-    size_t align_idx_hint;
+#define REF_SATURATION UINT16_MAX
 
-    per_cpu_cache_t* cpu_caches;
-    size_t num_cpus;
+struct free_area {
+    struct dlist_head list;
+};
 
-    irq_lock_t irq_lock;
-    interrupt_lock_t lock;  // IRQ + Spinlock
-} pmm_state;
+struct mem_section {
+    struct page* map;  // Array of pages, allocated only if section exists
+};
 
-static inline void bitmap_set_bit(size_t idx) {
-    ASSERT(pmm_state.bitmap && pmm_state.summary_bitmap);
+struct zone {
+    struct dlist_head free_areas[PMM_MAX_ORDER + 1];
+    uint16_t free_mask;
+    spinlock_t lock;
+    atomic_size_t free_count[PMM_MAX_ORDER + 1];
+    const char* name;
+};
 
-    size_t byte = idx / UINT64_WIDTH;
-    size_t bit  = idx % UINT64_WIDTH;
+static struct mem_section* mem_sections = nullptr;
+static struct zone zone_dma =
+    {.free_areas = {{0}}, .free_mask = 0, .lock = {0}, .free_count = {0}, .name = "DMA"};
+static struct zone zone_normal =
+    {.free_areas = {{0}}, .free_mask = 0, .lock = {0}, .free_count = {0}, .name = "Normal"};
 
-    pmm_state.bitmap[byte] |= (1ul << bit);
+static size_t section_count           = 0;
+static atomic_size_t stat_used_bytes  = 0;
+static atomic_size_t stat_total_bytes = 0;
 
-    // When a 64-page block transitions to "completely full", we mark it full in the summary bitmap.
-    if (pmm_state.bitmap[byte] == UINT64_MAX) {
-        size_t summary_byte = byte / UINT64_WIDTH;
-        size_t summary_bit  = byte % UINT64_WIDTH;
+static inline int get_order(size_t count) {
+    if (unlikely(count == 0)) {
+        return 0;
+    }
 
-        pmm_state.summary_bitmap[summary_byte] |= (1ul << summary_bit);
+    int order = 64 - clz(count - 1);
+    return order;
+}
+
+static inline void mask_set(struct zone* zone, int order) {
+    zone->free_mask |= (1 << order);
+}
+
+static inline void mask_clear_if_empty(struct zone* zone, int order) {
+    if (dlist_empty(&zone->free_areas[order])) {
+        zone->free_mask &= ~(1 << order);
     }
 }
 
-static inline void bitmap_clear_bit(size_t idx) {
-    ASSERT(pmm_state.bitmap && pmm_state.summary_bitmap);
+static inline struct page* phys_to_page(uintptr_t phys) {
+    size_t sec_idx = phys >> SECTION_SHIFT;
 
-    size_t byte         = idx / UINT64_WIDTH;
-    size_t summary_byte = byte / UINT64_WIDTH;
+    if (unlikely(sec_idx >= section_count)) {
+        return nullptr;
+    }
 
-    size_t bit         = idx % UINT64_WIDTH;
-    size_t summary_bit = byte % UINT64_WIDTH;
+    if (!mem_sections[sec_idx].map) {
+        return nullptr;
+    }
 
-    pmm_state.bitmap[byte] &= ~(1ul << bit);
-
-    // Any cleared bit means this 64-page block is no longer "fully used". We eagerly clear the
-    // summary bit so that future scans will see this region as a candidate without having to probe
-    // the entire word first.
-    pmm_state.summary_bitmap[summary_byte] &= ~(1ul << summary_bit);
+    struct page* ret = &mem_sections[sec_idx].map[(phys & SECTION_MASK) >> PAGE_SHIFT];
+    return ret;
 }
 
-static inline bool bitmap_test_bit(size_t idx) {
-    ASSERT(pmm_state.bitmap);
-
-    size_t byte = idx / UINT64_WIDTH;
-    size_t bit  = idx % UINT64_WIDTH;
-
-    return pmm_state.bitmap[byte] & (1ul << bit);
+static inline uintptr_t page_to_phys(struct page* page) {
+    return page->phys_addr;
 }
 
-static inline bool summary_bitmap_test_bit(size_t idx) {
-    ASSERT(pmm_state.summary_bitmap);
-
-    size_t byte         = idx / UINT64_WIDTH;
-    size_t summary_byte = byte / UINT64_WIDTH;
-
-    size_t bit         = idx % UINT64_WIDTH;
-    size_t summary_bit = byte % UINT64_WIDTH;
-
-    return pmm_state.summary_bitmap[summary_byte] & (1ul << summary_byte);
+static inline struct dlist_head* page_to_list_node(struct page* page) {
+    uintptr_t virt = to_higher_half(page->phys_addr);
+    return &((struct free_area*)virt)->list;
 }
 
-static bool scan_bitmap_range(
-    per_cpu_cache_t* cache,
-    size_t start_idx,
-    size_t end_idx,
-    size_t need,
-    size_t* collected
-) {
-    ASSERT(cache && collected);
-    ASSERT(pmm_state.bitmap && pmm_state.summary_bitmap);
-
-    size_t start = start_idx / UINT64_WIDTH;
-    size_t end   = div_roundup(end_idx, UINT64_WIDTH);
-
-    for (size_t s = start; s < end; ++s) {
-        prefetch(&pmm_state.summary_bitmap[s + 2], 0, 1);
-
-        // Skip the 64-page block if it is full
-        if (pmm_state.summary_bitmap[s] == UINT64_MAX) {
-            continue;
-        }
-
-        uint64_t summary_val = pmm_state.summary_bitmap[s];
-        uint64_t summary_inv = ~summary_val;
-
-        while (summary_inv) {
-            int block_bit   = ctz(summary_inv);
-            size_t word_idx = (s * UINT64_WIDTH) + (size_t)block_bit;
-
-            if (word_idx >= end_idx) {
-                return false;
-            }
-
-            prefetch(&pmm_state.bitmap[word_idx + 4], 1, 1);
-            uint64_t word_val = pmm_state.bitmap[word_idx];
-
-            // If word is not full, extract pages
-            if (word_val != UINT64_MAX) {
-                if (word_val == 0 && (need - *collected) >= 64) {
-                    // Mark full
-                    pmm_state.bitmap[word_idx] = UINT64_MAX;
-                    pmm_state.summary_bitmap[s] |= (1ul << block_bit);
-
-                    uint64_t base_page = word_idx * UINT64_WIDTH;
-
-                    for (size_t j = 0; j < UINT64_WIDTH; ++j) {
-                        size_t pfn = base_page + j;
-                        pmm_state.page_metadata[pfn].flags |= PAGE_FLAG_CACHE_RESIDENT;
-                        cache->stack[cache->count++] = (base_page + j) * PAGE_SIZE_SMALL;
-                    }
-
-                    *collected += UINT64_WIDTH;
-                } else {
-                    uint64_t inv_word  = ~word_val;
-                    bool word_modified = false;
-
-                    while (inv_word && (*collected < need)) {
-                        int page_bit    = ctz(inv_word);
-                        size_t page_idx = (word_idx * UINT64_WIDTH) + (size_t)page_bit;
-
-                        if (page_idx >= pmm_state.total_pages) {
-                            return true;
-                        }
-
-                        // Add to CPU cache
-                        cache->stack[cache->count++] = page_idx * PAGE_SIZE_SMALL;
-                        pmm_state.page_metadata[page_idx].flags |= PAGE_FLAG_CACHE_RESIDENT;
-                        (*collected)++;
-
-                        word_val |= (1ul << page_bit);
-                        inv_word &= ~(1ul << page_bit);
-
-                        word_modified = true;
-                    }
-
-                    if (word_modified) {
-                        pmm_state.bitmap[word_idx] = word_val;
-
-                        if (word_val == UINT64_MAX) {
-                            pmm_state.summary_bitmap[s] |= (1ul << block_bit);
-                        }
-                    }
-                }
-
-                if (*collected >= need) {
-                    pmm_state.free_idx_hint = word_idx * UINT64_WIDTH;
-                    return true;
-                }
-            }
-
-            // Clear bit to move to next free word in this summary block
-            summary_inv &= ~(1ul << block_bit);
-        }
-    }
-
-    // Continue to next range
-    return false;
+static inline struct page* list_node_to_page(struct dlist_head* node) {
+    uintptr_t phys = from_higher_half((uintptr_t)node);
+    return phys_to_page(phys);
 }
 
-static void cache_refill(per_cpu_cache_t* cache) {
-    ASSERT(cache);
-    ASSERT(pmm_state.bitmap && pmm_state.summary_bitmap);
+static void buddy_insert(struct zone* zone, struct page* page, int order) {
+    page->flags &= ~PAGE_FLAG_USED;
+    page->order = order;
 
-    size_t need = BATCH_SIZE;
+    struct dlist_head* node = page_to_list_node(page);
+    dlist_add(node, &zone->free_areas[order]);
+    atomic_fetch_add_explicit(&zone->free_count[order], 1, memory_order_relaxed);
 
-    if ((cache->count + need) > cache->capacity) {
-        need = cache->capacity - cache->count;
-    }
-
-    if (need == 0) {
-        return;
-    }
-
-    size_t collected = 0;
-    size_t start_idx = pmm_state.free_idx_hint / UINT64_WIDTH;
-
-    if ((pmm_state.low_mem_threshold_idx < pmm_state.total_pages) &&
-        (pmm_state.free_idx_hint < pmm_state.low_mem_threshold_idx)) {
-        start_idx = pmm_state.low_mem_threshold_idx / UINT64_WIDTH;
-    }
-
-    // Scan from Hint -> End of Memory
-    if (!scan_bitmap_range(cache, start_idx, pmm_state.bitmap_entries, need, &collected)) {
-        // Wrap Around (Scan from 0 -> Hint)
-        scan_bitmap_range(cache, 0, start_idx, need, &collected);
-    }
-
-    pmm_state.used_pages += collected;
+    mask_set(zone, order);
 }
 
-static int sort_cache(const void* a, const void* b) {
-    ASSERT(a && b);
+static void buddy_remove(struct zone* zone, struct page* page, int order) {
+    struct dlist_head* node = page_to_list_node(page);
+    dlist_del(node);
 
-    const uintptr_t arg1 = *(const uintptr_t*)a;
-    const uintptr_t arg2 = *(const uintptr_t*)b;
+    page->flags |= PAGE_FLAG_USED;
 
-    if (arg1 < arg2) {
-        return -1;
-    } else if (arg1 > arg2) {
-        return 1;
-    }
-
-    return 0;
+    atomic_fetch_sub_explicit(&zone->free_count[order], 1, memory_order_relaxed);
+    mask_clear_if_empty(zone, order);
 }
 
-static void cache_flush(per_cpu_cache_t* cache) {
-    ASSERT(cache);
-    ASSERT(pmm_state.bitmap && pmm_state.summary_bitmap);
+static struct page* buddy_alloc_zone(struct zone* zone, int order) {
+    acquire_spinlock(&zone->lock);
 
-    size_t target_count = cache->capacity / 2;
+    // int curr_order = order;
 
-    if (cache->capacity <= target_count) {
-        return;
+    // while (curr_order <= PMM_MAX_ORDER && dlist_empty(&zone->free_areas[curr_order])) {
+    //     curr_order++;
+    // }
+
+    uint16_t search_mask = zone->free_mask & ~((1 << order) - 1);
+
+    if (unlikely(search_mask == 0)) {
+        release_spinlock(&zone->lock);
+        return nullptr;
     }
 
-    size_t flush_count     = cache->capacity - target_count;
-    uintptr_t* flush_start = &cache->stack[target_count];
+    int curr_order = ctz(search_mask);
 
-    // Sort addresses in order, so they hit consecutive bitmap words.
-    if (flush_count > 1) {
-        qsort(flush_start, flush_count, sizeof(uintptr_t), sort_cache);
+    if (curr_order > PMM_MAX_ORDER) {
+        release_spinlock(&zone->lock);
+        return nullptr;
     }
 
-    size_t last_word_idx   = UINT64_MAX;
-    uint64_t curr_word_val = 0;
-    bool is_dirty          = false;
+    struct dlist_head* node = zone->free_areas[curr_order].next;
+    struct page* page       = list_node_to_page(node);
 
-    for (size_t i = 0; i < flush_count; ++i) {
-        uintptr_t phys_addr = flush_start[i];
-        size_t page_idx     = phys_addr / PAGE_SIZE_SMALL;
+    buddy_remove(zone, page, curr_order);
 
-        if (page_idx >= pmm_state.total_pages) {
-            continue;
-        }
+    // Split down
+    while (curr_order > order) {
+        curr_order--;
 
-        pmm_state.page_metadata[page_idx].flags &= ~PAGE_FLAG_CACHE_RESIDENT;
+        uintptr_t buddy_phys = page->phys_addr + (1ul << (curr_order + PAGE_SHIFT));
+        struct page* buddy   = phys_to_page(buddy_phys);
 
-        size_t word_idx = page_idx / UINT64_WIDTH;
-        size_t bit_idx  = page_idx % UINT64_WIDTH;
-
-        uint64_t mask = (1ul << bit_idx);
-
-        // If we moved to a new word, commit the previous one to the global state
-        if (word_idx != last_word_idx) {
-            if (is_dirty && (last_word_idx < pmm_state.bitmap_entries)) {
-                const size_t last_word_byte = last_word_idx / UINT64_WIDTH;
-                const size_t last_word_bit  = last_word_idx % UINT64_WIDTH;
-
-                pmm_state.bitmap[last_word_idx] = curr_word_val;
-                pmm_state.summary_bitmap[last_word_byte] &= ~(1ul << last_word_bit);
-            }
-
-            last_word_idx = word_idx;
-            curr_word_val = pmm_state.bitmap[word_idx];
-            is_dirty      = true;
-        }
-
-        // Clear the bit in the local copy
-        if (curr_word_val & mask) {
-            curr_word_val &= ~mask;
-            pmm_state.used_pages--;
-        }
-
-        if (page_idx < pmm_state.free_idx_hint) {
-            pmm_state.free_idx_hint = page_idx;
-        }
-
-        if (page_idx < pmm_state.align_idx_hint) {
-            pmm_state.align_idx_hint = page_idx;
-        }
+        buddy_insert(zone, buddy, curr_order);
     }
 
-    if (is_dirty && (last_word_idx < pmm_state.bitmap_entries)) {
-        const size_t last_word_byte = last_word_idx / UINT64_WIDTH;
-        const size_t last_word_bit  = last_word_idx % UINT64_WIDTH;
+    page->order = order;
+    atomic_fetch_add_explicit(&stat_used_bytes, (1ul << order) * PAGE_SIZE, memory_order_relaxed);
 
-        pmm_state.bitmap[last_word_idx] = curr_word_val;
-        pmm_state.summary_bitmap[last_word_byte] &= ~(1ul << last_word_bit);
-    }
-
-    cache->count = target_count;
+    release_spinlock(&zone->lock);
+    return page;
 }
 
-static void* pmm_alloc_from_bitmap(size_t count) {
-    size_t start_idx = pmm_state.free_idx_hint;
+static void buddy_free_zone(struct zone* zone, struct page* page, int order) {
+    acquire_spinlock(&zone->lock);
 
-    if ((pmm_state.low_mem_threshold_idx < pmm_state.total_pages) &&
-        (start_idx < pmm_state.low_mem_threshold_idx)) {
-        start_idx = pmm_state.low_mem_threshold_idx;
-    }
+    atomic_fetch_sub_explicit(&stat_used_bytes, (1ul << order) * PAGE_SIZE, memory_order_relaxed);
 
-    if (count == 1) {
-        // Single-page allocations prefer to find a "mostly free" region
-        // using the summary bitmap, then drill down into the main bitmap.
-        size_t start         = start_idx / UINT64_WIDTH;
-        size_t summary_start = start / UINT64_WIDTH;
+    // Coalesce
+    while (order < PMM_MAX_ORDER) {
+        uintptr_t buddy_phys = page->phys_addr ^ (1ul << (order + PAGE_SHIFT));
+        struct page* buddy   = phys_to_page(buddy_phys);
 
-        for (size_t s = summary_start; s < pmm_state.summary_entries; ++s) {
-            prefetch(&pmm_state.summary_bitmap[s + 4], 0, 1);
-
-            // Each summary entry covers 64 bitmap entries = 4096 pages.
-            uint64_t summary_word = pmm_state.summary_bitmap[s];
-
-            // Summary == all ones => every tracked 64-page block here is full.
-            // Skipping avoids touching obviously-saturated regions at all.
-            if (summary_word == UINT64_MAX) {
-                continue;
-            }
-
-            // Find a bitmap word (block of 64 pages) with at least one free page.
-            int block_offset = ctz(~summary_word);
-            size_t map_idx   = (s * UINT64_WIDTH) + (size_t)block_offset;
-
-            // Now verify the actual bitmap word and pick the first free page in it.
-            if (map_idx < pmm_state.bitmap_entries) {
-                prefetch(&pmm_state.bitmap[map_idx + 8], 0, 1);
-                uint64_t entry = pmm_state.bitmap[map_idx];
-
-                if (entry != UINT64_MAX) {
-                    int bit_offset = ctz(~entry);
-                    size_t idx     = (map_idx * UINT64_WIDTH) + (size_t)bit_offset;
-
-                    if (idx < pmm_state.total_pages) {
-                        bitmap_set_bit(idx);
-                        pmm_state.used_pages++;
-                        pmm_state.free_idx_hint = idx + 1;
-
-                        return (void*)(idx * PAGE_SIZE_SMALL);
-                    }
-                }
-            }
-        }
-
-        // Wrap around: if we started past 0, scan from 0 to the start hint.
-        if (pmm_state.free_idx_hint > 0) {
-            for (size_t s = 0; s < summary_start; ++s) {
-                uint64_t summary_entry = pmm_state.summary_bitmap[s];
-
-                if (summary_entry == UINT64_MAX) {
-                    continue;
-                }
-
-                int block_offset = ctz(~summary_entry);
-                size_t map_idx   = (s * UINT64_WIDTH) + (size_t)block_offset;
-
-                if (map_idx < pmm_state.bitmap_entries) {
-                    uint64_t entry = pmm_state.bitmap[map_idx];
-
-                    if (entry != UINT64_MAX) {
-                        int bit_offset = ctz(~entry);
-                        size_t idx     = (map_idx * UINT64_WIDTH) + (size_t)bit_offset;
-
-                        if (idx < pmm_state.total_pages) {
-                            bitmap_set_bit(idx);
-                            pmm_state.used_pages++;
-                            pmm_state.free_idx_hint = idx + 1;
-
-                            return (void*)(idx * PAGE_SIZE_SMALL);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    release_interrupt_lock(&pmm_state.lock);
-    return pmm_alloc_aligned(PAGE_SIZE_SMALL, count);
-}
-
-static void* try_alloc_aligned(size_t start, size_t end, size_t count, size_t alignment) {
-    size_t pages_per_alignment = alignment / PAGE_SIZE_SMALL;
-    size_t curr                = align_up(start, pages_per_alignment);
-
-    while (curr < end) {
-        if ((curr + count) > pmm_state.total_pages) {
+        if (!buddy || (buddy->flags & PAGE_FLAG_USED) || buddy->order != order) {
             break;
         }
 
-        if ((curr % UINT64_WIDTH) == 0 && (count >= UINT64_WIDTH)) {
-            size_t summary_idx = curr / (UINT64_WIDTH * UINT64_WIDTH);
+        buddy_remove(zone, buddy, order);
 
-            if ((summary_idx < pmm_state.summary_entries) &&
-                (pmm_state.summary_bitmap[summary_idx] == UINT64_MAX)) {
-                curr += (UINT64_MAX * UINT64_MAX);
-                curr = align_up(curr, pages_per_alignment);
-                continue;
-            }
+        if (buddy->phys_addr < page->phys_addr) {
+            page = buddy;
         }
 
-        // Inner scan: Check if count pages starting at curr are free.
-        bool fit = true;
-        for (size_t i = 0; i < count; ++i) {
-            if (bitmap_test_bit(curr + i)) {
-                fit = false;
-
-                // Found an allocated page at (curr + j); skip ahead to next alignment.
-                curr = align_up(curr + i + 1, pages_per_alignment);
-                break;
-            }
-        }
-
-        if (fit) {
-            for (size_t i = 0; i < count; ++i) {
-                bitmap_set_bit(curr + i);
-            }
-
-            pmm_state.used_pages += count;
-
-            if (alignment >= PAGE_SIZE_MEDIUM) {
-                pmm_state.align_idx_hint = curr + count;
-            } else {
-                pmm_state.free_idx_hint = curr + count;
-            }
-
-            return (void*)(curr * PAGE_SIZE_SMALL);
-        }
+        order++;
     }
 
-    return nullptr;
-}
-
-static void init_refs(void* ptr, size_t count) {
-    size_t pfn = (uintptr_t)ptr / PAGE_SIZE_SMALL;
-
-    for (size_t i = 0; i < count; ++i) {
-        __atomic_store_n(&pmm_state.page_metadata[pfn + i].ref_count, 1, memory_order_relaxed);
-    }
-}
-
-uint16_t pmm_inc_ref(void* phys) {
-    if (!phys) {
-        return 0;
-    }
-
-    size_t pfn = (uintptr_t)phys / PAGE_SIZE_SMALL;
-
-    if (pfn >= pmm_state.total_pages) {
-        return 0;
-    }
-
-    volatile uint16_t* ptr = &pmm_state.page_metadata[pfn].ref_count;
-    uint16_t old_val       = __atomic_load_n(ptr, memory_order_relaxed);
-
-    while (true) {
-        if (old_val == UINT16_MAX) {
-            // Sticky
-            return UINT16_MAX;
-        }
-
-        uint16_t new_val = old_val + 1;
-
-        if (__atomic_compare_exchange_n(
-                ptr,
-                &old_val,
-                new_val,
-                false,
-                memory_order_seq_cst,
-                memory_order_relaxed
-            )) {
-            return new_val;
-        }
-    }
-}
-
-uint16_t pmm_dec_ref(void* phys) {
-    if (!phys) {
-        return 0;
-    }
-
-    size_t pfn = (uintptr_t)phys / PAGE_SIZE_SMALL;
-
-    if (pfn >= pmm_state.total_pages) {
-        return 0;
-    }
-
-    volatile uint16_t* ptr = &pmm_state.page_metadata[pfn].ref_count;
-    uint16_t old_val       = __atomic_load_n(ptr, memory_order_relaxed);
-
-    while (true) {
-        if (old_val == UINT16_MAX) {
-            // If sticky saturated, do not decrement. The page is effecively leaked/pinned.
-            return UINT16_MAX;
-        }
-
-        if (unlikely(old_val == 0)) {
-            return 0;
-        }
-
-        uint16_t new_val = old_val - 1;
-
-        if (__atomic_compare_exchange_n(
-                ptr,
-                &old_val,
-                new_val,
-                false,
-                memory_order_seq_cst,
-                memory_order_relaxed
-            )) {
-            return new_val;
-        }
-    }
-}
-
-uint16_t pmm_get_ref(void* phys) {
-    if (!phys) {
-        return 0;
-    }
-
-    size_t pfn = (uintptr_t)phys / PAGE_SIZE_SMALL;
-
-    if (pfn >= pmm_state.total_pages) {
-        return 0;
-    }
-
-    return __atomic_load_n(&pmm_state.page_metadata[pfn].ref_count, memory_order_seq_cst);
-}
-
-void pmm_set_ref(void* phys, uint16_t ref) {
-    if (!phys) {
-        return;
-    }
-
-    size_t pfn = (uintptr_t)phys / PAGE_SIZE_SMALL;
-
-    if (pfn >= pmm_state.total_pages) {
-        return;
-    }
-
-    __atomic_store_n(&pmm_state.page_metadata[pfn].ref_count, ref, memory_order_relaxed);
+    buddy_insert(zone, page, order);
+    release_spinlock(&zone->lock);
 }
 
 void* pmm_alloc(size_t count) {
-    if (count == 0) {
-        errno = EINVAL;
+    if (unlikely(count == 0)) {
         return nullptr;
     }
 
-    void* ptr = nullptr;
+    int order = get_order(count);
 
-    if ((count == 1) && pmm_state.cpu_caches) {
-        acquire_irq_lock(&pmm_state.irq_lock);
+    struct page* page = buddy_alloc_zone(&zone_normal, order);
 
-        size_t core_id = arch_get_core_idx();
-
-        if (core_id < pmm_state.num_cpus) {
-            per_cpu_cache_t* cache = &pmm_state.cpu_caches[core_id];
-
-            if (cache->count == 0) {
-                acquire_interrupt_lock(&pmm_state.lock);
-                cache_refill(cache);
-                release_interrupt_lock(&pmm_state.lock);
-            }
-
-            if (cache->count > 0) {
-                ptr        = (void*)(cache->stack[--cache->count]);
-                size_t pfn = (uintptr_t)ptr / PAGE_SIZE_SMALL;
-
-                pmm_state.page_metadata[pfn].flags &= ~PAGE_FLAG_CACHE_RESIDENT;
-            }
-        }
-
-        release_irq_lock(&pmm_state.irq_lock);
+    if (unlikely(!page)) {
+        page = buddy_alloc_zone(&zone_dma, order);
     }
 
-    acquire_interrupt_lock(&pmm_state.lock);
-
-    if (!ptr) {
-        ptr = pmm_alloc_from_bitmap(count);
+    if (likely(page)) {
+        atomic_store_explicit(&page->ref_count, 1, memory_order_release);
+        // KLOG_DEBUG("PMM: Allocated %lu pages (order %d) at %p\n", count, order,
+        // (void*)page->phys_addr);
+        return (void*)page->phys_addr;
     }
 
-    if (!ptr) {
-        errno = ENOMEM;
-        KLOG_WARN("PMM: alloc failed count=%zu\n", count);
-    }
-
-    if (ptr) {
-        init_refs(ptr, count);
-    }
-
-    release_interrupt_lock(&pmm_state.lock);
-    return ptr;
-}
-
-void* pmm_alloc_aligned(size_t alignment, size_t count) {
-    if ((count == 0) || (alignment == 0) || !is_aligned(alignment, PAGE_SIZE_SMALL)) {
-        errno = EINVAL;
-        return nullptr;
-    }
-
-    size_t start_hint = pmm_state.free_idx_hint;
-
-    // Prefer High Memory
-    if ((pmm_state.low_mem_threshold_idx < pmm_state.total_pages) &&
-        (start_hint < pmm_state.low_mem_threshold_idx)) {
-        start_hint = pmm_state.low_mem_threshold_idx;
-    }
-
-    // Use the aligned hint if alignment is large
-    if (alignment >= PAGE_SIZE_MEDIUM) {
-        start_hint = pmm_state.align_idx_hint;
-    }
-
-    acquire_interrupt_lock(&pmm_state.lock);
-
-    void* ptr = try_alloc_aligned(start_hint, pmm_state.total_pages, count, alignment);
-
-    if (!ptr) {
-        ptr = try_alloc_aligned(0, start_hint, count, alignment);
-    }
-
-    if (!ptr) {
-        errno = ENOMEM;
-        KLOG_WARN("PMM: alloc_aligned failed count=%zu align=0x%zx\n", count, alignment);
-    }
-
-    if (ptr) {
-        init_refs(ptr, count);
-    }
-
-    release_interrupt_lock(&pmm_state.lock);
-    return ptr;
-}
-
-void* pmm_alloc_dma(size_t alignment, size_t count) {
-    if ((count == 0) || (alignment == 0) || !is_aligned(alignment, PAGE_SIZE_SMALL)) {
-        errno = EINVAL;
-        return nullptr;
-    }
-
-    size_t pages_per_alignment = alignment / PAGE_SIZE_SMALL;
-    size_t limit               = pmm_state.low_mem_threshold_idx;
-    size_t curr                = 0;
-
-    acquire_interrupt_lock(&pmm_state.lock);
-
-    while (curr < limit) {
-        if ((curr + count) > limit) {
-            break;
-        }
-
-        if ((curr % UINT64_WIDTH) == 0 && (count >= UINT64_WIDTH)) {
-            size_t summary_idx = curr / (UINT64_WIDTH * UINT64_WIDTH);
-
-            if ((summary_idx < pmm_state.summary_entries) &&
-                (pmm_state.summary_bitmap[summary_idx] == ~0ul)) {
-                curr += (UINT64_WIDTH * UINT64_WIDTH);
-                curr = align_up(curr, pages_per_alignment);
-                continue;
-            }
-        }
-
-        bool fit = true;
-        for (size_t i = 0; i < count; ++i) {
-            if (bitmap_test_bit(curr + i)) {
-                fit = false;
-
-                // Found an allocated page at (curr + j); skip ahead to next alignment.
-                curr = align_up(curr + i + 1, pages_per_alignment);
-                break;
-            }
-        }
-
-        if (fit) {
-            for (size_t i = 0; i < count; ++i) {
-                bitmap_set_bit(curr + i);
-            }
-
-            pmm_state.used_pages += count;
-
-            void* ptr = (void*)(curr * PAGE_SIZE_SMALL);
-            init_refs(ptr, count);
-
-            release_interrupt_lock(&pmm_state.lock);
-            return ptr;
-        }
-    }
-
-    release_interrupt_lock(&pmm_state.lock);
-    errno = ENOMEM;
+    PANIC("Failed to allocate page of count %lu order=%d\n", count, order);
     return nullptr;
 }
 
-static void pmm_free_to_bitmap(size_t page_idx, size_t count) {
-    size_t curr      = page_idx;
-    size_t remaining = count;
-
-    // Free individual bits until 64-page aligned
-    while ((remaining > 0) && (curr % UINT64_WIDTH) != 0) {
-        if ((curr < pmm_state.total_pages) && bitmap_test_bit(curr)) {
-            bitmap_clear_bit(curr);
-            pmm_state.used_pages--;
-        }
-
-        curr++;
-        remaining--;
+void* pmm_alloc_aligned(size_t alignment, size_t count) {
+    if (unlikely(count == 0)) {
+        return nullptr;
     }
 
-    // Free 64 pages at a time using word writes
-    while (remaining >= UINT64_WIDTH) {
-        size_t word_idx = curr / UINT64_WIDTH;
+    int size_order = get_order(count);
 
-        if (word_idx < pmm_state.bitmap_entries) {
-            uint64_t old_val = pmm_state.bitmap[word_idx];
-
-            if (old_val != 0) {
-                const size_t byte = word_idx / UINT64_WIDTH;
-                const size_t bit  = word_idx % UINT64_WIDTH;
-
-                // Count how many bits are flipped from 1->0
-                pmm_state.used_pages -= (size_t)(popcount(old_val));
-                pmm_state.bitmap[word_idx] = 0;
-
-                pmm_state.summary_bitmap[byte] &= ~(1ul << bit);
-            }
-        }
-
-        curr += UINT64_WIDTH;
-        remaining -= UINT64_WIDTH;
+    int align_order = 0;
+    if (alignment > PAGE_SIZE) {
+        size_t align_pages = div_roundup(alignment, PAGE_SIZE);
+        align_order        = get_order(align_pages);
     }
 
-    // Free remaining individual bits
-    while (remaining > 0) {
-        if ((curr < pmm_state.total_pages) && bitmap_test_bit(curr)) {
-            bitmap_clear_bit(curr);
-            pmm_state.used_pages--;
-        }
+    int order = (align_order > size_order) ? align_order : size_order;
 
-        curr++;
-        remaining--;
+    struct page* page = buddy_alloc_zone(&zone_normal, order);
+
+    if (!page) {
+        page = buddy_alloc_zone(&zone_dma, order);
     }
 
-    // Hint Update
-    if ((page_idx < pmm_state.free_idx_hint) && (page_idx > pmm_state.low_mem_threshold_idx)) {
-        pmm_state.free_idx_hint = page_idx;
+    if (likely(page)) {
+        atomic_store_explicit(&page->ref_count, 1, memory_order_release);
+        // KLOG_DEBUG("PMM: Allocated aligned %lu pages (order %d) at %p\n", count, order,
+        // (void*)page->phys_addr);
+        return (void*)page->phys_addr;
     }
+
+    return nullptr;
 }
 
-static void pmm_release_page(void* ptr, size_t count) {
-    if ((count == 1) && (pmm_state.cpu_caches)) {
-        acquire_irq_lock(&pmm_state.irq_lock);
-
-        size_t core_id = arch_get_core_idx();
-
-        if (core_id < pmm_state.num_cpus) {
-            per_cpu_cache_t* cache = &pmm_state.cpu_caches[core_id];
-
-            if (cache->count >= cache->capacity) {
-                acquire_interrupt_lock(&pmm_state.lock);
-                cache_flush(cache);
-                release_interrupt_lock(&pmm_state.lock);
-            }
-
-            size_t pfn = (uintptr_t)ptr / PAGE_SIZE_SMALL;
-
-            if (pmm_state.page_metadata[pfn].flags & PAGE_FLAG_CACHE_RESIDENT) {
-                // Page is already in a cache stack.
-                release_irq_lock(&pmm_state.irq_lock);
-                return;
-            }
-
-            // Mark as resident and push
-            pmm_state.page_metadata[pfn].flags |= PAGE_FLAG_CACHE_RESIDENT;
-            cache->stack[cache->count++] = (uintptr_t)ptr;
-
-            release_irq_lock(&pmm_state.irq_lock);
-            return;
-        }
-
-        release_irq_lock(&pmm_state.irq_lock);
-    }
-
-    acquire_interrupt_lock(&pmm_state.lock);
-    pmm_free_to_bitmap((uintptr_t)ptr / PAGE_SIZE_SMALL, count);
-    release_interrupt_lock(&pmm_state.lock);
-}
-
-void pmm_free(void* ptr, size_t count) {
+void pmm_free(void* ptr, size_t) {
     if (!ptr) {
         return;
     }
 
-    if (is_higer_half((uintptr_t)ptr)) {
-        // 18.45 EiB RAM (User must be rich af)
+    pmm_dec_ref(ptr);
+}
+
+void pmm_inc_ref(void* ptr) {
+    if (unlikely(!ptr)) {
         return;
     }
 
-    uintptr_t addr = (uintptr_t)ptr;
+    struct page* page = phys_to_page((uintptr_t)ptr);
 
-    for (size_t i = 0; i < count; ++i) {
-        void* page_addr = (void*)(addr + (i * PAGE_SIZE_SMALL));
+    uint16_t old     = atomic_load_explicit(&page->ref_count, memory_order_relaxed);
+    uint16_t new_val = 0;
 
-        if (pmm_dec_ref(page_addr) == 0) {
-            pmm_release_page(page_addr, 1);
+    do {
+        if (unlikely(old == REF_SATURATION)) {
+            KLOG_WARN("PMM: Ref count saturation on %p\n", ptr);
+            return;
         }
-    }
+
+        new_val = old + 1;
+    } while (!atomic_compare_exchange_strong_explicit(
+        &page->ref_count,
+        &old,
+        new_val,
+        memory_order_relaxed,
+        memory_order_relaxed
+    ));
 }
 
-void pmm_force_free(void* phys_addr, size_t count) {
-    if (!phys_addr) {
+void pmm_dec_ref(void* ptr) {
+    if (unlikely(!ptr)) {
         return;
     }
 
-    uintptr_t addr = (uintptr_t)phys_addr;
+    struct page* page = phys_to_page((uintptr_t)ptr);
 
-    for (size_t i = 0; i < count; ++i) {
-        uintptr_t curr = addr + (i * PAGE_SIZE_SMALL);
-        size_t pfn     = curr / PAGE_SIZE_SMALL;
+    uint16_t old     = atomic_load_explicit(&page->ref_count, memory_order_acquire);
+    uint16_t new_val = 0;
 
-        if (pfn >= pmm_state.total_pages) {
-            continue;
+    do {
+        if (unlikely(old == REF_SATURATION)) {
+            return;
         }
 
-        __atomic_store_n(&pmm_state.page_metadata[pfn].ref_count, 0, memory_order_relaxed);
+        if (unlikely(old == 0)) {
+            KLOG_WARN("PMM: Double free detected on %p\n", ptr);
+            return;
+        }
 
-        // If the page was somehow stuck in a cache and saturated (corruption), we clear the flag so
-        // release_pages() accepts it. This might cause a double-entry if it really is in stack, but
-        // this function is "unsafe" by definition.
-        __atomic_and_fetch(
-            &pmm_state.page_metadata[pfn].flags,
-            ~PAGE_FLAG_CACHE_RESIDENT,
-            memory_order_relaxed
-        );
-        pmm_release_page((void*)curr, 1);
+        new_val = old - 1;
+    } while (!atomic_compare_exchange_strong_explicit(
+        &page->ref_count,
+        &old,
+        new_val,
+        memory_order_acq_rel,
+        memory_order_acquire
+    ));
+
+    if (new_val == 0) {
+        struct zone* zone = (page->phys_addr < ZONE_DMA_LIMIT) ? &zone_dma : &zone_normal;
+        int order         = page->order;
+
+        KLOG_TRACE("PMM: Freeing %p (Order %d)", ptr, order);
+        buddy_free_zone(zone, page, order);
     }
 }
 
-void pmm_get_stats(pmm_stats_t* stats) {
-    acquire_interrupt_lock(&pmm_state.lock);
-
-    size_t cached_total = 0;
-
-    for (size_t i = 0; i < pmm_state.num_cpus; ++i) {
-        cached_total += pmm_state.cpu_caches[i].count;
+uint16_t pmm_get_ref(void* ptr) {
+    if (unlikely(!ptr)) {
+        return 0;
     }
 
-    size_t actual_used  = pmm_state.used_pages - cached_total;
-    stats->total_memory = pmm_state.total_pages * PAGE_SIZE_SMALL;
-    stats->used_memory  = actual_used * PAGE_SIZE_SMALL;
-    stats->free_memory  = (pmm_state.total_pages - actual_used) * PAGE_SIZE_SMALL;
-
-    release_interrupt_lock(&pmm_state.lock);
+    struct page* page = phys_to_page((uintptr_t)ptr);
+    return atomic_load_explicit(&page->ref_count, memory_order_relaxed);
 }
 
 void pmm_init(void) {
-    if (!(memmap_request.response) || !(memmap_request.response->entries)) {
-        PANIC("Limine Memory Map not found!\n");
+    KLOG_INFO("PMM: Initializing...\n");
+
+    if (!memmap_request.response) {
+        PANIC("No Memory Map detected!");
     }
 
-    size_t memmap_count                  = memmap_request.response->entry_count;
-    struct limine_memmap_entry** memmaps = memmap_request.response->entries;
+    size_t count                         = memmap_request.response->entry_count;
+    struct limine_memmap_entry** entries = memmap_request.response->entries;
 
-    release_interrupt_lock(&pmm_state.lock);
+    uintptr_t highest_usable_addr              = 0;
+    struct limine_memmap_entry* largest_region = nullptr;
+    size_t total_ram_accum                     = 0;
 
-    if (mp_request.response && (mp_request.response->cpu_count > 0)) {
-        pmm_state.num_cpus = mp_request.response->cpu_count;
-    } else {
-        pmm_state.num_cpus = 1;
+    for (size_t i = 0; i < count; ++i) {
+        struct limine_memmap_entry* entry = entries[i];
+
+        bool is_candidate = entry->type == LIMINE_MEMMAP_USABLE ||
+                            entry->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE ||
+                            entry->type == LIMINE_MEMMAP_EXECUTABLE_AND_MODULES ||
+                            entry->type == LIMINE_MEMMAP_ACPI_RECLAIMABLE;
+        bool is_usable    = entry->type == LIMINE_MEMMAP_USABLE;
+
+        if (is_candidate) {
+            uintptr_t top = entry->base + entry->length;
+
+            if (top > highest_usable_addr) {
+                highest_usable_addr = top;
+            }
+
+            total_ram_accum += entry->length;
+
+            if (is_usable && (!largest_region || entry->length > largest_region->length)) {
+                largest_region = entry;
+            }
+        }
     }
 
-    uintptr_t highest_addr = 0;
+    if (!largest_region) {
+        PANIC("Out of Memory!");
+    }
 
-    // Find the highest address among usable/reclaimable types.
-    for (size_t i = 0; i < memmap_count; ++i) {
-        struct limine_memmap_entry* entry = memmaps[i];
+    KLOG_INFO("PMM: Total detected memory: %lu KB\n", total_ram_accum / 1024);
+
+    atomic_store_explicit(&stat_total_bytes, total_ram_accum, memory_order_relaxed);
+    atomic_store_explicit(&stat_used_bytes, total_ram_accum, memory_order_relaxed);
+    section_count = (highest_usable_addr + SECTION_SIZE - 1) >> SECTION_SHIFT;
+
+    KLOG_INFO("PMM: Section count: %lu\n", section_count);
+
+    uintptr_t boot_ptr = largest_region->base;
+    size_t table_size  = section_count * sizeof(struct mem_section);
+
+    if (table_size > largest_region->length) {
+        PANIC("Out of Memory!\n");
+    }
+
+    mem_sections = (void*)to_higher_half((uintptr_t)boot_ptr);
+    memset(mem_sections, 0, table_size);
+
+    boot_ptr += table_size;
+    boot_ptr = align_up(boot_ptr, PAGE_SIZE);
+
+    for (size_t i = 0; i < count; ++i) {
+        struct limine_memmap_entry* entry = entries[i];
 
         bool is_candidate = entry->type == LIMINE_MEMMAP_USABLE ||
                             entry->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE ||
                             entry->type == LIMINE_MEMMAP_EXECUTABLE_AND_MODULES ||
                             entry->type == LIMINE_MEMMAP_ACPI_RECLAIMABLE;
 
-        if (is_candidate) {
-            uintptr_t end = entry->base + entry->length;
-
-            if (end > highest_addr) {
-                highest_addr = end;
-            }
-        }
-    }
-
-    pmm_state.total_pages           = div_roundup(highest_addr, PAGE_SIZE_SMALL);
-    pmm_state.low_mem_threshold_idx = (PAGE_SIZE_LARGE * 4) / PAGE_SIZE_SMALL;
-
-    // Clam threshold if system has less than 4GB RAM
-    if (pmm_state.low_mem_threshold_idx > pmm_state.total_pages) {
-        pmm_state.low_mem_threshold_idx = pmm_state.total_pages;
-    }
-
-    KLOG_INFO(
-        "PMM: highest_addr=0x%lx total_pages=%zu low_memory_threshold_page=%zu\n",
-        highest_addr,
-        pmm_state.total_pages,
-        pmm_state.low_mem_threshold_idx
-    );
-
-    size_t bitmap_size       = align_up(div_roundup(pmm_state.total_pages, 8u), 8u);
-    pmm_state.bitmap_entries = bitmap_size / 8;
-
-    // Summary bitmap: one bit per bitmap entry (i.e., per 64‑page block).
-    size_t summary_bits       = pmm_state.bitmap_entries;
-    size_t summary_size       = align_up(div_roundup(summary_bits, 8u), 8u);
-    pmm_state.summary_entries = summary_size / 8;
-
-    // `N` CPU stack cache size (for per-cpu cache).
-    size_t cache_size  = pmm_state.num_cpus * sizeof(per_cpu_cache_t);
-    size_t stack_bytes = pmm_state.num_cpus * (CACHE_SIZE * sizeof(uintptr_t));
-
-    // Page Metadata
-    size_t page_metadata_bytes = pmm_state.total_pages * sizeof(page_metadata_t);
-
-    size_t total_metadata_bytes =
-        bitmap_size + summary_size + cache_size + stack_bytes + page_metadata_bytes;
-
-    KLOG_DEBUG(
-        "PMM: bitmap_bytes=%zu summary_bytes=%zu cpu_cache_bytes=%zu stack_bytes=%zu "
-        "metadata_total=%zu\n",
-        bitmap_size,
-        summary_size,
-        cache_size,
-        stack_bytes,
-        total_metadata_bytes
-    );
-
-    // Find suitable hole for metadata. The idea is to place metadata in a
-    // contiguous region that we then remove from the general pool, so the
-    // allocator never hands it out by accident.
-    struct limine_memmap_entry* best_candidate = nullptr;
-
-    for (size_t i = 0; i < memmap_count; ++i) {
-        struct limine_memmap_entry* entry = memmaps[i];
-
-        // Reject 0x0 base
-        if (entry->base == 0) {
+        if (!is_candidate) {
             continue;
         }
 
-        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= total_metadata_bytes) {
-            if (!best_candidate || (entry->base > best_candidate->base)) {
-                best_candidate = entry;
+        uintptr_t start = align_down(entry->base, SECTION_SIZE);
+        uintptr_t end   = align_up(entry->base + entry->length, SECTION_SIZE);
+
+        for (uintptr_t addr = start; addr < end; addr += SECTION_SIZE) {
+            size_t idx = addr >> SECTION_SHIFT;
+
+            if ((idx >= section_count) || mem_sections[idx].map) {
+                continue;
+            }
+
+            size_t map_size = PAGES_PER_SECTION * sizeof(struct page);
+
+            if (boot_ptr + map_size > largest_region->base + largest_region->length) {
+                PANIC("PMM: Not enough memory in boot region for metadata!");
+            }
+
+            mem_sections[idx].map = (void*)to_higher_half(boot_ptr);
+            boot_ptr += map_size;
+
+            for (size_t p = 0; p < PAGES_PER_SECTION; ++p) {
+                struct page* page = &mem_sections[idx].map[p];
+
+                page->phys_addr = addr + (p * PAGE_SIZE);
+                page->flags     = PAGE_FLAG_USED;
+                page->order     = 0;
+                atomic_init(&page->ref_count, 0);
             }
         }
     }
 
-    if (!best_candidate) {
-        // If no high memory found, check for any suitable memory.
-        for (size_t i = 0; i < memmap_count; ++i) {
-            struct limine_memmap_entry* entry = memmaps[i];
+    boot_ptr = align_up(boot_ptr, PAGE_SIZE);
 
-            if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= total_metadata_bytes) {
-                best_candidate = entry;
-                break;
+    for (int i = 0; i <= PMM_MAX_ORDER; ++i) {
+        dlist_init(&zone_dma.free_areas[i]);
+        dlist_init(&zone_normal.free_areas[i]);
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        struct limine_memmap_entry* entry = entries[i];
+
+        if (entry->type != LIMINE_MEMMAP_USABLE) {
+            continue;
+        }
+
+        uintptr_t start = entry->base;
+        uintptr_t end   = entry->base + entry->length;
+
+        // If this entry if the one we used for bootstrapping, we must skip the memory we used for
+        // the metadata.
+        if (entry == largest_region) {
+            start = boot_ptr;
+        }
+
+        if (start == 0) {
+            start += PAGE_SIZE;
+        }
+
+        if (start >= end) {
+            continue;
+        }
+
+        for (uintptr_t p = start; p < end; p += PAGE_SIZE) {
+            struct page* page = phys_to_page(p);
+
+            if (unlikely(!page)) {
+                continue;
             }
+
+            struct zone* zone = (p < ZONE_DMA_LIMIT) ? &zone_dma : &zone_normal;
+
+            if (zone == &zone_dma) {
+                page->flags |= PAGE_FLAG_DMA;
+            }
+
+            buddy_free_zone(zone, page, 0);
         }
     }
 
-    if (best_candidate == nullptr) {
-        PANIC("No suitable memory hole found for metadata of size 0x%lx\n", total_metadata_bytes);
-    }
-
-    uintptr_t meta_base = best_candidate->base;
-    KLOG_INFO(
-        "PMM: using metadata base phys=0x%lx (region base=0x%lx len=0x%lx)\n",
-        meta_base,
-        best_candidate->base,
-        best_candidate->length
-    );
-
-    if (meta_base == 0) {
-        meta_base += PAGE_SIZE_SMALL;
-        best_candidate->length -= PAGE_SIZE_SMALL;
-
-        if (best_candidate->length < total_metadata_bytes) {
-            PANIC(
-                "No suitable memory hole found for metadata of size 0x%lx\n",
-                total_metadata_bytes
-            );
-        }
-    }
-
-    // Reserve metadata region: we move the Limine entry forward so the
-    // rest of the kernel never sees that region as free RAM.
-    void* metadata_phys = (void*)meta_base;
-    best_candidate->base += total_metadata_bytes;
-    best_candidate->length -= total_metadata_bytes;
-
-    uintptr_t metadata = to_higher_half((uintptr_t)metadata_phys);
-
-    // Layout: [bitmap][summary bitmap][cpu cache][cpu stack cache]
-    pmm_state.bitmap         = (uint64_t*)metadata;
-    pmm_state.summary_bitmap = (uint64_t*)(metadata + bitmap_size);
-
-    pmm_state.cpu_caches = (per_cpu_cache_t*)(metadata + bitmap_size + summary_size);
-
-    uintptr_t* stack_start = (uintptr_t*)(metadata + bitmap_size + summary_size + cache_size);
-
-    pmm_state.page_metadata =
-        (page_metadata_t*)(metadata + bitmap_size + summary_size + cache_size + stack_bytes);
-
-    for (size_t i = 0; i < pmm_state.num_cpus; ++i) {
-        pmm_state.cpu_caches[i].count    = 0;
-        pmm_state.cpu_caches[i].capacity = CACHE_SIZE;
-        pmm_state.cpu_caches[i].stack    = stack_start + (i * CACHE_SIZE);
-    }
-
-    KLOG_DEBUG(
-        "PMM: bitmap@%p (%zu entries), summary@%p (%zu entries), cpu cache@%p (%zu cpu caches)\n",
-        pmm_state.bitmap,
-        pmm_state.bitmap_entries,
-        pmm_state.summary_bitmap,
-        pmm_state.summary_entries,
-        pmm_state.cpu_caches,
-        pmm_state.num_cpus
-    );
-
-    // Initially mark all pages as used; we will then free only the
-    // ranges that Limine reports as usable. This ensures we never
-    // accidentally treat "unknown" memory as allocatable.
-    memset(pmm_state.bitmap, 0xff, bitmap_size);
-    memset(pmm_state.summary_bitmap, 0xff, summary_size);
-    memset(pmm_state.page_metadata, 0, page_metadata_bytes);
-
-    pmm_state.used_pages = pmm_state.total_pages;
-
-    if (pmm_state.total_pages > pmm_state.low_mem_threshold_idx) {
-        pmm_state.free_idx_hint = pmm_state.low_mem_threshold_idx;
-    } else {
-        pmm_state.free_idx_hint = 0;
-    }
-
-    pmm_state.align_idx_hint = pmm_state.free_idx_hint;
-
-    // Populate free memory from Limine map by freeing all usable pages.
-    size_t reclaimed_pages = 0;
-    for (size_t i = 0; i < memmap_count; ++i) {
-        struct limine_memmap_entry* entry = memmaps[i];
-
-        if (entry->type == LIMINE_MEMMAP_USABLE) {
-            uintptr_t base = entry->base;
-            size_t len     = entry->length;
-
-            if (base == 0) {
-                if (len >= PAGE_SIZE_SMALL) {
-                    base += PAGE_SIZE_SMALL;
-                    len -= PAGE_SIZE_SMALL;
-                } else {
-                    continue;
-                }
-            }
-
-            size_t pages = len / PAGE_SIZE_SMALL;
-            reclaimed_pages += pages;
-
-            if (len > 0) {
-                pmm_release_page((void*)base, pages);
-            }
-        }
-    }
-
-    // Restore `best_candidate` to original size
-    best_candidate->base -= total_metadata_bytes;
-    best_candidate->length += total_metadata_bytes;
-
-    // Mystery `\t` character appears
     pmm_stats_t stats;
     pmm_get_stats(&stats);
+    KLOG_INFO("PMM: Initialization complete. Free memory: %lu KB\n", stats.free_memory / 1024);
+}
 
-    KLOG_INFO(
-        "PMM initialized: total_pages=%zu (~%zu MiB), reclaimed=%zu pages, free=%zu MiB\n",
-        pmm_state.total_pages,
-        (pmm_state.total_pages * PAGE_SIZE_SMALL) >> 20,
-        reclaimed_pages,
-        stats.free_memory >> 20
-    );
+void pmm_get_stats(pmm_stats_t* stats) {
+    stats->total_memory = atomic_load_explicit(&stat_total_bytes, memory_order_relaxed);
+    stats->used_memory  = atomic_load_explicit(&stat_used_bytes, memory_order_relaxed);
+    stats->free_memory  = stats->total_memory - stats->used_memory;
 }

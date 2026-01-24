@@ -50,8 +50,8 @@ static inline void dlist_add_tail(struct dlist_head* new, struct dlist_head* hea
 static inline void dlist_del(struct dlist_head* entry) {
     __dlist_del(entry->prev, entry->next);
 
-    entry->next = NULL;
-    entry->prev = NULL;
+    entry->next = nullptr;
+    entry->prev = nullptr;
 }
 
 static inline void dlist_del_init(struct dlist_head* entry) {
