@@ -25,7 +25,6 @@ typedef struct pmm_stats {
 
 void* pmm_alloc(size_t count);
 void* pmm_alloc_aligned(size_t alignment, size_t count);
-void* pmm_alloc_dma(size_t alignment, size_t count);
 size_t pmm_alloc_bulk(size_t count, int order, void** pages);
 
 void pmm_free(void* ptr);

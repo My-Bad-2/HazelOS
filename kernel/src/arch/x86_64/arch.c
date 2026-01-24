@@ -26,11 +26,11 @@ void arch_write(const char* str) {
 
     if (term_is_initialized()) {
         term_write(str);
-    } else {
-        for (size_t i = 0; str[i] != '\0'; ++i) {
-            drivers_uart_writec(COM_PORT1, str[i]);
-        }
+    } /* else { */
+    for (size_t i = 0; str[i] != '\0'; ++i) {
+        drivers_uart_writec(COM_PORT1, str[i]);
     }
+    // }
 }
 
 void arch_writec(char ch) {

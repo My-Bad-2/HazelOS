@@ -1,6 +1,7 @@
 #ifndef KERNEL_MEMORY_VMA_H
 #define KERNEL_MEMORY_VMA_H 1
 
+#include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 #include "memory/pagemap.h"
 
@@ -9,39 +10,32 @@ extern "C" {
 #endif
 
 typedef struct vm_area {
+    struct rb_node rb_node;
+
+    size_t subtree_max_gap;  // Max gap in this subtree
+    size_t own_gap;          // Gap between prev->end and this->start
+
     uintptr_t start;
     uintptr_t end;  // Exclusive: [Start, end)
     size_t size;
-    size_t page_size;
+    size_t page_size;  // Actual page size used (4K, 2M or 1G)
 
     uint32_t flags;
     cache_type_t cache;
-
-    struct vm_area* rb_parent;
-    struct vm_area* rb_right;
-    struct vm_area* rb_left;
-    int rb_color;
-
-    struct vm_area* vm_next;  // Successor
-    struct vm_area* vm_prev;  // Predecessor
-
-    size_t gap;
-    size_t subtree_max_gap;
-
-    struct vm_area* next_free;
 } vm_area_t;
 
-typedef struct {
-    vm_area_t* root;
+typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
+    struct rb_root rb_root;
     pagemap_t* map;
 
-    interrupt_lock_t lock;
-    uintptr_t allocation_hint;
+    _Atomic(vm_area_t*) cached_vma;
+    rwlock_t lock;
 
     uintptr_t start_limit;
     uintptr_t end_limit;
+    uintptr_t allocation_hint;
 
-    vm_area_t* cached_vma;
+    vm_area_t* free_vma_pool;
 } vm_space_t;
 
 void vmm_init_global(void);
@@ -52,7 +46,7 @@ void* vmm_alloc(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t page_size
+    size_t alignment
 );
 
 void* vmm_alloc_at(
@@ -61,15 +55,11 @@ void* vmm_alloc_at(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t page_size
+    size_t alignment
 );
 
 void vmm_free(vm_space_t* space, void* ptr, size_t size);
-bool vmm_handle_fault(vm_space_t* space, uintptr_t addr, uint32_t error_code);
-vm_area_t* vmm_find_vma(vm_space_t* space, uintptr_t addr);
-
 extern vm_space_t kernel_space;
-extern uintptr_t shared_zero_page;
 
 #ifdef __cplusplus
 }
