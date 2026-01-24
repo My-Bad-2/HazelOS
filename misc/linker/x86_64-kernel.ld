@@ -35,13 +35,7 @@ SECTIONS
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .rodata : {
-        *(.rodata .rodata.*)
-        
-        /* Unit Test Section */
-        . = ALIGN(8);
-        __start_tests = .;
-        KEEP(*(.tests))
-        __stop_tests  = .;        
+        *(.rodata .rodata.*)   
     } :rodata
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));

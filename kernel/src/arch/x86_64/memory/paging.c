@@ -403,7 +403,7 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args) {
         if (!pte) {
             // If we just allocated this page, we must free it immediately
             if (phys_addr == 0) {
-                pmm_free((void*)curr_phys, page_size / PAGE_SIZE_SMALL);
+                pmm_free((void*)curr_phys);
             }
 
             if (errno == 0) {
@@ -450,7 +450,7 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args) {
                 *pte                  = 0;
 
                 if (phys_addr == 0) {
-                    pmm_free((void*)phys_to_free, page_size);
+                    pmm_free((void*)phys_to_free);
                 }
             }
 
@@ -524,9 +524,7 @@ static bool unmap_worker(
             table_modified    = true;
 
             if (free_phys) {
-                size_t size_to_free = (level == 1) ? PAGE_SIZE_SMALL : level_size;
-
-                pmm_free((void*)entry_phys, size_to_free / PAGE_SIZE_SMALL);
+                pmm_free((void*)entry_phys);
             }
         } else {
             // Internal nodes: Recurse deeper
@@ -542,7 +540,7 @@ static bool unmap_worker(
                 table->entries[i] = 0;
                 table_modified    = true;
 
-                pmm_free((void*)entry_phys, 1);
+                pmm_free((void*)entry_phys);
             }
         }
     }
@@ -1054,7 +1052,7 @@ static void pagemap_release_worker(uintptr_t table_phys, int level, int target_l
         }
 
         if (level > 1 && !(entry & X86_PAGE_FLAG_HUGE)) {
-            pmm_free((void*)child_phys, 1);
+            pmm_free((void*)child_phys);
         }
     }
 }
@@ -1067,7 +1065,7 @@ void pagemap_release(pagemap_t* map) {
 
     pagemap_release_worker(map->phys_root, paging_max_levels, 1);
 
-    pmm_free((void*)map->phys_root, 1);
+    pmm_free((void*)map->phys_root);
     map->phys_root = 0;
 }
 
@@ -1333,7 +1331,7 @@ bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr) {
     uint64_t new_pde = base_phys | expected_flags | X86_PAGE_FLAG_HUGE;
 
     *pde = new_pde;
-    pmm_free((void*)pt_phys, 1);
+    pmm_free((void*)pt_phys);
     invlpg((const void*)virt_addr);
     success = true;
 cleanup:

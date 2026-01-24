@@ -1010,7 +1010,7 @@ void* vmm_alloc(
                         };
 
                         pagemap_unmap(space->map, &uargs);
-                        pmm_free((void*)p, frames_per_page);
+                        pmm_free((void*)p);
                     }
                 }
 
@@ -1043,7 +1043,7 @@ void* vmm_alloc(
                     errno
                 );
 
-                pmm_free(phys, frames_per_page);
+                pmm_free(phys);
 
                 for (uintptr_t cleanup = addr; cleanup < curr; cleanup += page_size) {
                     uintptr_t p = pagemap_translate(space->map, cleanup);
@@ -1055,7 +1055,7 @@ void* vmm_alloc(
                         };
 
                         pagemap_unmap(space->map, &uargs);
-                        pmm_free((void*)p, frames_per_page);
+                        pmm_free((void*)p);
                     }
                 }
 
@@ -1223,7 +1223,7 @@ void* vmm_alloc_at(
                         };
 
                         pagemap_unmap(space->map, &uargs);
-                        pmm_free((void*)p, frames_per_page);
+                        pmm_free((void*)p);
                     }
                 }
 
@@ -1256,7 +1256,7 @@ void* vmm_alloc_at(
                     errno
                 );
 
-                pmm_free(phys, frames_per_page);
+                pmm_free(phys);
 
                 for (uintptr_t cleanup = addr; cleanup < curr; cleanup += page_size) {
                     uintptr_t p = pagemap_translate(space->map, cleanup);
@@ -1268,7 +1268,7 @@ void* vmm_alloc_at(
                         };
 
                         pagemap_unmap(space->map, &uargs);
-                        pmm_free((void*)p, frames_per_page);
+                        pmm_free((void*)p);
                     }
                 }
 
@@ -1369,7 +1369,7 @@ void vmm_free(vm_space_t* space, void* ptr, size_t size) {
             };
 
             pagemap_unmap(space->map, &u_args);
-            pmm_free((void*)phys, vma->page_size / PAGE_SIZE_SMALL);
+            pmm_free((void*)phys);
         } else {
             errno = EFAULT;
             KLOG_WARN("VMM: free translate failed virt=0x%lx\n", virt);

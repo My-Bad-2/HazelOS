@@ -254,7 +254,7 @@ void* pmm_alloc_aligned(size_t alignment, size_t count) {
     return nullptr;
 }
 
-void pmm_free(void* ptr, size_t) {
+void pmm_free(void* ptr) {
     if (!ptr) {
         return;
     }

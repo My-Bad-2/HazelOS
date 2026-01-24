@@ -57,7 +57,7 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t addr, uint32_t error_code) {
         };
 
         if (!pagemap_map(space->map, &margs)) {
-            pmm_free(phys, frames_needed);
+            pmm_free(phys);
             release_interrupt_lock(&space->lock);
             return false;
         }
