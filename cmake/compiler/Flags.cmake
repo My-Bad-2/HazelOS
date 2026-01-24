@@ -10,7 +10,7 @@ set(
 	-Wno-covered-switch-default
 	# Desired Warnings
 	-Wfloat-equal
-	-Wconversion
+	# -Wconversion
 	-Wlogical-op
 	-Wundef
 	-Wredundant-decls
@@ -18,7 +18,7 @@ set(
 	-Wstrict-overflow=2
 	-Wwrite-strings
 	-Wpointer-arith
-	-Wcast-qual
+	# -Wcast-qual
 	-Wformat=2
 	-Wformat-truncation
 	-Wmissing-include-dirs

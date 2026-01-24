@@ -1,3 +1,4 @@
+#include "libs/handles.h"
 #ifndef KERNEL_SCHED_PROCESS_H
 #define KERNEL_SCHED_PROCESS_H 1
 
@@ -6,6 +7,7 @@
 
 #include "cpu/exception.h"
 #include "drivers/timer.h"
+#include "libs/dlist.h"
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 #include "memory/pagemap.h"
@@ -35,6 +37,8 @@ typedef struct process {
 
     spinlock_t lock;
     struct rb_root thread_tree;
+
+    handle_table_t handle_table;
 
     bool is_kernel;
 } process_t;
@@ -90,6 +94,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
 
     struct rb_node rb_node;
     struct rb_node process_node;
+    struct dlist_head wait_node;
 
     void* kernel_stack;
     void* user_stack;

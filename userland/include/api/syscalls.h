@@ -1,0 +1,34 @@
+#ifndef USERLAND_SYSCALLS_H
+#define USERLAND_SYSCALLS_H 1
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "ipc.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define SYS_WRITE               1
+#define SYS_EXIT                60
+#define SYS_IPC_CREATE_CHANNEL  500
+#define SYS_IPC_CREATE_PORT_SET 501
+#define SYS_IPC_BIND            502
+#define SYS_IPC_NOTIFY          503
+#define SYS_IPC_WAIT            504
+#define SYS_HANDLE_CLOSE        505
+
+int64_t write(int fd, const char* str, size_t len);
+int ipc_create_channel(int32_t* handles, uintptr_t* out);
+int ipc_create_port_set(void);
+int ipc_bind(int32_t port_set, int32_t channel, uint64_t key);
+int ipc_notify(int32_t channel);
+int ipc_wait(int32_t port_set, ipc_event_t* event, int timeout_ms);
+int handle_close(int32_t handle);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

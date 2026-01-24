@@ -6,6 +6,7 @@
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
 #include "libs/log.h"
+#include "sched/ipc.h"
 #include "sched/syscalls.h"
 
 // AMD64 Technology 24593—Rev. 3.42—March 2024 Pg. no. 175 System Instructions
@@ -44,16 +45,32 @@ void syscall_init(void) {
     syscalls_init();
 }
 
+static void* custom_syscalls[] = {
+    sys_ipc_create_channel,
+    sys_ipc_create_port_set,
+    sys_ipc_bind,
+    sys_ipc_notify,
+    sys_ipc_wait,
+    sys_ipc_close,
+};
+
 // NOLINTNEXTLINE(misc-use-internal-linkage)
 uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
-    switch (regs->rax) {
-        case SYS_WRITE:
-            // RDI = FD; RSI = Buffer Pointer; RDX = count
-            regs->rax = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
-            break;
-        default:
-            KLOG_DEBUG("Syscall %lu called!\n", num);
-            break;
+    if (regs->rax < 450) {
+        switch (regs->rax) {
+            case SYS_WRITE:
+                // RDI = FD; RSI = Buffer Pointer; RDX = count
+                regs->rax = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
+                break;
+            default:
+                KLOG_DEBUG("Syscall %lu called!\n", num);
+                break;
+        }
+    } else if (regs->rax >= 500 && regs->rax <= 505) {
+        int idx = (int)regs->rax - 500;
+
+        uint64_t (*func)(...) = custom_syscalls[idx];
+        regs->rax = func(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
     }
 
     return 0;

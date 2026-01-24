@@ -1,8 +1,8 @@
 #include "sched/process.h"
 
 #include <errno.h>
-#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "boot/boot.h"
@@ -38,6 +38,8 @@ process_t* process_create(bool is_kernel) {
         handle_table_init(&pid_handle_tbl);
         handle_table_init(&tid_handle_tbl);
     }
+
+    handle_table_init(&proc->handle_table);
 
     proc->pid = handle_alloc(&pid_handle_tbl, proc);
 

@@ -8,7 +8,14 @@
 extern "C" {
 #endif
 
-#define SYS_WRITE 1
+#define SYS_WRITE               1
+#define SYS_EXIT                60
+#define SYS_IPC_CREATE_CHANNEL  500
+#define SYS_IPC_CREATE_PORT_SET 501
+#define SYS_IPC_BIND            502
+#define SYS_IPC_NOTIFY          503
+#define SYS_IPC_WAIT            504
+#define SYS_HANDLE_CLOSE        505
 
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
