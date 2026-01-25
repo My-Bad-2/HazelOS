@@ -9,11 +9,7 @@
 struct process;
 struct thread;
 
-typedef enum {
-    OBJ_CHANNEL,
-    OBJ_PORT_SET,
-    OBJ_TIMER,
-} ipc_obj_type_t;
+typedef enum { OBJ_CHANNEL, OBJ_PORT_SET, OBJ_TIMER, OBJ_SHARED_MEM } ipc_obj_type_t;
 
 typedef struct {
     ipc_obj_type_t type;
@@ -61,7 +57,14 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms);
 int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t count);
 int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_count);
 
-int sys_timer_create(int32_t port_handle, uint64_t user_key, int32_t* handle_out);
-int sys_timer_set(int32_t timer_handle, uint64_t deadline_ms, bool oneshot);
+int sys_ipc_timer_arm(
+    int32_t port_handle,
+    uint64_t user_key,
+    uint64_t deadline_ms,
+    int flags,
+    int32_t* handle_out
+);
+
+int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* vaddr_out);
 
 #endif

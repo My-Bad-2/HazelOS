@@ -9,6 +9,7 @@
 #include "drivers/timer.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
+#include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
@@ -17,6 +18,8 @@
 #include "sched/process.h"
 #include "sched/scheduler.h"
 #include "uapi/ipc.h"
+
+#define TIMER_FLAG_PERIODIC (1 << 0)
 
 struct ipc_handle_msg {
     struct dlist_head node;
@@ -31,6 +34,14 @@ struct ipc_timer {
     uint64_t user_key;
 
     ipc_kernel_event_t event_node;
+};
+
+struct ipc_shared_mem {
+    ipc_object_t header;
+
+    size_t size;
+    size_t page_count;
+    uintptr_t* pages;
 };
 
 static inline void thread_queue_init(struct thread_queue* tq) {
@@ -60,7 +71,7 @@ static thread_t* thread_queue_pop(struct thread_queue* tq) {
 static int32_t alloc_handle(process_t* proc, ipc_object_t* obj) {
     handle_t h = handle_alloc(&proc->handle_table, obj);
 
-    if (h == 0) {
+    if (h < 0) {
         return -EMFILE;
     }
 
@@ -142,6 +153,7 @@ int sys_ipc_create_port_set(int32_t* handle_out) {
     ipc_port_set_t* set = kmalloc(sizeof(ipc_port_set_t));
     memset(set, 0, sizeof(ipc_port_set_t));
 
+    set->header.type = OBJ_PORT_SET;
     create_spinlock(&set->header.lock);
 
     dlist_init(&set->event_queue);
@@ -369,9 +381,20 @@ static void ipc_timer_callback(void* ctx) {
     release_spinlock(&set->header.lock);
 }
 
-int sys_timer_create(int32_t port_handle, uint64_t user_key, int32_t* handle_out) {
-    process_t* me       = smp_current_core()->curr_thread->owner;
-    ipc_port_set_t* set = get_object(me, port_handle, OBJ_PORT_SET);
+int sys_ipc_timer_arm(
+    int32_t port_handle,
+    uint64_t user_key,
+    uint64_t deadline_ms,
+    int flags,
+    int32_t* handle_out
+) {
+    if (deadline_ms == 0) {
+        return -EINVAL;
+    }
+
+    process_t* me        = smp_current_core()->curr_thread->owner;
+    ipc_port_set_t* set  = get_object(me, port_handle, OBJ_PORT_SET);
+    timer_manager_t* mgr = &smp_current_core()->timer_manager;
 
     if (!set) {
         return -EBADF;
@@ -394,10 +417,25 @@ int sys_timer_create(int32_t port_handle, uint64_t user_key, int32_t* handle_out
     t->event_node.node.next   = nullptr;
 
     atomic_fetch_add(&set->header.ref_count, 1);
-    int32_t handle = alloc_handle(me, (ipc_object_t*)t);
 
-    if (handle == 0) {
+    size_t ticks = (deadline_ms * timer_get_hz()) / 1000;
+
+    if (ticks == 0) {
+        ticks = 1;
+    }
+
+    if (flags & TIMER_FLAG_PERIODIC) {
+        timer_arm_periodic(mgr, &t->hw_timer, ticks, ipc_timer_callback, t);
+    } else {
+        timer_arm_oneshot(mgr, &t->hw_timer, ticks, ipc_timer_callback, t);
+    }
+
+    int32_t handle = alloc_handle(me, &t->header);
+
+    if (handle < 0) {
+        timer_cancel(&t->hw_timer);
         kfree(t, sizeof(struct ipc_timer));
+        atomic_fetch_sub(&set->header.ref_count, 1);
         return handle;
     }
 
@@ -406,36 +444,80 @@ int sys_timer_create(int32_t port_handle, uint64_t user_key, int32_t* handle_out
     return 0;
 }
 
-int sys_timer_set(int32_t timer_handle, uint64_t deadline_ms, bool oneshot) {
-    process_t* me       = smp_current_core()->curr_thread->owner;
-    struct ipc_timer* t = get_object(me, timer_handle, OBJ_TIMER);
-
-    if (!t) {
-        return -EBADF;
+static void ipc_shm_free(process_t* proc, struct ipc_shared_mem* shm) {
+    if (!shm) {
+        return;
     }
 
-    acquire_spinlock(&t->header.lock);
-
-    timer_cancel(&t->hw_timer);
-
-    if (deadline_ms == 0) {
-        release_spinlock(&t->header.lock);
-        return 0;
+    for (size_t i = 0; i < shm->page_count; ++i) {
+        if (shm->pages[i]) {
+            vmm_free(&proc->space, (void*)shm->pages[i], PAGE_SIZE_SMALL);
+        }
     }
 
-    size_t ticks = (deadline_ms * timer_get_hz()) / 1000;
-    if (ticks == 0) {
-        ticks = 1;
+    kfree(shm->pages, sizeof(uintptr_t) * shm->page_count);
+    kfree(shm, sizeof(struct ipc_shared_mem));
+}
+
+int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* vaddr_out) {
+    if (size == 0) {
+        return -EINVAL;
     }
 
-    timer_manager_t* manager = &smp_current_core()->timer_manager;
+    process_t* me = smp_current_core()->curr_thread->owner;
 
-    if (oneshot) {
-        timer_arm_oneshot(manager, &t->hw_timer, ticks, ipc_timer_callback, t);
-    } else {
-        timer_arm_periodic(manager, &t->hw_timer, ticks, ipc_timer_callback, t);
+    size_t aligned_size = align_up(size, PAGE_SIZE_SMALL);
+    size_t page_count   = aligned_size / PAGE_SIZE_SMALL;
+
+    struct ipc_shared_mem* shm = kmalloc(sizeof(struct ipc_shared_mem));
+
+    if (!shm) {
+        return -ENOMEM;
     }
 
-    release_spinlock(&t->header.lock);
+    shm->header.type = OBJ_SHARED_MEM;
+    create_spinlock(&shm->header.lock);
+    shm->size       = aligned_size;
+    shm->page_count = page_count;
+    shm->pages      = kmalloc(sizeof(uintptr_t) * page_count);
+
+    if (!shm->pages) {
+        kfree(shm, sizeof(struct ipc_shared_mem));
+        return -ENOMEM;
+    }
+
+    acquire_spinlock(&shm->header.lock);
+    for (size_t i = 0; i < page_count; ++i) {
+        void* virt_addr = vmm_alloc(
+            &me->space,
+            PAGE_SIZE_SMALL,
+            (uint32_t)flags,
+            CACHE_WRITE_BACK,
+            PAGE_SIZE_SMALL
+        );
+
+        if (!virt_addr) {
+            shm->page_count = i;
+            ipc_shm_free(me, shm);
+            return -ENOMEM;
+        }
+
+        memset(virt_addr, 0, PAGE_SIZE_SMALL);
+        shm->pages[i] = (uintptr_t)virt_addr;
+    }
+    acquire_spinlock(&shm->header.lock);
+
+    int32_t handle = alloc_handle(me, &shm->header);
+
+    if (handle == 0) {
+        ipc_shm_free(me, shm);
+        return handle;
+    }
+
+    acquire_spinlock(&shm->header.lock);
+
+    *handle_out = handle;
+    *vaddr_out  = shm->pages[0];
+
     return 0;
 }

@@ -16,6 +16,10 @@ extern "C" {
 #define SYS_IPC_NOTIFY          503
 #define SYS_IPC_WAIT            504
 #define SYS_HANDLE_CLOSE        505
+#define SYS_IPC_SEND_HANDLES    506
+#define SYS_IPC_RECV_HANDLES    507
+#define SYS_TIMER_ARM           508
+#define SYS_IPC_SHM_ALLOC       509
 
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2

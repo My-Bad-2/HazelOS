@@ -52,6 +52,10 @@ static void* custom_syscalls[] = {
     sys_ipc_notify,
     sys_ipc_wait,
     sys_ipc_close,
+    sys_ipc_send_handles,
+    sys_ipc_recv_handles,
+    sys_ipc_timer_arm,
+    sys_ipc_shm_alloc,
 };
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
@@ -66,7 +70,7 @@ uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
                 KLOG_DEBUG("Syscall %lu called!\n", num);
                 break;
         }
-    } else if (regs->rax >= 500 && regs->rax <= 505) {
+    } else if (regs->rax >= 500) {
         int idx = (int)regs->rax - 500;
 
         uint64_t (*func)(...) = custom_syscalls[idx];
