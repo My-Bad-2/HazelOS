@@ -129,10 +129,9 @@ static void vma_free_struct(vm_space_t* space, vm_area_t* vma) {
 
 static bool find_gap_bottom_up(vm_space_t* space, size_t size, size_t align, uintptr_t* addr) {
     struct rb_node* node = space->rb_root.rb_node;
-    uintptr_t candidate;
 
     if (!node) {
-        candidate = align_up(space->start_limit, align);
+        uintptr_t candidate = align_up(space->start_limit, align);
 
         if (candidate + size <= space->end_limit) {
             *addr = candidate;
@@ -155,7 +154,7 @@ static bool find_gap_bottom_up(vm_space_t* space, size_t size, size_t align, uin
             uintptr_t prev_end =
                 prev ? rb_entry(prev, vm_area_t, rb_node)->end : space->start_limit;
 
-            candidate = align_up(prev_end, align);
+            uintptr_t candidate = align_up(prev_end, align);
 
             if (candidate + size <= vma->start) {
                 *addr = candidate;
@@ -191,13 +190,123 @@ check_tail:
     // Try tail
     struct rb_node* last = rb_last(&space->rb_root);
     if (last) {
-        vm_area_t* vma = rb_entry(last, vm_area_t, rb_node);
-        candidate      = align_up(vma->end, align);
+        vm_area_t* vma      = rb_entry(last, vm_area_t, rb_node);
+        uintptr_t candidate = align_up(vma->end, align);
 
         if (candidate + size <= space->end_limit) {
             *addr = candidate;
             return true;
         }
+    }
+
+    return false;
+}
+
+static vm_area_t* __vmm_find_vma_unsafe(vm_space_t* space, uintptr_t addr) {
+    struct rb_node* node = space->rb_root.rb_node;
+
+    while (node) {
+        vm_area_t* vma = rb_entry(node, vm_area_t, rb_node);
+
+        if (addr < vma->start) {
+            node = node->rb_left;
+        } else if (addr >= vma->end) {
+            node = node->rb_right;
+        } else {
+            return vma;
+        }
+    }
+
+    return nullptr;
+}
+
+static vm_area_t* vmm_find_vma(vm_space_t* space, uintptr_t addr) {
+    acquire_read(&space->lock);
+
+    vm_area_t* cached = atomic_load_explicit(&space->cached_vma, memory_order_acquire);
+    if (cached && addr >= cached->start && addr < cached->end) {
+        release_read(&space->lock);
+        return cached;
+    }
+
+    vm_area_t* vma = __vmm_find_vma_unsafe(space, addr);
+
+    if (vma) {
+        atomic_store_explicit(&space->cached_vma, vma, memory_order_relaxed);
+    }
+
+    release_read(&space->lock);
+    return vma;
+}
+
+static bool vmm_try_merge(
+    vm_space_t* space,
+    uintptr_t addr,
+    size_t size,
+    uint32_t flags,
+    cache_type_t cache,
+    size_t page_size
+) {
+    vm_area_t* prev =
+        (addr > space->start_limit) ? __vmm_find_vma_unsafe(space, addr - 1) : nullptr;
+    vm_area_t* next =
+        ((addr + size) < space->end_limit) ? __vmm_find_vma_unsafe(space, addr + size) : nullptr;
+
+    if (prev) {
+        if ((prev->end != addr || prev->flags != flags || prev->cache != cache ||
+             prev->page_size != page_size)) {
+            prev = nullptr;
+        }
+    }
+
+    if (next) {
+        if ((next->end != addr || next->flags != flags || next->cache != cache ||
+             next->page_size != page_size)) {
+            next = nullptr;
+        }
+    }
+
+    bool merged = false;
+
+    // Case A: Merge Left
+    if (prev) {
+        rb_erase_augmented(&prev->rb_node, &space->rb_root, vma_compute_subtree_gap);
+
+        prev->end += size;
+        prev->size += size;
+
+        // Case B: Coalesce (Prev + New + Next)
+        if (next) {
+            rb_erase_augmented(&next->rb_node, &space->rb_root, vma_compute_subtree_gap);
+
+            prev->end = next->end;
+            prev->size += next->size;
+
+            vm_area_t* cached = atomic_load_explicit(&space->cached_vma, memory_order_relaxed);
+            if (cached == next) {
+                atomic_store_explicit(&space->cached_vma, prev, memory_order_relaxed);
+            }
+
+            vma_free_struct(space, next);
+        }
+
+        __vmm_insert_vma(space, prev);
+
+        atomic_store_explicit(&space->cached_vma, prev, memory_order_relaxed);
+        return true;
+    }
+
+    // Case C: Merge Right
+    if (next) {
+        rb_erase_augmented(&next->rb_node, &space->rb_root, vma_compute_subtree_gap);
+
+        next->start = addr;
+        next->size += size;
+
+        __vmm_insert_vma(space, next);
+
+        atomic_store_explicit(&space->cached_vma, next, memory_order_relaxed);
+        return true;
     }
 
     return false;
@@ -229,12 +338,6 @@ static void __vmm_insert_vma(vm_space_t* space, vm_area_t* new_vma) {
     if (next) {
         vm_area_t* next_vma = rb_entry(next, vm_area_t, rb_node);
         next_vma->own_gap   = next_vma->start - new_vma->end;
-
-        struct rb_node* up = next;
-        while (up) {
-            vma_compute_subtree_gap(up);
-            up = up->rb_parent;
-        }
     }
 
     rb_insert_augmented(&new_vma->rb_node, &space->rb_root, vma_compute_subtree_gap);
@@ -373,7 +476,7 @@ static bool vmm_map_range(
     uint32_t flags,
     cache_type_t cache
 ) {
-    if (flags == VMM_FLAG_NONE) {
+    if (flags == VMM_FLAG_GUARD) {
         return true;
     }
 
@@ -493,6 +596,13 @@ void* vmm_alloc(
             return nullptr;
         }
     }
+
+    // if (!is_stack) {
+    //     if (vmm_try_merge(space, addr, size, flags, cache, final_ps)) {
+    //         release_write(&space->lock);
+    //         return (void*)addr;
+    //     }
+    // }
 
     if (is_stack) {
         vm_area_t* guard = vma_new(space);
@@ -620,6 +730,11 @@ void* vmm_alloc_at(
         return nullptr;
     }
 
+    // if (vmm_try_merge(space, addr, size, flags, cache, final_ps)) {
+    //     release_write(&space->lock);
+    //     return ptr;
+    // }
+
     vm_area_t* vma = vma_new(space);
 
     if (!vma) {
@@ -641,6 +756,126 @@ void* vmm_alloc_at(
     release_write(&space->lock);
     return ptr;
 }
+
+// void vmm_free(vm_space_t* space, void* ptr, size_t size) {
+//     uintptr_t start = (uintptr_t)ptr;
+//     uintptr_t end   = start + size;
+
+//     if (size == 0) {
+//         return;
+//     }
+
+//     acquire_write(&space->lock);
+
+//     while (start < end) {
+//         vm_area_t* vma = __vmm_find_vma_unsafe(space, start);
+
+//         if (!vma) {
+//             struct rb_node* node = space->rb_root.rb_node;
+//             vm_area_t* next      = nullptr;
+
+//             while (node) {
+//                 vm_area_t* curr = rb_entry(node, vm_area_t, rb_node);
+
+//                 if (curr->start > start) {
+//                     next = curr;
+//                     node = node->rb_left;
+//                 } else {
+//                     node = node->rb_right;
+//                 }
+//             }
+
+//             if (!next || next->start >= end) {
+//                 break;
+//             }
+
+//             start = next->start;
+//             vma   = next;
+//         }
+
+//         uintptr_t free_start = max(start, vma->start);
+//         uintptr_t free_end   = (end < vma->end) ? end : vma->end;
+//         size_t free_size     = free_end - free_start;
+
+//         if (free_size == 0) {
+//             start = vma->end;
+//             continue;
+//         }
+
+//         vmm_unmap_and_free(space, free_start, free_size, vma->page_size);
+
+//         // Case A: Full Removal
+//         if (free_start == vma->start && free_end == vma->end) {
+//             // If this is a stack, check if there is a guard below it
+//             if (vma->flags & VMM_FLAG_STACK) {
+//                 struct rb_node* prev = rb_prev(&vma->rb_node);
+
+//                 if (prev) {
+//                     vm_area_t* guard = rb_entry(prev, vm_area_t, rb_node);
+
+//                     if ((guard->flags == VMM_FLAG_GUARD) && (guard->end == vma->start)) {
+//                         rb_erase_augmented(
+//                             &guard->rb_node,
+//                             &space->rb_root,
+//                             vma_compute_subtree_gap
+//                         );
+//                         vma_free_struct(space, guard);
+//                     }
+//                 }
+//             }
+
+//             rb_erase_augmented(&vma->rb_node, &space->rb_root, vma_compute_subtree_gap);
+
+//             vm_area_t* expected = vma;
+//             atomic_compare_exchange_strong(&space->cached_vma, &expected, nullptr);
+
+//             vma_free_struct(space, vma);
+//         } else if (free_start == vma->start) {
+//             // Case B: Head Cut (Shrink from the left)
+//             rb_erase_augmented(&vma->rb_node, &space->rb_root, vma_compute_subtree_gap);
+
+//             vma->start = free_end;
+//             vma->size  = vma->end - vma->start;
+
+//             __vmm_insert_vma(space, vma);
+//         } else if (free_end == vma->end) {
+//             // Case C: Tail Cut (Shrink from the right)
+//             rb_erase_augmented(&vma->rb_node, &space->rb_root, vma_compute_subtree_gap);
+
+//             vma->start = free_start;
+//             vma->size  = vma->end - vma->start;
+
+//             __vmm_insert_vma(space, vma);
+//         } else {
+//             // Case D: Splitting (Hole punched in the middle)
+//             vm_area_t* right = vma_new(space);
+
+//             if (!right) {
+//                 PANIC("VMM: OOM during VMA split");
+//             }
+
+//             rb_erase_augmented(&vma->rb_node, &space->rb_root, vma_compute_subtree_gap);
+
+//             right->start     = free_end;
+//             right->end       = vma->end;
+//             right->size      = right->end - right->start;
+//             right->flags     = vma->flags;
+//             right->cache     = vma->cache;
+//             right->page_size = vma->page_size;
+
+//             vma->end  = free_start;
+//             vma->size = vma->end - vma->start;
+
+//             __vmm_insert_vma(space, vma);
+//             __vmm_insert_vma(space, right);
+//         }
+
+//         start = free_end;
+//     }
+
+//     atomic_store)explicit(&space->cached_vma, nullptr, memory_order_relaxed);
+//     release_write(&space->lock);
+// }
 
 void vmm_free(vm_space_t* space, void* ptr, size_t) {
     uintptr_t addr = (uintptr_t)ptr;

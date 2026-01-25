@@ -731,7 +731,10 @@ void rb_erase_augmented(struct rb_node* node, struct rb_root* root, rb_augment_f
 
 propagate:
     while (deepest && !RB_EMPTY_NODE(deepest)) {
-        augment(deepest);
+        if (!augment(deepest)) {
+            break;
+        }
+
         deepest = deepest->rb_parent;
     }
 }
