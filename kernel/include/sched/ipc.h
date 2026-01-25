@@ -1,3 +1,4 @@
+#include <stdint.h>
 #ifndef KERNEL_SCHED_IPC_H
 #define KERNEL_SCHED_IPC_H 1
 
@@ -8,7 +9,11 @@
 struct process;
 struct thread;
 
-typedef enum { OBJ_CHANNEL, OBJ_PORT_SET } ipc_obj_type_t;
+typedef enum {
+    OBJ_CHANNEL,
+    OBJ_PORT_SET,
+    OBJ_TIMER,
+} ipc_obj_type_t;
 
 typedef struct {
     ipc_obj_type_t type;
@@ -21,6 +26,7 @@ typedef struct ipc_channel {
 
     struct ipc_channel* peer;  // The other end of the pipe
     struct ipc_port_set* wait_set;
+    struct dlist_head handle_queue;
     uint64_t user_key;
 
     void* ring_buffer;
@@ -41,13 +47,21 @@ typedef struct ipc_port_set {
 typedef struct {
     struct dlist_head node;
     ipc_event_t data;
+    bool is_embedded;
 } ipc_kernel_event_t;
 
 int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out);
 int sys_ipc_create_port_set(int32_t* handle_out);
+void sys_ipc_close(int32_t handle);
+
 int sys_ipc_bind(int32_t port_handle, int32_t chan_handle, uint64_t key);
 int sys_ipc_notify(int32_t chan_handle);
 int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms);
-void sys_ipc_close(int32_t handle);
+
+int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t count);
+int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_count);
+
+int sys_timer_create(int32_t port_handle, uint64_t user_key, int32_t* handle_out);
+int sys_timer_set(int32_t timer_handle, uint64_t deadline_ms, bool oneshot);
 
 #endif

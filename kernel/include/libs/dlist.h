@@ -26,6 +26,10 @@ static inline void dlist_init(struct dlist_head* list) {
     list->prev = list;
 }
 
+static inline bool dlist_linked(struct dlist_head* node) {
+    return node->next != nullptr && node->prev != nullptr;
+}
+
 static inline void
 __dlist_add(struct dlist_head* new, struct dlist_head* prev, struct dlist_head* next) {
     next->prev = new;

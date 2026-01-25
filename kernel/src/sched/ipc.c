@@ -1,10 +1,12 @@
 #include "sched/ipc.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "cpu/smp.h"
+#include "drivers/timer.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
 #include "libs/spinlock.h"
@@ -15,6 +17,21 @@
 #include "sched/process.h"
 #include "sched/scheduler.h"
 #include "uapi/ipc.h"
+
+struct ipc_handle_msg {
+    struct dlist_head node;
+    ipc_object_t* object;
+};
+
+struct ipc_timer {
+    ipc_object_t header;
+
+    timer_event_t hw_timer;
+    ipc_port_set_t* port;
+    uint64_t user_key;
+
+    ipc_kernel_event_t event_node;
+};
 
 static inline void thread_queue_init(struct thread_queue* tq) {
     dlist_init(&tq->list);
@@ -160,6 +177,38 @@ int sys_ipc_bind(int32_t port_handle, int32_t chan_handle, uint64_t key) {
     return 0;
 }
 
+static void sys_ipc_notify_internal(ipc_channel_t* dest) {
+    ipc_port_set_t* set = dest->wait_set;
+
+    if (!set) {
+        return;
+    }
+
+    acquire_spinlock(&set->header.lock);
+
+    ipc_kernel_event_t* event = kmalloc(sizeof(ipc_kernel_event_t));
+
+    if (!event) {
+        release_spinlock(&set->header.lock);
+        return;
+    }
+
+    event->data.key    = dest->user_key;
+    event->data.events = IPC_EVENT_READABLE;
+    event->data.handle = 0;  // Unknown to sender
+    event->is_embedded = false;
+
+    dlist_add_tail(&event->node, &set->event_queue);
+
+    if (!thread_queue_empty(&set->waiters)) {
+        thread_t* t = thread_queue_pop(&set->waiters);
+
+        scheduler_unblock(t);
+    }
+
+    release_spinlock(&set->header.lock);
+}
+
 int sys_ipc_notify(int32_t chan_handle) {
     process_t* me      = smp_current_core()->curr_thread->owner;
     ipc_channel_t* src = get_object(me, chan_handle, OBJ_CHANNEL);
@@ -178,25 +227,8 @@ int sys_ipc_notify(int32_t chan_handle) {
     }
 
     acquire_spinlock(&dest->header.lock);
-    ipc_port_set_t* set = dest->wait_set;
 
-    if (set) {
-        acquire_spinlock(&set->header.lock);
-
-        ipc_kernel_event_t* event = kmalloc(sizeof(ipc_kernel_event_t));
-        event->data.key           = dest->user_key;
-        event->data.events        = IPC_EVENT_READABLE;
-        event->data.handle        = 0;  // Unknown to sender
-
-        dlist_add_tail(&event->node, &set->event_queue);
-
-        if (!dlist_empty(&set->waiters.list)) {
-            thread_t* t = thread_queue_pop(&set->waiters);
-            scheduler_unblock(t);
-        }
-
-        release_spinlock(&set->header.lock);
-    }
+    sys_ipc_notify_internal(dest);
 
     release_spinlock(&dest->header.lock);
     release_spinlock(&src->header.lock);
@@ -219,9 +251,11 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
             struct dlist_head* first  = set->event_queue.next;
             ipc_kernel_event_t* event = dlist_entry(first, ipc_kernel_event_t, node);
 
-            dlist_del(first);
             *out_event = event->data;
-            kfree(event, sizeof(ipc_kernel_event_t));
+            dlist_del(first);
+            if (!event->is_embedded) {
+                kfree(event, sizeof(ipc_kernel_event_t));
+            }
 
             release_spinlock(&set->header.lock);
             return 0;
@@ -230,7 +264,178 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
         thread_t* t = smp_current_core()->curr_thread;
         thread_queue_push(&set->waiters, t);
 
+        t->state = THREAD_BLOCKED;
+
         release_spinlock(&set->header.lock);
         scheduler_sleep((uint32_t)timeout_ms);
     }
+}
+
+int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t count) {
+    if (count > 8) {
+        return -EINVAL;
+    }
+
+    process_t* me          = smp_current_core()->curr_thread->owner;
+    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL);
+
+    if (!channel) {
+        return -EBADF;
+    }
+
+    ipc_object_t* objs[8];
+    for (size_t i = 0; i < count; ++i) {
+        objs[i] = handle_lookup(&me->handle_table, (handle_t)user_handles[i]);
+
+        if (!objs[i]) {
+            return -EBADF;
+        }
+    }
+
+    acquire_spinlock(&channel->header.lock);
+    ipc_channel_t* dest = channel->peer;
+
+    if (!dest) {
+        release_spinlock(&channel->header.lock);
+        return -EPIPE;
+    }
+
+    acquire_spinlock(&dest->header.lock);
+
+    for (size_t i = 0; i < count; ++i) {
+        struct ipc_handle_msg* msg = kmalloc(sizeof(struct ipc_handle_msg));
+        msg->object                = objs[i];
+
+        atomic_fetch_add(&msg->object->ref_count, 1);
+        dlist_add_tail(&msg->node, &dest->handle_queue);
+    }
+
+    sys_ipc_notify_internal(dest);
+
+    release_spinlock(&dest->header.lock);
+    release_spinlock(&channel->header.lock);
+
+    return 0;
+}
+
+int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_count) {
+    process_t* me          = smp_current_core()->curr_thread->owner;
+    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL);
+
+    if (!channel) {
+        return -EBADF;
+    }
+
+    acquire_spinlock(&channel->header.lock);
+
+    size_t read_count = 0;
+
+    while (read_count < max_count && !dlist_empty(&channel->handle_queue)) {
+        struct dlist_head* node    = channel->handle_queue.next;
+        struct ipc_handle_msg* msg = dlist_entry(node, struct ipc_handle_msg, node);
+        dlist_del(node);
+
+        int32_t new_h = alloc_handle(me, msg->object);
+
+        atomic_fetch_sub(&msg->object->ref_count, 1);
+
+        out_handles[read_count++] = new_h;
+        kfree(msg, sizeof(struct ipc_handle_msg));
+    }
+
+    release_spinlock(&channel->header.lock);
+    return (int)read_count;
+}
+
+static void ipc_timer_callback(void* ctx) {
+    struct ipc_timer* t = (struct ipc_timer*)ctx;
+    ipc_port_set_t* set = t->port;
+
+    if (!set) {
+        return;
+    }
+
+    acquire_spinlock(&set->header.lock);
+
+    if (t->event_node.node.next == nullptr) {
+        dlist_add_tail(&t->event_node.node, &set->event_queue);
+
+        if (!dlist_empty(&set->waiters.list)) {
+            thread_t* thread = thread_queue_pop(&set->waiters);
+            scheduler_unblock(thread);
+        }
+    }
+
+    release_spinlock(&set->header.lock);
+}
+
+int sys_timer_create(int32_t port_handle, uint64_t user_key, int32_t* handle_out) {
+    process_t* me       = smp_current_core()->curr_thread->owner;
+    ipc_port_set_t* set = get_object(me, port_handle, OBJ_PORT_SET);
+
+    if (!set) {
+        return -EBADF;
+    }
+
+    struct ipc_timer* t = kmalloc(sizeof(struct ipc_timer));
+
+    if (!t) {
+        return -ENOMEM;
+    }
+
+    memset(t, 0, sizeof(struct ipc_timer));
+
+    t->header.type = OBJ_TIMER;
+    create_spinlock(&t->header.lock);
+
+    t->port                   = set;
+    t->user_key               = user_key;
+    t->event_node.is_embedded = true;
+    t->event_node.node.next   = nullptr;
+
+    atomic_fetch_add(&set->header.ref_count, 1);
+    int32_t handle = alloc_handle(me, (ipc_object_t*)t);
+
+    if (handle == 0) {
+        kfree(t, sizeof(struct ipc_timer));
+        return handle;
+    }
+
+    *handle_out = handle;
+
+    return 0;
+}
+
+int sys_timer_set(int32_t timer_handle, uint64_t deadline_ms, bool oneshot) {
+    process_t* me       = smp_current_core()->curr_thread->owner;
+    struct ipc_timer* t = get_object(me, timer_handle, OBJ_TIMER);
+
+    if (!t) {
+        return -EBADF;
+    }
+
+    acquire_spinlock(&t->header.lock);
+
+    timer_cancel(&t->hw_timer);
+
+    if (deadline_ms == 0) {
+        release_spinlock(&t->header.lock);
+        return 0;
+    }
+
+    size_t ticks = (deadline_ms * timer_get_hz()) / 1000;
+    if (ticks == 0) {
+        ticks = 1;
+    }
+
+    timer_manager_t* manager = &smp_current_core()->timer_manager;
+
+    if (oneshot) {
+        timer_arm_oneshot(manager, &t->hw_timer, ticks, ipc_timer_callback, t);
+    } else {
+        timer_arm_periodic(manager, &t->hw_timer, ticks, ipc_timer_callback, t);
+    }
+
+    release_spinlock(&t->header.lock);
+    return 0;
 }
