@@ -40,6 +40,13 @@
 #define ctz(x)
 #endif
 
+#if __has_builtin(__builtin_ffs)
+#define ffs(x)                                                                                                                                                   \
+    _Generic((x), unsigned long: __builtin_ffsl, unsigned long long: __builtin_ffsll, long: __builtin_ffsl, long long: __builtin_ffsll, default: __builtin_ffs)( \
+        x                                                                                                                                                        \
+    )
+#endif
+
 #if __has_builtin(__builtin_popcount)
 #define popcount(x)                                                                                                                                                                       \
     _Generic((x), unsigned long: __builtin_popcountl, unsigned long long: __builtin_popcountll, long: __builtin_popcountl, long long: __builtin_popcountll, default: __builtin_popcount)( \

@@ -16,7 +16,7 @@
 
 #define PAGE_SIZE     PAGE_SIZE_SMALL
 #define PMM_MAX_ORDER 11  // 2^11 pages = 8MB max contiguous block
-#define PAGE_SHIFT    12
+#define PAGE_SHIFT    PAGE_SHIFT_SMALL
 
 #define MAX_ZONES 3
 

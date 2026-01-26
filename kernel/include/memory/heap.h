@@ -1,40 +1,24 @@
 #ifndef KERNEL_MEMORY_HEAP_H
 #define KERNEL_MEMORY_HEAP_H 1
 
-#include "libs/dlist.h"
-#include "libs/spinlock.h"
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#define SLAB_HWCACHE_ALIGN 0x1
+#define SLAB_PANIC         0x2
 
+typedef struct kmem_cache kmem_cache_t;
 
-struct vma_slab {
-    struct dlist_head list;
-    void* vaddr;
-    uint32_t in_use;
-    uint32_t free_idx;
-    void* freelist;
-};
-
-struct vma_kmem_cache {
-    char name[32];
-    uint32_t obj_size;
-    uint32_t slab_size;
-    uint32_t objs_per_slab;
-
-    spinlock_t lock;
-    struct dlist_head partial;
-    struct dlist_head full;
-};
-
-struct vma_huge_cache {
-    uint32_t obj_size;
-    uint32_t slab_size;
-    uint32_t objs_per_slab;
-};
+kmem_cache_t*
+kmem_cache_create(const char* name, size_t size, size_t align, uint32_t flags, void (*ctor)(void*));
+void* kmem_cache_alloc(kmem_cache_t* cache, int flags);
+void kmem_cache_free(kmem_cache_t* cache, void* ptr);
+void kmem_cache_destroy(kmem_cache_t* cache);
+int kmem_cache_shrink(kmem_cache_t* cache);
 
 void* kmalloc(size_t size);
 void kfree(void* ptr, size_t size);

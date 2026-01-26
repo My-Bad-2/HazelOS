@@ -1,18 +1,37 @@
+#include "libs/xarray.h"
+
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "compiler.h"
+#include "libs/log.h"
+#include "libs/math.h"
 #include "libs/spinlock.h"
-#include "libs/xarray.h"
+#include "memory/heap.h"
+
+#if 0
+static kmem_cache_t* xa_node_cache;
 
 static void xa_node_reset(xa_node_t* node, uint8_t shift) {
     node->shift  = shift;
     node->count  = 0;
+    node->bitmap = 0;
+    node->offset = 0;
 
     memset((void*)node->slots, 0, sizeof(node->slots));
 }
 
 void xa_init(xarray_t* xa) {
+    if (!xa_node_cache) {
+        kmem_cache_create("xarray_node", sizeof(xa_node_t), 0, SLAB_HWCACHE_ALIGN, nullptr);
+    }
+
+    if (!xa_node_cache) {
+        PANIC("XARRAY: Cannot create cache for xa_node");
+        return;
+    }
+
     xa->root       = nullptr;
     xa->hint.node  = nullptr;
     xa->hint.index = 0;
@@ -20,15 +39,41 @@ void xa_init(xarray_t* xa) {
     create_rwlock(&xa->lock);
 }
 
+static void xa_destroy_recursive(xa_node_t* node) {
+    if (!node) {
+        return;
+    }
+
+    if (node->shift > 0) {
+        for (int i = 0; i < XA_SLOTS; ++i) {
+            if (node->slots[i]) {
+                xa_destroy_recursive(node->slots[i]);
+            }
+        }
+    }
+
+    kmem_cache_free(xa_node_cache, node);
+}
+
+void xa_destory(xarray_t* xa) {
+    acquire_write(&xa->lock);
+
+    xa_destroy_recursive(xa->root);
+    xa->root      = nullptr;
+    xa->hint.node = nullptr;
+
+    release_write(&xa->lock);
+}
+
 xa_result_t
-xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t* entry, xa_node_t** restrict spare) {
+xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t entry, xa_node_t** restrict spare) {
     if (unlikely(!xa || !spare)) {
         return XA_ERR_PARAM;
     }
 
     acquire_write(&xa->lock);
 
-    uint64_t max_idx = -1ul;
+    uint64_t max_idx = UINT64_MAX;
     if (xa->root) {
         uint32_t total_bits = xa->root->shift + XA_BITS;
 
@@ -37,8 +82,8 @@ xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t* entry, xa_node_t** r
         }
     }
 
-    while (xa->root == nullptr || index > max_idx) {
-        if (*spare == nullptr) {
+    while (!xa->root || index > max_idx) {
+        if (!(*spare)) {
             release_write(&xa->lock);
             return XA_NEED_NODE;
         }
@@ -58,6 +103,8 @@ xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t* entry, xa_node_t** r
         if (xa->root) {
             new_root->slots[0] = xa->root;
             new_root->count    = 1;
+            new_root->bitmap |= 1ul;
+            xa->root->offset = 0;
         }
 
         xa->root = new_root;
@@ -71,17 +118,22 @@ xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t* entry, xa_node_t** r
     if (xa->hint.node && xa->hint.node->shift == 0) {
         if ((index & ~XA_MASK) == xa->hint.index) {
             node = xa->hint.node;
+
             goto insert_entry;
         }
     }
 
-    uint64_t shift = node->shift;
-
-    while (shift > 0) {
-        uint64_t offset = (index >> shift) & XA_MASK;
+    while (node->shift > 0) {
+        uint64_t offset = (index >> node->shift) & XA_MASK;
+        prefetch(node->slots[offset]);
 
         if (node->slots[offset] == nullptr) {
-            if (*spare == nullptr) {
+            if (!entry) {
+                release_write(&xa->lock);
+                return XA_OK;
+            }
+
+            if (!(*spare)) {
                 release_write(&xa->lock);
                 return XA_NEED_NODE;
             }
@@ -89,13 +141,16 @@ xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t* entry, xa_node_t** r
             xa_node_t* child = *spare;
             *spare           = nullptr;
 
-            xa_node_reset(child, shift - XA_BITS);
+            xa_node_reset(child, node->shift - XA_BITS);
+            child->offset = offset;
+
             node->slots[offset] = child;
             node->count++;
+
+            __set_bit(offset, &node->bitmap);
         }
 
         node = node->slots[offset];
-        shift -= XA_BITS;
     }
 
     xa->hint.node  = node;
@@ -104,13 +159,21 @@ xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t* entry, xa_node_t** r
 insert_entry:
     uint64_t offset = index & XA_MASK;
 
-    if (node->slots[offset] == nullptr && entry != nullptr) {
-        node->count++;
-    } else if (node->slots[offset] != nullptr && entry == nullptr) {
-        node->count--;
-    }
+    if (!entry) {
+        if (!node->slots[offset]) {
+            node->count++;
+            __set_bit(offset, &node->bitmap);
+        }
 
-    node->slots[offset] = (xa_node_t*)entry;
+        node->slots[offset] = (xa_node_t*)entry;
+    } else {
+        if (node->slots[offset]) {
+            node->slots[offset] = nullptr;
+            node->count--;
+
+            __clear_bit(offset, &node->bitmap);
+        }
+    }
 
     release_write(&xa->lock);
     return XA_OK;
@@ -121,98 +184,103 @@ xa_entry_t xa_load(xarray_t* restrict xa, uint64_t index) {
         return nullptr;
     }
 
-    if (xa->hint.node && (index & ~XA_MASK) == xa->hint.index) {
-        return (xa_entry_t)xa->hint.node->slots[index & XA_MASK];
-    }
-
     acquire_read(&xa->lock);
 
-    xa_node_t* node = xa->root;
-
+    xa_node_t* node     = xa->root;
     uint32_t total_bits = node->shift + XA_BITS;
 
-    if (total_bits < sizeof(uint64_t) * 8) {
-        if (index >= (1ul << total_bits)) {
-            release_read(&xa->lock);
-            return nullptr;
-        }
-    }
-
-    while (node && node->shift > 0) {
-        uint64_t offset = (index >> node->shift) & XA_MASK;
-        node            = node->slots[offset];
-    }
-
-    if (!node) {
+    if (total_bits < sizeof(uint64_t) * 8 && index >= (1ul << total_bits)) {
         release_read(&xa->lock);
         return nullptr;
     }
 
-    xa->hint.node  = node;
-    xa->hint.index = index & ~XA_MASK;
+    while (node && node->shift > 0) {
+        uint64_t offset = (index >> node->shift) & XA_MASK;
 
-    xa_entry_t ret = (xa_entry_t)node->slots[index & XA_MASK];
+        if (!__test_bit(offset, &node->bitmap)) {
+            release_read(&xa->lock);
+            return nullptr;
+        }
 
-    release_read(&xa->lock);
-    return ret;
-}
-
-xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index, xa_node_t** freed_node) {
-    if (freed_node) {
-        *freed_node = nullptr;
+        node = node->slots[offset];
     }
 
+    xa_entry_t val = nullptr;
+    if (node && __test_bit(index & XA_MASK, &node->bitmap)) {
+        val = (xa_entry_t)node->slots[index & XA_MASK];
+    }
+
+    release_read(&xa->lock);
+    return val;
+}
+
+xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index) {
     if (!xa->root) {
         return nullptr;
     }
 
     acquire_write(&xa->lock);
 
-    xa_node_t* path[16];
+    xa_node_t* path[XA_MAX_DEPTH];
     int path_idx    = 0;
     xa_node_t* node = xa->root;
 
-    while (node && node->shift > 0) {
+    while (node->shift > 0) {
         path[path_idx++] = node;
         uint64_t offset  = (index >> node->shift) & XA_MASK;
-        node             = node->slots[offset];
+
+        if (!__test_bit(offset, &node->bitmap)) {
+            release_write(&xa->lock);
+            return nullptr;
+        }
+
+        node = node->slots[offset];
     }
 
-    if (!node) {
+    uint64_t offset = index & XA_MASK;
+    if (!__test_bit(offset, &node->bitmap)) {
         release_write(&xa->lock);
         return nullptr;
     }
 
-    uint64_t offset = index & XA_MASK;
-    xa_entry_t val  = (xa_entry_t)node->slots[offset];
+    xa_entry_t val      = (xa_entry_t)node->slots[offset];
+    node->slots[offset] = nullptr;
+    node->count--;
+    __clear_bit(offset, &node->bitmap);
 
-    if (val) {
-        node->slots[offset] = nullptr;
-        node->count--;
+    if (xa->hint.node == node) {
+        xa->hint.node = nullptr;
+    }
 
-        if (xa->hint.node == node) {
-            xa->hint.node = nullptr;
+    while (node->count == 0) {
+        if (node == xa->root) {
+            kmem_cache_free(xa_node_cache, node);
+            xa->root = nullptr;
+            break;
         }
 
-        if (node->count == 0) {
-            if (path_idx == 0) {
-                if (freed_node) {
-                    *freed_node = xa->root;
-                }
+        kmem_cache_free(xa_node_cache, node);
 
-                xa->root = nullptr;
-            } else {
-                xa_node_t* parent = path[path_idx - 1];
-                uint64_t p_offset = (index >> parent->shift) & XA_MASK;
+        if (path_idx > 0) {
+            path_idx--;
+            node = path[path_idx];
 
-                parent->slots[p_offset] = nullptr;
-                parent->count--;
+            uint64_t p_offset = (index >> node->shift) & XA_MASK;
 
-                if (freed_node) {
-                    *freed_node = node;
-                }
-            }
+            node->slots[p_offset] = nullptr;
+            node->count--;
+
+            __clear_bit(p_offset, &node->bitmap);
+        } else {
+            break;
         }
+    }
+
+    if (xa->root && xa->root->shift > 0 && xa->root->count == 1 &&
+        __test_bit(0, &xa->root->bitmap)) {
+        xa_node_t* old_root = xa->root;
+        xa->root            = old_root->slots[0];
+        kmem_cache_free(xa_node_cache, old_root);
     }
 
     release_write(&xa->lock);
@@ -224,111 +292,106 @@ xa_entry_t xa_find_after(xarray_t* restrict xa, uint64_t* restrict index) {
         return nullptr;
     }
 
-    if (unlikely(!index)) {
-        return nullptr;
-    }
-
     acquire_read(&xa->lock);
 
-    xa_cursor_t cursor;
-
-    xa_cursor_reset(&cursor, xa, *index);
-
-    xa_entry_t entry = xa_cursor_next(&cursor);
-
-    if (entry) {
-        *index = cursor.index;
-    }
-
-    release_read(&xa->lock);
-    return entry;
-}
-
-void xa_cursor_reset(xa_cursor_t* cursor, const xarray_t* xa, uint64_t start_idx) {
-    cursor->xa    = xa;
-    cursor->index = start_idx;
-    cursor->depth = -1;
-
-    if (unlikely(!xa || !xa->root)) {
-        return;
-    }
-
+    uint64_t curr   = *index;
     xa_node_t* node = xa->root;
+    uint8_t shift   = node->shift;
 
-    uint32_t total_bits = node->shift + XA_BITS;
-
-    if (total_bits < sizeof(uint64_t) * 8) {
-        if (start_idx >= (1ul << total_bits)) {
-            return;
-        }
-    }
-
-    cursor->depth          = 0;
-    cursor->path[0].node   = node;
-    cursor->path[0].offset = 0;
-
-    int d = 0;
-    while (node->shift > 0) {
-        uint64_t shift  = node->shift;
-        uint64_t offset = (start_idx >> shift) & XA_MASK;
-
-        cursor->path[d].node   = node;
-        cursor->path[d].offset = (uint8_t)offset;
-
-        if (node->slots[offset] == nullptr) {
-            break;
-        }
-
-        node = node->slots[offset];
-        d++;
-    }
-
-    cursor->path[d].node   = node;
-    cursor->path[d].offset = (uint8_t)(start_idx & XA_MASK);
-    cursor->depth          = d;
-}
-
-xa_entry_t xa_cursor_next(xa_cursor_t* cursor) {
-    if (cursor->depth < 0) {
+    if ((shift + XA_BITS) < 64 && curr >= (1ul << (shift + XA_BITS))) {
+        release_read(&xa->lock);
         return nullptr;
     }
 
-    while (cursor->depth >= 0) {
-        int d           = cursor->depth;
-        xa_node_t* node = cursor->path[d].node;
-        uint8_t offset  = cursor->path[d].offset;
+restart:
+    while (shift > 0) {
+        uint64_t offset = (curr >> shift) & XA_MASK;
 
-        if (offset >= XA_SLOTS) {
-            cursor->depth--;
+        uint64_t mask   = (~0ul) << offset;
+        uint64_t active = node->bitmap & mask;
 
-            if (cursor->depth >= 0) {
-                cursor->path[cursor->depth].offset++;
+        if (!active) {
+            uint64_t step      = 1ul << shift;
+            uint64_t next_base = (curr & ~((step << XA_BITS) - 1)) + (step << XA_BITS);
+
+            if (next_base <= curr) {
+                release_read(&xa->lock);
+                return nullptr;
             }
 
-            continue;
+            curr = next_base;
+
+            node  = xa->root;
+            shift = node->shift;
+            goto restart;
         }
 
-        xa_node_t* child = node->slots[offset];
+        uint64_t next_offset = (uint64_t)ffs((long)active);
 
-        if (!child) {
-            cursor->path[d].offset++;
-            continue;
+        if (next_offset > offset) {
+            uint64_t step = 1ul << shift;
+            curr          = (curr & ~(step - 1)) & ~(XA_MASK << shift);
+            curr |= (next_offset << shift);
         }
 
-        if (node->shift == 0) {
-            uint64_t found_idx = 0;
-            cursor->path[d].offset++;
-
-            uint64_t mask_for_level = (1ul << (node->shift + XA_BITS)) - 1;
-            cursor->index = (cursor->index & ~mask_for_level) | ((uint64_t)offset << node->shift);
-
-            return (xa_entry_t)child;
-        } else {
-            cursor->depth++;
-            cursor->path[cursor->depth].node   = child;
-            cursor->path[cursor->depth].offset = 0;
-        }
+        node = node->slots[next_offset];
+        shift -= XA_BITS;
     }
 
-    return nullptr;
+    uint64_t offset = curr & XA_MASK;
+    uint64_t mask   = (~0UL) << offset;
+    uint64_t active = node->bitmap & mask;
+
+    if (!active) {
+        curr  = (curr & ~XA_MASK) + XA_SLOTS;
+        node  = xa->root;
+        shift = node->shift;
+        goto restart;
+    }
+
+    uint64_t found_offset = (uint64_t)ffs((long)active);
+    *index                = (curr & ~XA_MASK) | found_offset;
+    xa_entry_t val        = (xa_entry_t)node->slots[found_offset];
+
+    release_read(&xa->lock);
+    return val;
 }
+
+int xa_store_range(xarray_t* xa, uint64_t start, uint64_t end, xa_entry_t entry) {
+    uint64_t curr    = start;
+    xa_node_t* spare = nullptr;
+
+    while (curr <= end) {
+        if (!spare) {
+            spare = kmem_cache_alloc(xa_node_cache, 0);
+
+            if (!spare) {
+                return -ENOMEM;
+            }
+        }
+
+        xa_result_t res = xa_store(xa, curr, entry, &spare);
+
+        if (res == XA_NEED_NODE) {
+            continue;
+        }
+
+        if (res != XA_OK) {
+            if (spare) {
+                kmem_cache_free(xa_node_cache, spare);
+            }
+
+            return -EINVAL;
+        }
+
+        curr++;
+    }
+
+    if (spare) {
+        kmem_cache_free(xa_node_cache, spare);
+    }
+
+    return 0;
+}
+
+#endif

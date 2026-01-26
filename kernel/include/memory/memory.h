@@ -9,6 +9,10 @@
 #define PAGE_SIZE_MEDIUM 0x200000ul    // 2MB
 #define PAGE_SIZE_LARGE  0x40000000ul  // 1GB
 
+#define PAGE_SHIFT_SMALL  12
+#define PAGE_SHIFT_MEDIUM 21
+#define PAGE_SHIFT_LARGE  30
+
 #ifdef __cplusplus
 extern "C" {
 #endif

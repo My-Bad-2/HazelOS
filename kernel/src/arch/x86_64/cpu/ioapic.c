@@ -69,8 +69,7 @@ static void map_ioapic_mmio(ioapic_t* ioapic, size_t index) {
     }
 
     if (!virt) {
-        virt =
-            vmalloc(&kernel_space, PAGE_SIZE_SMALL, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
+        virt = vmalloc(&kernel_space, PAGE_SIZE_SMALL, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
 
         if (!virt) {
             errno = ENOMEM;

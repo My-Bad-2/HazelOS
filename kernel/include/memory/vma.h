@@ -41,13 +41,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
 void vmm_init_global(void);
 void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_t end);
 
-void* vmalloc(
-    vm_space_t* space,
-    size_t size,
-    uint32_t flags,
-    cache_type_t cache,
-    size_t alignment
-);
+void* vmalloc(vm_space_t* space, size_t size, uint32_t flags, cache_type_t cache, size_t alignment);
 
 void* vmalloc_addr(
     vm_space_t* space,
