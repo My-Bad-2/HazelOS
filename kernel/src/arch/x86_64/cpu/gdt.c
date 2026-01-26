@@ -126,7 +126,7 @@ void tss_init(tss_t* tss, uintptr_t rsp) {
     memset(tss, 0, sizeof(tss_t));
 
     if (!nmi_stack && !double_fault_stack) {
-        nmi_stack = vmm_alloc(
+        nmi_stack = vmalloc(
             &kernel_space,
             PAGE_SIZE_SMALL,
             VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
@@ -134,7 +134,7 @@ void tss_init(tss_t* tss, uintptr_t rsp) {
             PAGE_SIZE_SMALL
         );
 
-        double_fault_stack = vmm_alloc(
+        double_fault_stack = vmalloc(
             &kernel_space,
             PAGE_SIZE_SMALL,
             VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
@@ -142,7 +142,7 @@ void tss_init(tss_t* tss, uintptr_t rsp) {
             PAGE_SIZE_SMALL
         );
 
-        machine_check_stack = vmm_alloc(
+        machine_check_stack = vmalloc(
             &kernel_space,
             PAGE_SIZE_SMALL,
             VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
@@ -150,7 +150,7 @@ void tss_init(tss_t* tss, uintptr_t rsp) {
             PAGE_SIZE_SMALL
         );
 
-        debug_exception_stack = vmm_alloc(
+        debug_exception_stack = vmalloc(
             &kernel_space,
             PAGE_SIZE_SMALL,
             VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,

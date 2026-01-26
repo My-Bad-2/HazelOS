@@ -518,7 +518,7 @@ static bool vmm_map_range(
     return true;
 }
 
-void* vmm_alloc(
+void* vmalloc(
     vm_space_t* space,
     size_t size,
     uint32_t flags,
@@ -667,7 +667,7 @@ void* vmm_alloc(
     }
 }
 
-void* vmm_alloc_at(
+void* vmalloc_addr(
     vm_space_t* space,
     void* ptr,
     size_t size,
@@ -877,7 +877,7 @@ void* vmm_alloc_at(
 //     release_write(&space->lock);
 // }
 
-void vmm_free(vm_space_t* space, void* ptr, size_t) {
+void vmfree(vm_space_t* space, void* ptr, size_t) {
     uintptr_t addr = (uintptr_t)ptr;
     acquire_write(&space->lock);
 

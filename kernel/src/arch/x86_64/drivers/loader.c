@@ -64,7 +64,7 @@ static bool load_segment(process_t* proc, Elf64_Phdr* phdr, void* base) {
     }
 
     for (uintptr_t curr_v = page_start; curr_v < page_end; curr_v += PAGE_SIZE_SMALL) {
-        vmm_alloc_at(
+        vmalloc_addr(
             &proc->space,
             (void*)curr_v,
             PAGE_SIZE_SMALL,

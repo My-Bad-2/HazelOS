@@ -326,7 +326,7 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
             break;
     }
 
-    child->kernel_stack = vmm_alloc(
+    child->kernel_stack = vmalloc(
         &kernel_space,
         KSTACK_SIZE,
         VMM_FLAG_STACK | VMM_FLAG_WRITE | VMM_FLAG_READ,

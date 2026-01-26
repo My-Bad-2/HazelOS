@@ -52,7 +52,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
 
     process_t* proc = t->owner;
 
-    t->kernel_stack = vmm_alloc(
+    t->kernel_stack = vmalloc(
         &kernel_space,
         KSTACK_SIZE,
         VMM_FLAG_STACK | VMM_FLAG_WRITE | VMM_FLAG_READ,
@@ -70,7 +70,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     t->fpu_buffer   = kmalloc(fpu_size);
 
     if (!t->fpu_buffer) {
-        vmm_free(&kernel_space, t->kernel_stack, KSTACK_SIZE);
+        vmfree(&kernel_space, t->kernel_stack, KSTACK_SIZE);
         errno = ENOMEM;
         PANIC("THREAD: fpu buffer allocation failed tid=%u pid=%u\n", t->tid, proc->pid);
         return false;
@@ -82,7 +82,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         errno = ENODEV;
         KLOG_ERROR("THREAD: missing SIMD clean state tid=%u pid=%u\n", t->tid, proc->pid);
         kfree(t->fpu_buffer, fpu_size);
-        vmm_free(&kernel_space, t->kernel_stack, KSTACK_SIZE);
+        vmfree(&kernel_space, t->kernel_stack, KSTACK_SIZE);
         return false;
     }
 
@@ -110,10 +110,10 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         uint32_t flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER | VMM_FLAG_STACK;
 
         size_t size       = USTACK_SIZE;
-        void* ustack_base = vmm_alloc(&proc->space, size, flags, CACHE_WRITE_BACK, PAGE_SIZE_SMALL);
+        void* ustack_base = vmalloc(&proc->space, size, flags, CACHE_WRITE_BACK, PAGE_SIZE_SMALL);
 
         if (!ustack_base) {
-            vmm_free(&kernel_space, t->kernel_stack, KSTACK_SIZE);
+            vmfree(&kernel_space, t->kernel_stack, KSTACK_SIZE);
             errno = ENOMEM;
             KLOG_WARN("THREAD: user stack allocation failed tid=%u pid=%u\n", t->tid, proc->pid);
             return false;
@@ -147,7 +147,7 @@ void arch_thread_destroy(thread_t* t) {
     process_t* proc = t->owner;
 
     if (t->kernel_stack) {
-        vmm_free(&kernel_space, t->kernel_stack, KSTACK_SIZE);
+        vmfree(&kernel_space, t->kernel_stack, KSTACK_SIZE);
     }
 
     if (t->fpu_buffer) {
@@ -156,7 +156,7 @@ void arch_thread_destroy(thread_t* t) {
     }
 
     if (!t->owner->is_kernel && t->context_rsp != 0) {
-        vmm_free(&proc->space, t->user_stack, USTACK_SIZE);
+        vmfree(&proc->space, t->user_stack, USTACK_SIZE);
     }
 }
 
@@ -171,7 +171,7 @@ void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf) {
     child->fpu_buffer = kmalloc(fpu_size);
 
     if (!child->fpu_buffer) {
-        vmm_free(&kernel_space, child->kernel_stack, KSTACK_SIZE);
+        vmfree(&kernel_space, child->kernel_stack, KSTACK_SIZE);
         errno = ENOMEM;
         PANIC(
             "THREAD: fpu buffer allocation failed tid=%u pid=%u\n",

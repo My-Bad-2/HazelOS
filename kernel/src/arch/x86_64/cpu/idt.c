@@ -45,7 +45,7 @@ void idt_init(void) {
         return;
     }
 
-    idt = vmm_alloc(
+    idt = vmalloc(
         &kernel_space,
         sizeof(idt_table_t),
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,

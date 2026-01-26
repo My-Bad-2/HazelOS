@@ -111,7 +111,7 @@ static superblock_t* allocate_superblock(size_t size) {
     int idx           = get_bin_idx(size);
     global_bin_t* bin = &global_bins[idx];
 
-    void* ptr = vmm_alloc(
+    void* ptr = vmalloc(
         &kernel_space,
         SUPERBLOCK_SIZE,
         VMM_FLAG_READ | VMM_FLAG_WRITE,
@@ -259,7 +259,7 @@ static void flush_magazines(int idx, void** src, int count) {
                     bin->partial = sb->next;
                 }
 
-                vmm_free(&kernel_space, sb, SUPERBLOCK_SIZE);
+                vmfree(&kernel_space, sb, SUPERBLOCK_SIZE);
             }
         } else if (sb->used_objects == sb->total_objects - 1) {
             if (bin->active != sb) {
@@ -315,7 +315,7 @@ void kheap_init(void) {
 
     size_t magazine_bytes = align_up(num_cpus * sizeof(cpu_heap_t), PAGE_SIZE_SMALL);
 
-    cpu_heaps = vmm_alloc(
+    cpu_heaps = vmalloc(
         &kernel_space,
         magazine_bytes,
         VMM_FLAG_READ | VMM_FLAG_WRITE,
@@ -431,7 +431,7 @@ void* aligned_kalloc(size_t alignment, size_t size) {
     }
 
     void* ptr =
-        vmm_alloc(&kernel_space, size, VMM_FLAG_READ | VMM_FLAG_WRITE, CACHE_WRITE_BACK, align);
+        vmalloc(&kernel_space, size, VMM_FLAG_READ | VMM_FLAG_WRITE, CACHE_WRITE_BACK, align);
 
     if (!ptr) {
         if (errno == 0) {
@@ -463,7 +463,7 @@ void kfree(void* ptr, size_t size) {
     superblock_t* sb = get_superblock(ptr);
 
     if (sb->magic != SUPERBLOCK_MAGIC) {
-        vmm_free(&kernel_space, ptr, size);
+        vmfree(&kernel_space, ptr, size);
         return;
     }
 

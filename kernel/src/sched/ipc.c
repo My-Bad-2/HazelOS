@@ -128,7 +128,7 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
     ch1->peer = ch2;
     ch2->peer = ch1;
 
-    void* kpage = vmm_alloc(
+    void* kpage = vmalloc(
         &me->space,
         PAGE_SIZE_SMALL,
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER,
@@ -451,7 +451,7 @@ static void ipc_shm_free(process_t* proc, struct ipc_shared_mem* shm) {
 
     for (size_t i = 0; i < shm->page_count; ++i) {
         if (shm->pages[i]) {
-            vmm_free(&proc->space, (void*)shm->pages[i], PAGE_SIZE_SMALL);
+            vmfree(&proc->space, (void*)shm->pages[i], PAGE_SIZE_SMALL);
         }
     }
 
@@ -488,7 +488,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
 
     acquire_spinlock(&shm->header.lock);
     for (size_t i = 0; i < page_count; ++i) {
-        void* virt_addr = vmm_alloc(
+        void* virt_addr = vmalloc(
             &me->space,
             PAGE_SIZE_SMALL,
             (uint32_t)flags,

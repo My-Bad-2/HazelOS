@@ -28,7 +28,7 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
     if (cpu->is_bsp) {
         stack = bootstrap_stack;
     } else {
-        stack = vmm_alloc(
+        stack = vmalloc(
             &kernel_space,
             KSTACK_SIZE,
             VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,

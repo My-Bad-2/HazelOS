@@ -95,7 +95,7 @@ void hpet_init(void) {
 
     size_t size = PAGE_SIZE_SMALL;
 
-    hpet_regs = vmm_alloc(&kernel_space, size, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
+    hpet_regs = vmalloc(&kernel_space, size, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
 
     pagemap_map_args_t args = {
         .virt_addr = hpet_regs,

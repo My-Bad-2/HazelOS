@@ -162,7 +162,7 @@ void lapic_init(void) {
         uintptr_t phys_base = apic_base_msr & X86_PAGE_ADDRESS_MASK;
         size_t size         = PAGE_SIZE_SMALL;
 
-        virt_base = vmm_alloc(&kernel_space, size, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
+        virt_base = vmalloc(&kernel_space, size, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
 
         if (!virt_base) {
             errno = ENOMEM;

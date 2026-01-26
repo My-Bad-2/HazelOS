@@ -134,7 +134,7 @@ void init_isr_registry(void) {
     size_t size = sizeof(isr_entry_t) * IDT_ENTRY_COUNT;
     size        = align_up(size, PAGE_SIZE_SMALL);
 
-    isr_registry = vmm_alloc(
+    isr_registry = vmalloc(
         &kernel_space,
         size,
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
