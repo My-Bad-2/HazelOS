@@ -44,6 +44,11 @@ struct ipc_shared_mem {
     uintptr_t* pages;
 };
 
+static kmem_cache_t* channel_cache = nullptr;
+static kmem_cache_t* event_cache   = nullptr;
+static kmem_cache_t* msg_cache     = nullptr;
+static kmem_cache_t* timer_cache   = nullptr;
+
 static inline void thread_queue_init(struct thread_queue* tq) {
     dlist_init(&tq->list);
 }
@@ -100,7 +105,13 @@ void sys_ipc_close(int32_t handle) {
 
     if (obj) {
         if (atomic_fetch_sub(&obj->ref_count, 1) == 1) {
-            kfree(obj, sizeof(ipc_object_t));
+            if (obj->type == OBJ_CHANNEL) {
+                kmem_cache_free(channel_cache, obj);
+            } else if (obj->type == OBJ_TIMER) {
+                kmem_cache_free(timer_cache, obj);
+            } else {
+                kfree(obj, sizeof(ipc_object_t));
+            }
         }
     }
 }
@@ -108,8 +119,18 @@ void sys_ipc_close(int32_t handle) {
 int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
     process_t* me = smp_current_core()->curr_thread->owner;
 
-    ipc_channel_t* ch1 = kmalloc(sizeof(ipc_channel_t));
-    ipc_channel_t* ch2 = kmalloc(sizeof(ipc_channel_t));
+    if (!channel_cache) {
+        channel_cache = kmem_cache_create(
+            "ipc_channel_cache",
+            sizeof(ipc_channel_t),
+            sizeof(ipc_channel_t),
+            0,
+            nullptr
+        );
+    }
+
+    ipc_channel_t* ch1 = kmem_cache_alloc(channel_cache);
+    ipc_channel_t* ch2 = kmem_cache_alloc(channel_cache);
 
     if (!ch1 || !ch2) {
         return -ENOMEM;
@@ -198,7 +219,7 @@ static void sys_ipc_notify_internal(ipc_channel_t* dest) {
 
     acquire_spinlock(&set->header.lock);
 
-    ipc_kernel_event_t* event = kmalloc(sizeof(ipc_kernel_event_t));
+    ipc_kernel_event_t* event = kmem_cache_alloc(event_cache);
 
     if (!event) {
         release_spinlock(&set->header.lock);
@@ -222,6 +243,16 @@ static void sys_ipc_notify_internal(ipc_channel_t* dest) {
 }
 
 int sys_ipc_notify(int32_t chan_handle) {
+    if (!event_cache) {
+        event_cache = kmem_cache_create(
+            "ipc_event_cache",
+            sizeof(ipc_kernel_event_t),
+            sizeof(ipc_kernel_event_t),
+            0,
+            nullptr
+        );
+    }
+
     process_t* me      = smp_current_core()->curr_thread->owner;
     ipc_channel_t* src = get_object(me, chan_handle, OBJ_CHANNEL);
 
@@ -284,6 +315,26 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
 }
 
 int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t count) {
+    if (!msg_cache) {
+        msg_cache = kmem_cache_create(
+            "ipc_msg_cache",
+            sizeof(struct ipc_handle_msg),
+            sizeof(struct ipc_handle_msg),
+            0,
+            nullptr
+        );
+    }
+
+    if (!event_cache) {
+        event_cache = kmem_cache_create(
+            "ipc_event_cache",
+            sizeof(ipc_kernel_event_t),
+            sizeof(ipc_kernel_event_t),
+            0,
+            nullptr
+        );
+    }
+
     if (count > 8) {
         return -EINVAL;
     }
@@ -315,7 +366,7 @@ int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t coun
     acquire_spinlock(&dest->header.lock);
 
     for (size_t i = 0; i < count; ++i) {
-        struct ipc_handle_msg* msg = kmalloc(sizeof(struct ipc_handle_msg));
+        struct ipc_handle_msg* msg = kmem_cache_alloc(msg_cache);
         msg->object                = objs[i];
 
         atomic_fetch_add(&msg->object->ref_count, 1);
@@ -352,7 +403,7 @@ int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_c
         atomic_fetch_sub(&msg->object->ref_count, 1);
 
         out_handles[read_count++] = new_h;
-        kfree(msg, sizeof(struct ipc_handle_msg));
+        kmem_cache_free(msg_cache, msg);
     }
 
     release_spinlock(&channel->header.lock);
@@ -400,7 +451,17 @@ int sys_ipc_timer_arm(
         return -EBADF;
     }
 
-    struct ipc_timer* t = kmalloc(sizeof(struct ipc_timer));
+    if (!timer_cache) {
+        timer_cache = kmem_cache_create(
+            "ipc_timer_cache",
+            sizeof(struct ipc_timer),
+            sizeof(struct ipc_timer),
+            0,
+            nullptr
+        );
+    }
+
+    struct ipc_timer* t = kmem_cache_alloc(timer_cache);
 
     if (!t) {
         return -ENOMEM;
@@ -434,7 +495,7 @@ int sys_ipc_timer_arm(
 
     if (handle < 0) {
         timer_cancel(&t->hw_timer);
-        kfree(t, sizeof(struct ipc_timer));
+        kmem_cache_free(timer_cache, t);
         atomic_fetch_sub(&set->header.ref_count, 1);
         return handle;
     }

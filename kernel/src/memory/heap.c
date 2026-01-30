@@ -2,11 +2,14 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "arch.h"
 #include "boot/boot.h"
 #include "compiler.h"
+#include "libs/dlist.h"
+#include "libs/hashtable.h"
 #include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
@@ -14,489 +17,567 @@
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 
-#define SUPERBLOCK_SIZE  PAGE_SIZE_MEDIUM
-#define SUPERBLOCK_MAGIC 0x5EACA110Cu
+#define PAGE_SIZE  PAGE_SIZE_SMALL
+#define PAGE_SHIFT PAGE_SHIFT_SMALL
 
-#define MIN_BLOCK_SIZE    16
-#define MAX_SMALL_SIZE    8192
-#define BIN_COUNT         10
-#define MAGAZINE_CAPACITY 64
-#define BATCH_SIZE        32
+#define SLAB_NAME_MAX  32
+#define BATCH_SIZE     32
+#define CPU_CACHE_SIZE 128
 
-typedef struct superblock {
-    size_t magic;
-    uint32_t object_size;
-    uint32_t used_objects;
-    size_t total_objects;
+#define POISON_FREE 0x6b  // 107 - 'k' - Freed Memory
+#define POISON_END  0xa5  // Redzone marker
 
-    void* free_list;
-    void* bump_ptr;
-    void* end_ptr;
+#define SLAB_CACHE_HASH_BITS 6
+#define SLAB_CACHE_HASH_SIZE (1 << SLAB_CACHE_HASH_BITS)
+#define SLAB_CACHE_HASH_MASK (SLAB_CACHE_HASH_SIZE - 1)
 
-    struct superblock* next;
-    struct superblock* prev;
-} superblock_t;
+#define KMALLOC_SHIFT_LOW  3
+#define KMALLOC_SHIFT_HIGH 12
+#define KMALLOC_CACHES_NUM (KMALLOC_SHIFT_HIGH - KMALLOC_SHIFT_LOW + 1)
 
-typedef struct {
-    void* rounds[MAGAZINE_CAPACITY];
-    int top;
-} magazine_t;
+struct slab {
+    struct dlist_head list;
+    struct hlist_node h_node;
 
-typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
-    irq_lock_t lock;
-    magazine_t bins[BIN_COUNT];
-} cpu_heap_t;
+    void* base;  // Page base
+    void* freelist;
 
-typedef struct {
-    interrupt_lock_t lock;
-    superblock_t* active;
-    superblock_t* partial;
+    uint32_t in_use;  // Active objects
+    uint32_t total;   // Total capacity
+};
 
-    uint32_t color_next;
-    uint32_t color_range;
-} global_bin_t;
+struct [[gnu::aligned(CACHE_LINE_SIZE)]] kmem_cache_cpu {
+    void** freelist;
+    uint32_t count;  // Current fill level
+    uint32_t limit;  // Max capacity
 
-static uintptr_t heap_secret = 0;
-static cpu_heap_t* cpu_heaps = nullptr;
-static size_t num_cpus       = 0;
-static global_bin_t global_bins[BIN_COUNT];
+    struct slab* cached_slab;  // Slab hint
+};
 
-static size_t get_random_secret(void) {
-    return kernel_address_request.response->physical_base;
+struct kmem_cache {
+    spinlock_t lock;
+    struct dlist_head partial;
+    struct hlist_head* slab_hash;  // hash table
+
+    size_t obj_size;  // Logical size
+    size_t size;      // Aligned/Padded size
+    size_t align;
+    size_t flags;
+
+    void (*ctor)(void*);  // Constructor
+    char name[SLAB_NAME_MAX];
+
+    struct kmem_cache_cpu* cpu_slab;
+};
+
+static kmem_cache_t cache_boot;
+static kmem_cache_t cache_metadata;
+static kmem_cache_t* kmalloc_caches[KMALLOC_CACHES_NUM];
+
+static uint32_t num_cpus      = 1;
+static uint32_t xa_node_count = 0;
+
+static inline size_t obj_to_pfn(void* addr) {
+    return (uintptr_t)addr >> PAGE_SHIFT;
 }
 
-static inline void* protect_ptr(void* target, void* loc) {
-    return (void*)((uintptr_t)target ^ heap_secret ^ (uintptr_t)loc);
+static void map_insert(kmem_cache_t* cache, struct slab* slab) {
+    uintptr_t pfn = obj_to_pfn(slab->base);
+    ht_insert(cache->slab_hash, &slab->h_node, pfn, SLAB_CACHE_HASH_BITS);
 }
 
-static inline void* decrypt_ptr(void* val, void* loc) {
-    return (void*)((uintptr_t)val ^ heap_secret ^ (uintptr_t)loc);
+static void map_remove(struct slab* slab) {
+    ht_remove(&slab->h_node);
 }
 
-static int get_bin_idx(size_t size) {
-    if (size == 0) {
-        return -1;
-    }
+static struct slab* map_lookup(kmem_cache_t* cache, void* obj) {
+    uintptr_t pfn = obj_to_pfn(obj);
+    uint32_t idx  = ht_hash_val(pfn, SLAB_CACHE_HASH_BITS);
 
-    if (size <= 16) {
-        return 0;
-    }
+    struct hlist_node* curr = cache->slab_hash[idx].first;
+    while (curr) {
+        struct slab* s = ht_entry(curr, struct slab, h_node);
 
-    // 64 - clz(size - 1) gives log2 ceil. Since 16 = 2^4, we subtract 4.
-    int idx = (64 - clz(size - 1)) - 4;
-    return (idx < 0) ? 0 : idx;
-}
-
-static size_t get_bin_size(int idx) {
-    if (idx == -1) {
-        return 0;
-    }
-
-    return 1ul << (idx + 4);
-}
-
-static inline superblock_t* get_superblock(void* ptr) {
-    return (superblock_t*)align_down((uintptr_t)ptr, SUPERBLOCK_SIZE);
-}
-
-static inline size_t power_of_two_ceil(size_t x) {
-    if (x <= 1) {
-        return 1;
-    }
-
-    return 1ul << (64 - clz(x - 1));
-}
-
-static superblock_t* allocate_superblock(size_t size) {
-    int idx           = get_bin_idx(size);
-    global_bin_t* bin = &global_bins[idx];
-
-    void* ptr = vmalloc(
-        &kernel_space,
-        SUPERBLOCK_SIZE,
-        VMM_FLAG_READ | VMM_FLAG_WRITE,
-        CACHE_WRITE_BACK,
-        PAGE_SIZE_MEDIUM
-    );
-
-    if (!ptr) {
-        if (errno == 0) {
-            errno = ENOMEM;
+        if (obj_to_pfn(s->base) == pfn) {
+            return s;
         }
 
-        KLOG_ERROR("Heap: superblock alloc failed size=0x%zx errno=%d\n", size, errno);
+        curr = curr->next;
+    }
+
+    return nullptr;
+}
+
+static void
+format_slab(kmem_cache_t* cache, struct slab* slab, void* page_base, size_t total_objs) {
+    slab->base   = page_base;
+    slab->in_use = 0;
+    dlist_init(&slab->list);
+    slab->total = total_objs;
+
+    char* base  = (char*)page_base;
+    size_t size = cache->size;
+
+    void* head     = base;
+    slab->freelist = head;
+
+    for (size_t i = 0; i < total_objs - 1; ++i) {
+        void* curr = base + (i * size);
+        void* next = base + ((i + 1) * size);
+
+        *(void**)curr = next;
+
+        if (cache->ctor) {
+            cache->ctor(curr);
+        }
+    }
+
+    void* tail    = base + ((total_objs - 1) * size);
+    *(void**)tail = nullptr;
+
+    if (cache->ctor) {
+        cache->ctor(tail);
+    }
+}
+
+static struct slab* slab_grow(kmem_cache_t* cache) {
+    void* page = vmalloc(
+        &kernel_space,
+        PAGE_SIZE,
+        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
+        CACHE_WRITE_BACK,
+        PAGE_SIZE
+    );
+
+    if (!page) {
+        errno = ENOMEM;
         return nullptr;
     }
 
-    superblock_t* sb = (superblock_t*)ptr;
+    struct slab* slab = nullptr;
+    if (likely(!(cache->flags & SLAB_NO_OFFSLAB))) {
+        slab = kmem_cache_alloc(&cache_metadata);
 
-    size_t col_offset = 0;
-
-    if (bin->color_range > 0) {
-        col_offset = bin->color_next * (size_t)CACHE_LINE_SIZE;
-
-        bin->color_next++;
-
-        if (bin->color_next >= bin->color_range) {
-            bin->color_next = 0;
+        if (!slab) {
+            KLOG_WARN("slab_grow: Failed to allocate metadata for cache %s", cache->name);
+            vmfree(&kernel_space, page, PAGE_SIZE);
+            errno = ENOMEM;
+            return nullptr;
         }
+
+        format_slab(cache, slab, page, PAGE_SIZE / cache->size);
+    } else {
+        slab             = (struct slab*)((char*)page + PAGE_SIZE - sizeof(struct slab));
+        size_t available = PAGE_SIZE - sizeof(struct slab);
+        format_slab(cache, slab, page, available / cache->size);
     }
 
-    sb->magic        = SUPERBLOCK_MAGIC;
-    sb->object_size  = (uint32_t)size;
-    sb->used_objects = 0;
-    sb->free_list    = nullptr;
-    sb->next = sb->prev = nullptr;
+    acquire_spinlock(&cache->lock);
+    map_insert(cache, slab);
+    release_spinlock(&cache->lock);
 
-    uintptr_t start = (uintptr_t)ptr + sizeof(superblock_t) + col_offset;
-
-    size_t padding = (size - (start & (size - 1))) & (size - 1);
-
-    sb->bump_ptr = (void*)(start + padding);
-    sb->end_ptr  = (void*)((uintptr_t)ptr + PAGE_SIZE_MEDIUM);
-
-    sb->total_objects = ((uintptr_t)sb->end_ptr - (uintptr_t)sb->bump_ptr) / size;
-
-    return sb;
+    return slab;
 }
 
-static int refill_magazines(int idx, void** dest, int count) {
-    global_bin_t* bin = &global_bins[idx];
-    size_t size       = 16ul << idx;
-    int fetched       = 0;
+static int slab_refill(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
+    acquire_spinlock(&cache->lock);
 
-    acquire_interrupt_lock(&bin->lock);
+    if (dlist_empty(&cache->partial)) {
+        release_spinlock(&cache->lock);
 
-    superblock_t* sb = bin->active;
+        struct slab* new_slab = slab_grow(cache);
 
-    while (fetched < count) {
-        if (!sb || (sb->free_list == nullptr && sb->bump_ptr >= sb->end_ptr)) {
-            if (bin->partial) {
-                sb           = bin->partial;
-                bin->partial = sb->next;
-
-                if (bin->partial) {
-                    bin->partial->prev = nullptr;
-                }
-
-                sb->next    = nullptr;
-                bin->active = sb;
-            } else {
-                sb = allocate_superblock(size);
-
-                if (!sb) {
-                    if (errno == 0) {
-                        errno = ENOMEM;
-                    }
-
-                    KLOG_WARN(
-                        "Heap: refill superblock alloc failed idx=%d size=0x%zx errno=%d\n",
-                        idx,
-                        size,
-                        errno
-                    );
-                    break;
-                }
-
-                bin->active = sb;
-            }
+        if (!new_slab) {
+            return 0;
         }
 
-        void* obj = nullptr;
+        acquire_spinlock(&cache->lock);
+        dlist_add(&new_slab->list, &cache->partial);
+    }
 
-        if (sb->free_list) {
-            obj        = sb->free_list;
-            void* next = *(void**)obj;
+    struct slab* slab = dlist_entry(cache->partial.next, struct slab, list);
+    int refilled      = 0;
 
-            sb->free_list = decrypt_ptr(next, obj);
-        } else if (sb->bump_ptr < sb->end_ptr) {
-            obj          = sb->bump_ptr;
-            sb->bump_ptr = (void*)((uintptr_t)sb->bump_ptr + size);
+    while (slab->freelist && refilled < BATCH_SIZE) {
+        void* obj  = slab->freelist;
+        void* next = *(void**)obj;
+
+        if (next) {
+            prefetch(next);
         }
 
-        if (obj) {
-            sb->used_objects++;
-            dest[fetched++] = obj;
+        slab->freelist = next;
+        slab->in_use++;
+
+        cc->freelist[cc->count++] = obj;
+        refilled++;
+
+        if (!slab->freelist) {
+            dlist_del(&slab->list);
+            break;
         }
     }
 
-    release_interrupt_lock(&bin->lock);
-    return fetched;
+    release_spinlock(&cache->lock);
+    return refilled;
 }
 
-static void flush_magazines(int idx, void** src, int count) {
-    global_bin_t* bin = &global_bins[idx];
+static void slab_flush(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
+    acquire_spinlock(&cache->lock);
 
-    acquire_interrupt_lock(&bin->lock);
+    const uint32_t target = cc->count / 2;
+    while (cc->count > target) {
+        void* obj = cc->freelist[--cc->count];
 
-    for (int i = 0; i < count; ++i) {
-        void* obj        = src[i];
-        superblock_t* sb = get_superblock(obj);
-
-        if (unlikely(sb->magic != SUPERBLOCK_MAGIC)) {
-            PANIC("Heap Corruption: Invalid Superblock Magic!");
+        if (cache->flags & SLAB_DEBUG_FREE) {
+            memset(obj, POISON_FREE, cache->obj_size);
         }
 
-        void* head = sb->free_list;
-        void* next = protect_ptr(head, obj);
+        struct slab* slab = cc->cached_slab;
+        size_t pfn        = obj_to_pfn(obj);
 
-        *(void**)obj  = next;
-        sb->free_list = obj;
+        if (unlikely(!slab || obj_to_pfn(slab->base) != pfn)) {
+            slab            = map_lookup(cache, obj);
+            cc->cached_slab = slab;
+        }
 
-        sb->used_objects--;
+        if (unlikely(!slab)) {
+            continue;
+        }
 
-        if (sb->used_objects == 0) {
-            if (bin->active != sb) {
-                if (sb->prev) {
-                    sb->prev->next = sb->next;
+        *(void**)obj   = slab->freelist;
+        slab->freelist = obj;
+        slab->in_use--;
+
+        if (slab->in_use == slab->total - 1) {
+            dlist_add(&slab->list, &cache->partial);
+        } else if (slab->in_use == 0) {
+            dlist_del(&slab->list);
+            map_remove(slab);
+
+            vmfree(&kernel_space, slab->base, PAGE_SIZE);
+
+            if (!(cache->flags & SLAB_NO_OFFSLAB)) {
+                release_spinlock(&cache->lock);
+                kmem_cache_free(&cache_metadata, slab);
+                acquire_spinlock(&cache->lock);
+
+                if (cc->cached_slab == slab) {
+                    cc->cached_slab = nullptr;
                 }
-
-                if (sb->next) {
-                    sb->next->prev = sb->prev;
-                }
-
-                if (bin->partial == sb) {
-                    bin->partial = sb->next;
-                }
-
-                vmfree(&kernel_space, sb, SUPERBLOCK_SIZE);
-            }
-        } else if (sb->used_objects == sb->total_objects - 1) {
-            if (bin->active != sb) {
-                sb->next = bin->partial;
-
-                if (bin->partial) {
-                    bin->partial->prev = sb;
-                }
-
-                bin->partial = sb;
-                sb->prev     = nullptr;
             }
         }
     }
 
-    release_interrupt_lock(&bin->lock);
+    release_spinlock(&cache->lock);
+}
+
+static void init_internal_cache(kmem_cache_t* cache, const char* name, size_t size) {
+    strncpy(cache->name, name, SLAB_NAME_MAX);
+
+    cache->obj_size = size;
+    cache->size     = align_up(size, 8);
+    cache->align    = 0;
+    cache->flags    = SLAB_NO_OFFSLAB;
+    cache->cpu_slab = nullptr;
+    cache->ctor     = nullptr;
+
+    dlist_init(&cache->partial);
+    create_spinlock(&cache->lock);
+
+    static struct hlist_head boot_hash[SLAB_CACHE_HASH_SIZE];
+    memset(boot_hash, 0, sizeof(struct hlist_head) * SLAB_CACHE_HASH_SIZE);
+    cache->slab_hash = boot_hash;
+}
+
+static void boot_slab_subsystem(void) {
+    num_cpus = mp_request.response->cpu_count;
+
+    init_internal_cache(&cache_boot, "kmem_cache", sizeof(kmem_cache_t));
+    init_internal_cache(&cache_metadata, "slab_metadata", sizeof(struct slab));
+
+    static struct hlist_head metadata_hash[SLAB_CACHE_HASH_BITS];
+    memset(metadata_hash, 0, sizeof(struct hlist_head) * SLAB_CACHE_HASH_SIZE);
+    cache_metadata.slab_hash = metadata_hash;
 }
 
 void kheap_init(void) {
-    heap_secret = get_random_secret() ^ (get_random_secret() << 32);
+    boot_slab_subsystem();
 
-    for (int i = 0; i < BIN_COUNT; ++i) {
-        size_t obj_size = get_bin_size(i);
-        obj_size        = align_up(obj_size, 0x10);
+    char name[SLAB_NAME_MAX];
+    for (int i = 0; i < KMALLOC_CACHES_NUM; ++i) {
+        size_t size = 1 << (i + KMALLOC_SHIFT_LOW);
+        snprintf(name, sizeof(name), "km-%lu", size);
+        kmalloc_caches[i] = kmem_cache_create(name, size, size, 0, nullptr);
+    }
+}
 
-        size_t overhead  = sizeof(superblock_t);
-        size_t available = SUPERBLOCK_SIZE - heap_secret;
+kmem_cache_t*
+kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, void (*ctor)(void*)) {
+    kmem_cache_t* cache = kmem_cache_alloc(&cache_boot);
 
-        size_t num_objs   = available / obj_size;
-        size_t total_used = num_objs * obj_size;
-        size_t waste      = available - total_used;
-
-        // Calculate how many cache-line shifts we can perform inside this wasted space.
-        if (waste >= CACHE_LINE_SIZE) {
-            global_bins[i].color_range = (uint32_t)waste / CACHE_LINE_SIZE;
-        } else {
-            // No enough easte to shift even one cache line.
-            global_bins[i].color_range = 0;
-        }
-
-        global_bins[i].color_next = 0;
-
-        create_interrupt_lock(&global_bins[i].lock);
-        global_bins[i].active  = nullptr;
-        global_bins[i].partial = nullptr;
+    if (!cache) {
+        KLOG_ERROR("kmem_cache_create: Failed to allocate cache structure");
+        errno = ENOMEM;
+        return nullptr;
     }
 
-    num_cpus = mp_request.response->cpu_count;
+    strncpy(cache->name, name, SLAB_NAME_MAX);
 
-    if (num_cpus == 0) {
-        num_cpus = 1;
+    if (align < 8) {
+        align = 8;
     }
 
-    size_t magazine_bytes = align_up(num_cpus * sizeof(cpu_heap_t), PAGE_SIZE_SMALL);
+    cache->align    = align;
+    cache->obj_size = size;
 
-    cpu_heaps = vmalloc(
+    // Redzone calculation
+    size_t pad = 0;
+    if (flags & SLAB_RED_ZONES) {
+        pad = sizeof(uint64_t);
+    }
+
+    cache->size = align_up(size + pad, align);
+
+    if (cache->size < sizeof(void*)) {
+        cache->size = sizeof(void*);
+    }
+
+    cache->flags = flags;
+    cache->ctor  = ctor;
+    dlist_init(&cache->partial);
+    create_spinlock(&cache->lock);
+
+    size_t hash_bytes = sizeof(struct hlist_head) * SLAB_CACHE_HASH_SIZE;
+    cache->slab_hash  = (struct hlist_head*)vmalloc(
         &kernel_space,
-        magazine_bytes,
+        hash_bytes,
         VMM_FLAG_READ | VMM_FLAG_WRITE,
         CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
+        PAGE_SIZE
     );
 
-    if (!cpu_heaps) {
+    if (!cache->slab_hash) {
+        KLOG_ERROR("kmem_cache_create: Failed to allocate hash for cache %s", name);
+        kmem_cache_free(&cache_boot, cache);
         errno = ENOMEM;
-        KLOG_ERROR("Heap: cpu heap alloc failed bytes=0x%zx errno=%d\n", magazine_bytes, errno);
-        PANIC("Kernel Heap: Failed to allocate CPU Magazine");
-    }
-
-    for (int i = 0; i < num_cpus; ++i) {
-        create_irq_lock(&cpu_heaps[i].lock);
-
-        for (int j = 0; j < BIN_COUNT; ++j) {
-            cpu_heaps[i].bins[j].top = 0;
-        }
-    }
-
-    KLOG_INFO("Heap: init complete cpus=%zu magazine_bytes=0x%zx\n", num_cpus, magazine_bytes);
-}
-
-void* aligned_kalloc(size_t alignment, size_t size) {
-    if (size == 0) {
-        errno = EINVAL;
-        KLOG_WARN("Heap: aligned_kalloc zero size\n");
         return nullptr;
     }
 
-    if (alignment < 16) {
-        alignment = 16;
-    }
+    memset(cache->slab_hash, 0, sizeof(struct hlist_head) * SLAB_CACHE_HASH_SIZE);
 
-    // Power of 2 check: alignment & (alignment - 1) == 0
-    if (!is_aligned(alignment, alignment)) {
-        errno = EINVAL;
-        KLOG_WARN("Heap: aligned_kalloc invalid alignment=0x%zx\n", alignment);
-        return nullptr;
-    }
+    size_t struct_size = sizeof(struct kmem_cache_cpu) * num_cpus;
+    size_t mag_size    = CPU_CACHE_SIZE * sizeof(void*) * num_cpus;
+    size_t total_req   = struct_size + mag_size;
+    total_req          = align_up(total_req, PAGE_SIZE);
 
-    if (size <= MAX_SMALL_SIZE && alignment <= MAX_SMALL_SIZE) {
-        size_t req_size = (size > alignment) ? size : alignment;
-        req_size        = power_of_two_ceil(req_size);
-
-        if (req_size < MIN_BLOCK_SIZE) {
-            req_size = MIN_BLOCK_SIZE;
-        }
-
-        if (req_size <= MAX_SMALL_SIZE) {
-            int idx      = get_bin_idx(req_size);
-            uint32_t cpu = arch_get_core_idx();
-
-            cpu_heap_t* cpu_heap = &cpu_heaps[cpu];
-            magazine_t* mag      = &cpu_heap->bins[idx];
-
-            acquire_irq_lock(&cpu_heap->lock);
-
-            if (likely(mag->top > 0)) {
-                void* ptr = mag->rounds[--mag->top];
-
-                prefetch(ptr, 1, 3);
-
-                if (mag->top > 0) {
-                    prefetch(mag->rounds[mag->top - 1], 1, 3);
-                }
-
-                release_irq_lock(&cpu_heap->lock);
-                return ptr;
-            }
-
-            int count = refill_magazines(idx, mag->rounds, BATCH_SIZE);
-
-            if (unlikely(count == 0)) {
-                if (errno == 0) {
-                    errno = ENOMEM;
-                }
-
-                KLOG_WARN(
-                    "Heap: refill failed idx=%d size=0x%zx align=0x%zx errno=%d\n",
-                    idx,
-                    req_size,
-                    alignment,
-                    errno
-                );
-
-                release_irq_lock(&cpu_heap->lock);
-                return nullptr;
-            }
-
-            mag->top = count;
-
-            void* ptr = mag->rounds[--mag->top];
-
-            prefetch(ptr, 1, 3);
-
-            if (mag->top > 0) {
-                prefetch(mag->rounds[mag->top - 1], 1, 3);
-            }
-
-            release_irq_lock(&cpu_heap->lock);
-            return ptr;
-        }
-    }
-
-    size_t align = PAGE_SIZE_SMALL;
-
-    if (alignment >= PAGE_SIZE_MEDIUM) {
-        align = PAGE_SIZE_MEDIUM;
-    } else if (alignment >= PAGE_SIZE_LARGE) {
-        align = PAGE_SIZE_LARGE;
-    }
-
-    void* ptr =
-        vmalloc(&kernel_space, size, VMM_FLAG_READ | VMM_FLAG_WRITE, CACHE_WRITE_BACK, align);
+    void* ptr = vmalloc(
+        &kernel_space,
+        total_req,
+        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
+        CACHE_WRITE_BACK,
+        PAGE_SIZE
+    );
 
     if (!ptr) {
-        if (errno == 0) {
-            errno = ENOMEM;
-        }
-
-        KLOG_WARN(
-            "Heap: aligned_kalloc vmm alloc failed size=0x%zx align=0x%zx errno=%d\n",
-            size,
-            align,
-            errno
-        );
+        KLOG_ERROR("kmem_cache_create: Failed to allocate cpu_slab for cache %s", name);
+        vmfree(&kernel_space, cache->slab_hash, hash_bytes);
+        kmem_cache_free(&cache_boot, cache);
+        errno = ENOMEM;
+        return nullptr;
     }
 
-    return ptr;
+    cache->cpu_slab = (struct kmem_cache_cpu*)ptr;
+    char* mag_base  = (char*)ptr + struct_size;
+
+    for (size_t i = 0; i < num_cpus; ++i) {
+        cache->cpu_slab[i].count       = 0;
+        cache->cpu_slab[i].limit       = CPU_CACHE_SIZE;
+        cache->cpu_slab[i].freelist    = (void**)(mag_base + (i * CPU_CACHE_SIZE * sizeof(void*)));
+        cache->cpu_slab[i].cached_slab = nullptr;
+    }
+
+    return cache;
 }
 
-void* kmalloc(size_t size) {
-    return aligned_kalloc(16, size);
+static void* slab_alloc(kmem_cache_t* cache) {
+    void* obj = nullptr;
+
+    acquire_spinlock(&cache->lock);
+
+    if (dlist_empty(&cache->partial)) {
+        release_spinlock(&cache->lock);
+
+        struct slab* new_slab = slab_grow(cache);
+
+        if (!new_slab) {
+            return nullptr;
+        }
+
+        acquire_spinlock(&cache->lock);
+        dlist_add(&new_slab->list, &cache->partial);
+    }
+
+    struct slab* slab = dlist_entry(cache->partial.next, struct slab, list);
+
+    if (unlikely(!slab->freelist)) {
+        release_spinlock(&cache->lock);
+        return nullptr;
+    }
+
+    obj        = slab->freelist;
+    void* next = *(void**)obj;
+
+    if (next) {
+        prefetch(next);
+    }
+
+    slab->freelist = next;
+    slab->in_use++;
+
+    *(void**)obj = nullptr;
+
+    if (!slab->freelist) {
+        dlist_del(&slab->list);
+    }
+
+    release_spinlock(&cache->lock);
+    return obj;
 }
 
-void kfree(void* ptr, size_t size) {
-    if (unlikely(!ptr)) {
-        errno = EINVAL;
-        KLOG_WARN("Heap: kfree null pointer\n");
+void* kmem_cache_alloc(kmem_cache_t* cache) {
+    if (unlikely(!cache->cpu_slab)) {
+        return slab_alloc(cache);
+    }
+
+    uint32_t cpu              = arch_get_core_idx();
+    struct kmem_cache_cpu* cc = &cache->cpu_slab[cpu];
+
+    if (likely(cc->count > 0)) {
+        void* obj = cc->freelist[--cc->count];
+
+        if (cc->count > 0) {
+            prefetch(cc->freelist[cc->count - 1]);
+        }
+
+        return obj;
+    }
+
+    if (slab_refill(cache, cc) > 0) {
+        return cc->freelist[--cc->count];
+    }
+
+    return nullptr;
+}
+
+void kmem_cache_free(kmem_cache_t* cache, void* obj) {
+    if (!obj) {
         return;
     }
 
-    superblock_t* sb = get_superblock(ptr);
+    if (unlikely(!cache->cpu_slab)) {
+        acquire_spinlock(&cache->lock);
 
-    if (sb->magic != SUPERBLOCK_MAGIC) {
+        struct slab* slab = map_lookup(cache, obj);
+
+        if (slab) {
+            *(void**)obj   = slab->freelist;
+            slab->freelist = obj;
+            slab->in_use--;
+        }
+
+        release_spinlock(&cache->lock);
+        return;
+    }
+
+    uint32_t cpu              = arch_get_core_idx();
+    struct kmem_cache_cpu* cc = &cache->cpu_slab[cpu];
+
+    if (likely(cc->count < cc->limit)) {
+        cc->freelist[cc->count++] = obj;
+        return;
+    }
+
+    slab_flush(cache, cc);
+    cc->freelist[cc->count++] = obj;
+}
+
+void kmem_cache_destroy(kmem_cache_t* cache) {
+    size_t struct_size = sizeof(struct kmem_cache_cpu) * num_cpus;
+    size_t mag_size    = CPU_CACHE_SIZE * sizeof(void*) * num_cpus;
+
+    vmfree(&kernel_space, cache->cpu_slab, struct_size + mag_size);
+
+    struct slab *pos, *n;
+    dlist_for_each_entry_safe(pos, n, &cache->partial, list) {
+        dlist_del(&pos->list);
+        map_remove(pos);
+        vmfree(&kernel_space, pos->base, PAGE_SIZE);
+
+        if (!(cache->flags & SLAB_NO_OFFSLAB)) {
+            kmem_cache_free(&cache_metadata, pos);
+        }
+    }
+
+    size_t hash_bytes = sizeof(struct hlist_head) * SLAB_CACHE_HASH_SIZE;
+    vmfree(&kernel_space, cache->slab_hash, hash_bytes);
+
+    kmem_cache_free(&cache_boot, cache);
+}
+
+void* kmalloc(size_t size) {
+    if (size == 0) {
+        return nullptr;
+    }
+
+    if (size > PAGE_SIZE) {
+        void* ptr = vmalloc(
+            &kernel_space,
+            size,
+            VMM_FLAG_READ | VMM_FLAG_WRITE,
+            CACHE_WRITE_BACK,
+            PAGE_SIZE
+        );
+
+        if (!ptr) {
+            KLOG_WARN("kmalloc: vmalloc failed for size %lu", size);
+            errno = ENOMEM;
+        }
+        return ptr;
+    }
+
+    size_t idx = 0;
+    if (size > 8) {
+        size_t blk = 64 - (size_t)clz(size - 1);
+        idx        = blk - KMALLOC_SHIFT_LOW;
+    }
+
+    if (unlikely(idx >= KMALLOC_CACHES_NUM)) {
+        KLOG_ERROR("kmalloc: Invalid size %lu, idx %lu", size, idx);
+        errno = EINVAL;
+        return nullptr;
+    }
+
+    return kmem_cache_alloc(kmalloc_caches[idx]);
+}
+
+void kfree(void* ptr, size_t size) {
+    if (!ptr || size == 0) return;
+
+    if (size > PAGE_SIZE) {
         vmfree(&kernel_space, ptr, size);
         return;
     }
 
-    int idx      = get_bin_idx(sb->object_size);
-    uint32_t cpu = arch_get_core_idx();
+    size_t idx = 0;
+    if (size > 8) {
+        size_t blk = 64 - (size_t)clz(size - 1);
+        idx        = blk - KMALLOC_SHIFT_LOW;
+    }
 
-    cpu_heap_t* cpu_heap = &cpu_heaps[cpu];
-    magazine_t* mag      = &cpu_heap->bins[idx];
-
-    acquire_irq_lock(&cpu_heap->lock);
-
-    if (likely(mag->top < MAGAZINE_CAPACITY)) {
-        mag->rounds[mag->top++] = ptr;
-        release_irq_lock(&cpu_heap->lock);
+    if (unlikely(idx >= KMALLOC_CACHES_NUM)) {
         return;
     }
 
-    flush_magazines(idx, mag->rounds, BATCH_SIZE);
-
-    int remaining = mag->top - BATCH_SIZE;
-
-    memmove(
-        (void*)&mag->rounds[0],
-        (void*)&mag->rounds[BATCH_SIZE],
-        (size_t)remaining * sizeof(void*)
-    );
-
-    mag->top = remaining;
-
-    mag->rounds[mag->top++] = ptr;
-    release_irq_lock(&cpu_heap->lock);
-}
-
-void aligned_kfree(void* ptr, size_t size) {
-    return kfree(ptr, size);
+    kmem_cache_free(kmalloc_caches[idx], ptr);
 }

@@ -57,6 +57,10 @@
 #define popcount(x)
 #endif
 
+#if __has_builtin(__builtin_ia32_rdrand64_step)
+#define rdrand(x) __builtin_ia32_rdrand64_step((unsigned long*)(x))
+#endif
+
 typedef __int128 int128_t;
 typedef unsigned __int128 uint128_t;
 typedef ptrdiff_t ssize_t;

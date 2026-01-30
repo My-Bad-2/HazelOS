@@ -97,7 +97,7 @@ static inline void dlist_splice(struct dlist_head* list, struct dlist_head* head
          &(pos)->member != (head);                                               \
          (pos) = (n), (n) = dlist_entry((n)->member.next, typeof(*(n)), member)) \
         if (&(n)->member != (head)) {                                            \
-            dlist_prefetch((n)->member.next);                                    \
+            prefetch((n)->member.next);                                          \
         }
 
 #ifdef __cplusplus

@@ -18,8 +18,6 @@ typedef void* xa_entry_t;
 typedef struct xa_node {
     uint8_t shift;
     uint8_t count;
-    uint8_t offset;
-    uint64_t bitmap;
     struct xa_node* slots[XA_SLOTS];
 } xa_node_t;
 
@@ -33,6 +31,18 @@ typedef struct xarray {
         uint64_t index;
     } hint;
 } xarray_t;
+
+typedef struct {
+    const xarray_t* xa;
+    uint64_t index;
+
+    struct {
+        xa_node_t* node;
+        uint8_t offset;
+    } path[XA_MAX_DEPTH];
+
+    int depth;
+} xa_cursor_t;
 
 typedef enum {
     XA_OK = 0,
@@ -48,10 +58,11 @@ void xa_destory(xarray_t* xa);
 xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t entry, xa_node_t** restrict spare);
 [[nodiscard]] xa_entry_t xa_load(xarray_t* restrict xa, uint64_t index);
 
-xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index);
+xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index, xa_node_t** freed_node);
 xa_entry_t xa_find_after(xarray_t* restrict xa, uint64_t* restrict index);
 
-int xa_store_range(xarray_t* xa, uint64_t start, uint64_t end, xa_entry_t entry);
+void xa_cursor_reset(xa_cursor_t* cursor, const xarray_t* xa, uint64_t start_idx);
+xa_entry_t xa_cursor_next(xa_cursor_t* cursor);
 
 static inline xa_entry_t xa_tag_ptr(void* ptr, uint32_t tag) {
     return (xa_entry_t)((uintptr_t)ptr | (tag & XA_TAG_MASK));
@@ -80,5 +91,10 @@ static inline bool xa_is_value(xa_entry_t entry) {
 #define xa_for_each(xa, index, entry)                                            \
     for ((index) = 0, (entry) = xa_find_after(xa, &(index)); (entry) != nullptr; \
          (index)++, (entry)   = xa_find_after(xa, &(index)))
+
+#define xa_for_each_cursor(cursor, xa, start_idx, entry)                           \
+    for (xa_cursor_reset(cursor, xa, start_idx), (entry) = xa_cursor_next(cursor); \
+         (entry) != nullptr;                                                       \
+         (entry) = xa_cursor_next(cursor))
 
 #endif

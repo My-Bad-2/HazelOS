@@ -8,7 +8,9 @@
 #include "boot/limine.h"
 #include "libs/math.h"
 #include "libs/mmio.h"
-#include "memory/heap.h"
+#include "memory/memory.h"
+#include "memory/pagemap.h"
+#include "memory/vma.h"
 
 static uint8_t* shadow_buffer = nullptr;
 static uint8_t* fb_address    = nullptr;
@@ -172,7 +174,13 @@ void term_init(term_font_t* font) {
     style.underline = false;
     style.reverse   = false;
 
-    shadow_buffer = kmalloc(fb_size);
+    shadow_buffer = vmalloc(
+        &kernel_space,
+        fb_size,
+        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
+        CACHE_WRITE_BACK,
+        PAGE_SIZE_SMALL
+    );
 
     memset(shadow_buffer, 0, fb_size);
     memset(fb_address, 0, fb_size);

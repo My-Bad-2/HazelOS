@@ -23,8 +23,15 @@
 static handle_table_t pid_handle_tbl;
 static handle_table_t tid_handle_tbl;
 
+static kmem_cache_t* process_cache = nullptr;
+static kmem_cache_t* thread_cache  = nullptr;
+
 process_t* process_create(bool is_kernel) {
-    process_t* proc = (process_t*)kmalloc(sizeof(process_t));
+    if (!process_cache) {
+        process_cache = kmem_cache_create("process_cache", sizeof(process_t), 8, 0, nullptr);
+    }
+
+    process_t* proc = kmem_cache_alloc(process_cache);
 
     if (!proc) {
         errno = ENOMEM;
@@ -115,11 +122,11 @@ void process_destroy(process_t* proc) {
 
     if (curr && curr->owner == proc) {
         curr->owner = nullptr;
-        kfree(proc, sizeof(process_t));
+        kmem_cache_free(process_cache, proc);
         thread_destroy(curr);
     }
 
-    kfree(proc, sizeof(process_t));
+    kmem_cache_free(process_cache, proc);
 }
 
 static void process_insert_thread(process_t* p, thread_t* t) {
@@ -158,6 +165,10 @@ static const char* thread_state_to_str(thread_state_t state) {
 }
 
 thread_t* thread_create(thread_create_args_t* args) {
+    if (!thread_cache) {
+        thread_cache = kmem_cache_create("thread_cache", sizeof(thread_t), 8, 0, nullptr);
+    }
+
     if (!args || !args->entry) {
         errno = EINVAL;
         return nullptr;
@@ -176,7 +187,7 @@ thread_t* thread_create(thread_create_args_t* args) {
         }
     }
 
-    thread_t* t = (thread_t*)kmalloc(sizeof(thread_t));
+    thread_t* t = (thread_t*)kmem_cache_alloc(thread_cache);
 
     if (!t) {
         errno = ENOMEM;
@@ -234,7 +245,7 @@ thread_t* thread_create(thread_create_args_t* args) {
         }
 
         KLOG_WARN("THREAD: arch init failed tid=%u errno=%u\n", t->tid, errno);
-        kfree(t, sizeof(thread_t));
+        kmem_cache_free(thread_cache, t);
         return nullptr;
     }
 
@@ -282,11 +293,11 @@ void thread_destroy(thread_t* t) {
     }
 
     arch_thread_destroy(t);
-    kfree(t, sizeof(thread_t));
+    kmem_cache_free(thread_cache, t);
 }
 
 thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf) {
-    thread_t* child = (thread_t*)kmalloc(sizeof(thread_t));
+    thread_t* child = (thread_t*)kmem_cache_alloc(thread_cache);
 
     if (!child) {
         errno = ENOMEM;
@@ -298,7 +309,7 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
     child->tid = handle_alloc(&tid_handle_tbl, child);
 
     if (child->tid == 0) {
-        kfree(child, sizeof(thread_t));
+        kmem_cache_free(thread_cache, child);
         errno = ENOMEM;
         return nullptr;
     }
@@ -336,7 +347,7 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
 
     if (!child->kernel_stack) {
         handle_free(&tid_handle_tbl, child->tid);
-        kfree(child, sizeof(thread_t));
+        kmem_cache_free(thread_cache, child);
         return nullptr;
     }
 

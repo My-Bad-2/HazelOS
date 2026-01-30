@@ -21,6 +21,8 @@
 extern void kernel_thread_entry(void);
 extern void isr_restore_path(void);
 
+static kmem_cache_t* fpu_cache = nullptr;
+
 struct kernel_stack_layout {
     switch_context_t ctx;
     uint64_t args;
@@ -50,6 +52,12 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         return false;
     }
 
+    size_t fpu_size = simd_get_save_size();
+
+    if (!fpu_cache) {
+        fpu_cache = kmem_cache_create("fpu_cache", fpu_size, 8, SLAB_PANIC, nullptr);
+    }
+
     process_t* proc = t->owner;
 
     t->kernel_stack = vmalloc(
@@ -66,8 +74,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         return false;
     }
 
-    size_t fpu_size = simd_get_save_size();
-    t->fpu_buffer   = kmalloc(fpu_size);
+    t->fpu_buffer = kmem_cache_alloc(fpu_cache);
 
     if (!t->fpu_buffer) {
         vmfree(&kernel_space, t->kernel_stack, KSTACK_SIZE);
@@ -81,7 +88,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     if (!clean_state) {
         errno = ENODEV;
         KLOG_ERROR("THREAD: missing SIMD clean state tid=%u pid=%u\n", t->tid, proc->pid);
-        kfree(t->fpu_buffer, fpu_size);
+        kmem_cache_free(fpu_cache, t->fpu_buffer);
         vmfree(&kernel_space, t->kernel_stack, KSTACK_SIZE);
         return false;
     }
@@ -151,8 +158,7 @@ void arch_thread_destroy(thread_t* t) {
     }
 
     if (t->fpu_buffer) {
-        size_t fpu_size = simd_get_save_size();
-        kfree(t->fpu_buffer, fpu_size);
+        kmem_cache_free(fpu_cache, t->fpu_buffer);
     }
 
     if (!t->owner->is_kernel && t->context_rsp != 0) {
@@ -168,7 +174,7 @@ void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf) {
     }
 
     size_t fpu_size   = simd_get_save_size();
-    child->fpu_buffer = kmalloc(fpu_size);
+    child->fpu_buffer = kmem_cache_alloc(fpu_cache);
 
     if (!child->fpu_buffer) {
         vmfree(&kernel_space, child->kernel_stack, KSTACK_SIZE);

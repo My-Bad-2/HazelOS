@@ -40,7 +40,11 @@ struct rb_root_cached {
 #define RB_EMPTY_NODE(node) ((node)->rb_parent == (node))
 
 #ifndef container_of
-#define container_of(ptr, type, member) ((type*)((char*)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member)                   \
+    ({                                                    \
+        const typeof(((type*)0)->member)* __mptr = (ptr); \
+        (type*)((char*)__mptr - offsetof(type, member));  \
+    })
 #endif
 
 #define rb_entry(ptr, type, member) container_of(ptr, type, member)

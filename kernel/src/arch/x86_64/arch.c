@@ -5,7 +5,11 @@
 #include "compiler.h"
 #include "cpu/cpu.h"
 #include "drivers/term.h"
+#include "drivers/tsc.h"
 #include "drivers/uart.h"
+
+#define MIX_K1 0xff51afd7ed558ccdul
+#define MIX_K2 0xc4ceb9fe1a85ec53ul
 
 void arch_disable_interrupts(void) {
     asm volatile("cli");
@@ -66,6 +70,63 @@ void arch_restore_flags(size_t flags) {
         "pushq %0;"
         "popfq;" ::"r"(flags)
     );
+}
+
+static inline int rdseed_read(uint64_t* dest) {
+    char success = 0;
+
+    asm volatile(
+        "rdseed %0\n\t"
+        "setc %1"
+        : "=r"(*dest), "=qm"(success)::"cc"
+    );
+
+    return success;
+}
+
+static inline int rdrand_read(uint64_t* dest) {
+    char success = 0;
+
+    asm volatile(
+        "rdrand %0\n\t"
+        "setc %1"
+        : "=r"(*dest), "=qm"(success)::"cc"
+    );
+
+    return success;
+}
+
+uint64_t arch_get_random_bytes(void) {
+    uint64_t rand_val = 0;
+    uint64_t tsc_val  = tsc_read();
+
+    int success = 0;
+    for (int i = 0; i < 20 && !success; ++i) {
+        success = rdseed_read(&rand_val);
+
+        if (!success) {
+            arch_pause();
+        }
+    }
+
+    if (!success) {
+        for (int i = 0; i < 10 && !success; ++i) {
+            success = rdrand_read(&rand_val);
+        }
+    }
+
+    if (!success) {
+        rand_val = tsc_val;
+    }
+
+    uint64_t combined = rand_val ^ tsc_val;
+    combined ^= (combined >> 33);
+    combined *= MIX_K1;
+    combined ^= (combined >> 33);
+    combined *= MIX_K2;
+    combined ^= (combined >> 33);
+
+    return combined;
 }
 
 void arch_serial_init(void) {

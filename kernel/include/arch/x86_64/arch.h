@@ -17,6 +17,7 @@ size_t arch_save_flags(void);
 void arch_restore_flags(size_t flags);
 
 uint32_t arch_get_core_idx(void);
+uint64_t arch_get_random_bytes(void);
 
 void arch_write(const char* str);
 void arch_writec(char ch);

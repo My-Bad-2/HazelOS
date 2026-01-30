@@ -458,7 +458,7 @@ void pmm_dec_ref(void* ptr) {
 
     if (new_val == 0) {
         int order = page->order;
-        KLOG_TRACE("PMM: Freeing %p (Order %d)", ptr, order);
+        // KLOG_TRACE("PMM: Freeing %p (Order %d)\n", ptr, order);
 
         if (order == 0 && pcp_caches) {
             uint32_t cpu            = arch_get_core_idx();

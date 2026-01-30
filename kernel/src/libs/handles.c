@@ -3,7 +3,9 @@
 #include <stdatomic.h>
 
 #include "libs/spinlock.h"
-#include "memory/heap.h"
+#include "memory/memory.h"
+#include "memory/pagemap.h"
+#include "memory/vma.h"
 
 void handle_table_init(handle_table_t* table) {
     create_spinlock(&table->lock);
@@ -11,7 +13,13 @@ void handle_table_init(handle_table_t* table) {
     table->active_count  = 0;
     table->next_free_idx = 0;
 
-    table->slots = kmalloc(sizeof(handle_slot_t) * HANDLE_MAX);
+    table->slots = vmalloc(
+        &kernel_space,
+        sizeof(handle_slot_t) * HANDLE_MAX,
+        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
+        CACHE_WRITE_BACK,
+        PAGE_SIZE_SMALL
+    );
 
     for (uint32_t i = 0; i < HANDLE_MAX - 1; ++i) {
         table->slots[i].obj        = nullptr;
