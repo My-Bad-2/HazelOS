@@ -21,6 +21,7 @@
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 #include "sched/process.h"
+#include "sched/rcu.h"
 
 #define LOAD_BALANCE_INTERVAL 1000
 #define SCHEDULER_LATENCY     20
@@ -101,7 +102,23 @@ static const uint32_t runnable_avg_yN_inv[] = {
 void arch_switch_context(switch_context_t** prev, switch_context_t* next);
 
 static void idle_task_entry(void*) {
-    arch_halt(true);
+    while (true) {
+        rcu_barrier_all();
+
+        arch_disable_interrupts();
+
+        if (!smp_current_core()->reschedule_needed) {
+            qsbr_exit(&g_qsbr);
+
+            arch_halt(true);
+
+            qsbr_enter(&g_qsbr);
+        } else {
+            arch_enable_interrupts();
+        }
+
+        schedule();
+    }
 }
 
 static bool is_cpu_idle(per_cpu_data_t* cpu) {
@@ -186,6 +203,8 @@ void scheduler_init(void) {
         cpu->curr_thread  = idle;
         cpu->thread_count = 0;
     }
+
+    rcu_init();
 
     timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
 
@@ -924,6 +943,8 @@ void schedule(void) {
     }
 
     acquire_interrupt_lock(&cpu->lock);
+
+    qsbr_checkpoint(&g_qsbr);
 
     update_cpu_load(cpu, now);
     if (curr && curr != cpu->idle_thread && (curr->state == THREAD_RUNNING)) {
