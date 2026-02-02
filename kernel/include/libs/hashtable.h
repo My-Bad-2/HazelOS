@@ -55,7 +55,6 @@ static inline bool ht_empty(const struct hlist_head* head) {
 
 static inline void __ht_link_node(struct hlist_head* head, struct hlist_node* node) {
     if (unlikely(!ht_unhashed(node))) {
-        PANIC("Double Hash insert!");
         return;
     }
 

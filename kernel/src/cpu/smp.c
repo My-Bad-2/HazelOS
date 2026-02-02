@@ -15,6 +15,7 @@
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
+#include "sched/rcu.h"
 
 extern uint8_t bootstrap_stack[];
 
@@ -43,6 +44,13 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
     }
 
     cpu->kstack_top = (uintptr_t)stack + KSTACK_SIZE;
+    cpu->rcu        = vmalloc(
+        &kernel_space,
+        sizeof(struct rcu_data),
+        VMM_FLAG_READ | VMM_FLAG_WRITE,
+        CACHE_WRITE_BACK,
+        PAGE_SIZE_SMALL
+    );
 
     create_interrupt_lock(&cpu->lock);
 

@@ -935,6 +935,8 @@ void schedule(void) {
         balance_load();
     }
 
+    rcu_check_callbacks();
+
     thread_t* curr = cpu->curr_thread;
     size_t now     = get_time_now();
 

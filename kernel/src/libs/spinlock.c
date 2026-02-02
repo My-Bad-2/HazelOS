@@ -75,8 +75,8 @@ void create_interrupt_lock(interrupt_lock_t* lock) {
 void acquire_interrupt_lock(interrupt_lock_t* lock) {
     ASSERT(lock);
 
-    acquire_spinlock(&lock->base_lock);
     acquire_irq_lock(&lock->irq_lock);
+    acquire_spinlock(&lock->base_lock);
 }
 
 void release_interrupt_lock(interrupt_lock_t* lock) {
