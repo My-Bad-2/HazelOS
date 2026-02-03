@@ -23,12 +23,25 @@ struct hlist_node {
 #define HT_KEY_PTR(ptr) ((uint64_t)(ptr) >> 3)
 
 // bits is the log2 of table size
-static inline uint32_t ht_hash_32(uint32_t val, unsigned int bits) {
-    return (val * 0x9e3779b9u) >> (32 - bits);
+static inline uint32_t ht_hash_32(uint32_t key, unsigned int bits) {
+    key = ~key + (key << 15);
+    key = key ^ (key >> 12);
+    key = key + (key << 2);
+    key = key ^ (key >> 4);
+    key = key * 2057;
+    key = key ^ (key >> 16);
+    return key >> (32 - bits);
 }
 
-static inline uint32_t ht_hash_64(uint64_t val, unsigned int bits) {
-    return (val * 0x9e3779b97f4a7c15u) >> (64 - bits);
+static inline uint32_t ht_hash_64(uint64_t key, unsigned int bits) {
+    key = ~key + (key << 21);
+    key = key ^ (key >> 24);
+    key = (key + (key << 3)) + (key << 8);
+    key = key ^ (key >> 14);
+    key = (key + (key << 2)) + (key << 4);
+    key = key ^ (key >> 28);
+    key = key + (key << 31);
+    return (uint32_t)(key >> (64 - bits));
 }
 
 #define ht_hash_val(val, bits) \
@@ -55,6 +68,7 @@ static inline bool ht_empty(const struct hlist_head* head) {
 
 static inline void __ht_link_node(struct hlist_head* head, struct hlist_node* node) {
     if (unlikely(!ht_unhashed(node))) {
+        PANIC("key collision Detected!");
         return;
     }
 
