@@ -83,6 +83,17 @@ static inline void dlist_splice(struct dlist_head* list, struct dlist_head* head
     }
 }
 
+static size_t dlist_count(struct dlist_head* head) {
+    size_t count            = 0;
+    struct dlist_head* curr = head->next;
+    while (curr != head) {
+        ++count;
+        curr = curr->next;
+    }
+
+    return count;
+}
+
 #define dlist_entry(ptr, type, member) container_of(ptr, type, member)
 
 #define dlist_for_each(pos, head) for ((pos) = (head)->next; (pos) != (head); (pos) = (pos)->next)

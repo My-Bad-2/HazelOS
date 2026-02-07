@@ -9,7 +9,13 @@
 struct process;
 struct thread;
 
-typedef enum { OBJ_CHANNEL, OBJ_PORT_SET, OBJ_TIMER, OBJ_SHARED_MEM } ipc_obj_type_t;
+typedef enum {
+    OBJ_CHANNEL,
+    OBJ_PORT_SET,
+    OBJ_TIMER,
+    OBJ_SHARED_MEM,
+    OBJ_ANY,
+} ipc_obj_type_t;
 
 typedef struct {
     ipc_obj_type_t type;
@@ -46,6 +52,37 @@ typedef struct {
     bool is_embedded;
 } ipc_kernel_event_t;
 
+struct ipc_info {
+    ipc_obj_type_t type;
+    int32_t ref_count;
+    uint32_t rights;
+
+    union {
+        struct {
+            int32_t peer_handle;
+            bool peer_alive;
+            size_t queued_handles;
+            uint64_t user_key;
+        } channel;
+
+        struct {
+            size_t pending_events;
+            size_t active_threads;
+        } port_set;
+
+        struct {
+            size_t size_bytes;
+            size_t page_count;
+        } shm;
+
+        struct {
+            uint64_t deadline;
+            bool is_periodic;
+            bool is_active;
+        } timer;
+    };
+};
+
 int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out);
 int sys_ipc_create_port_set(int32_t* handle_out);
 void sys_ipc_close(int32_t handle);
@@ -56,6 +93,8 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms);
 
 int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t count);
 int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_count);
+
+int sys_ipc_inspect(int32_t handle, struct ipc_info* info);
 
 int sys_ipc_timer_arm(
     int32_t port_handle,

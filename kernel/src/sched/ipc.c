@@ -92,7 +92,7 @@ static void* get_object(process_t* proc, int32_t handle, ipc_obj_type_t type, ui
         return nullptr;
     }
 
-    if (obj->type != type) {
+    if ((obj->type != type) && (type != OBJ_ANY)) {
         return nullptr;
     }
 
@@ -630,5 +630,77 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
     *handle_out = handle;
     *vaddr_out  = shm->pages[0];
 
+    return 0;
+}
+
+int sys_ipc_inspect(int32_t handle, struct ipc_info* info) {
+    if (!info) {
+        return -EINVAL;
+    }
+
+    process_t* me = smp_current_core()->curr_thread->owner;
+
+    uint32_t rights = 0;
+    if (get_handle_rights(me, handle, &rights) < 0) {
+        return -EBADF;
+    }
+
+    ipc_object_t* obj = get_object(me, handle, OBJ_ANY, IPC_RIGHT_INSPECT);
+
+    if (!obj) {
+        return -EACCES;
+    }
+
+    memset(info, 0, sizeof(struct ipc_info));
+    info->type      = obj->type;
+    info->ref_count = atomic_load(&obj->ref_count);
+    info->rights    = rights;
+
+    acquire_spinlock(&obj->lock);
+
+    switch (obj->type) {
+        case OBJ_CHANNEL: {
+            ipc_channel_t* chan          = (ipc_channel_t*)obj;
+            info->channel.user_key       = chan->user_key;
+            info->channel.queued_handles = dlist_count(&chan->handle_queue);
+
+            if (chan->peer) {
+                info->channel.peer_alive  = true;
+                info->channel.peer_handle = 1;
+            } else {
+                info->channel.peer_alive  = false;
+                info->channel.peer_handle = -1;
+            }
+            break;
+        }
+
+        case OBJ_PORT_SET: {
+            ipc_port_set_t* set           = (ipc_port_set_t*)obj;
+            info->port_set.pending_events = dlist_count(&set->event_queue);
+            info->port_set.active_threads = dlist_count(&set->waiters.list);
+            break;
+        }
+
+        case OBJ_SHARED_MEM: {
+            struct ipc_shared_mem* shm = (struct ipc_shared_mem*)obj;
+            info->shm.size_bytes       = shm->size;
+            info->shm.page_count       = shm->page_count;
+            break;
+        }
+
+        case OBJ_TIMER: {
+            struct ipc_timer* t = (struct ipc_timer*)obj;
+
+            info->timer.deadline  = t->hw_timer.expires_at;
+            info->timer.is_active = (t->hw_timer.node.rb_parent->rb_color != 0);
+            break;
+        }
+
+        case OBJ_ANY:
+        default:
+            break;
+    }
+
+    release_spinlock(&obj->lock);
     return 0;
 }
