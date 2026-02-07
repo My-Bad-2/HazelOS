@@ -9,7 +9,6 @@
 #include "drivers/timer.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
-#include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
@@ -168,7 +167,7 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
 
     void* kpage = vmalloc(
         &me->space,
-        sizeof(ipc_ring_t),
+        IPC_RING_SIZE,
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER,
         CACHE_WRITE_BACK,
         PAGE_SIZE_SMALL
@@ -181,7 +180,13 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
         return -ENOMEM;
     }
 
-    *ring_vaddr_out = (uintptr_t)kpage;
+    ipc_ring_t* ring = (ipc_ring_t*)kpage;
+    memset(ring, 0, sizeof(ipc_ring_t));
+
+    ring->capacity = IPC_RING_SIZE - sizeof(ipc_ring_t);
+    if (ring_vaddr_out) {
+        *ring_vaddr_out = (uintptr_t)kpage;
+    }
 
     int handle1 = alloc_handle(me, &ch1->header, IPC_RIGHTS_ALL);
 

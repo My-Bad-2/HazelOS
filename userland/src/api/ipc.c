@@ -11,6 +11,8 @@
 #define MSG_MAGIC 0xAABBCCDD
 
 int ipc_ring_write(ipc_ring_t* ring, const void* src, uint32_t len) {
+    uint32_t capacity = ring->capacity;
+
     if (len > IPC_RING_SIZE) {
         return 1;
     }
@@ -25,7 +27,7 @@ int ipc_ring_write(ipc_ring_t* ring, const void* src, uint32_t len) {
         return 1;
     }
 
-    uint32_t idx    = tail & IPC_RING_MASK;
+    uint32_t idx    = tail % capacity;
     uint32_t to_end = IPC_RING_SIZE - idx;
 
     if (len <= to_end) {
@@ -40,6 +42,8 @@ int ipc_ring_write(ipc_ring_t* ring, const void* src, uint32_t len) {
 }
 
 uint32_t ipc_ring_read(ipc_ring_t* ring, void* dest, uint32_t max_len) {
+    uint32_t capacity = ring->capacity;
+
     uint32_t head = atomic_load_explicit(&ring->head, memory_order_relaxed);
     uint32_t tail = atomic_load_explicit(&ring->tail, memory_order_acquire);
 
@@ -50,7 +54,7 @@ uint32_t ipc_ring_read(ipc_ring_t* ring, void* dest, uint32_t max_len) {
 
     uint32_t to_read = (available < max_len) ? available : max_len;
 
-    uint32_t idx    = head & IPC_RING_MASK;
+    uint32_t idx    = head % capacity;
     uint32_t to_end = IPC_RING_SIZE - idx;
 
     if (to_read <= to_end) {
@@ -79,6 +83,8 @@ int ipc_send_msg(
     if (handle_count > IPC_MAX_HANDLES) {
         return -EINVAL;
     }
+
+    uint32_t capacity = ring->capacity;
 
     ipc_message_header_t header = {
         .magic        = MSG_MAGIC,
@@ -118,14 +124,14 @@ int ipc_send_msg(
     }
 
     uint32_t tail = atomic_load_explicit(&ring->tail, memory_order_relaxed);
-    uint32_t idx  = tail & IPC_RING_MASK;
+    uint32_t idx  = tail % capacity;
 
     for (size_t i = 0; i < sizeof(header); ++i) {
-        ring->data[(idx + i) & IPC_RING_MASK] = ((uint8_t*)&header)[i];
+        ring->data[(idx + i) % capacity] = ((uint8_t*)&header)[i];
     }
 
     for (size_t i = 0; i < len; ++i) {
-        ring->data[(idx + sizeof(header) + i) & IPC_RING_MASK] = ((const uint8_t*)data)[i];
+        ring->data[(idx + sizeof(header) + i) % capacity] = ((const uint8_t*)data)[i];
     }
 
     atomic_store_explicit(&ring->tail, tail + total_size, memory_order_release);
@@ -149,6 +155,8 @@ int ipc_recv_msg(
     ipc_message_header_t header;
     ipc_event_t event;
 
+    uint32_t capacity = ring->capacity;
+
     int count = 0;
 
     while (true) {
@@ -164,10 +172,10 @@ int ipc_recv_msg(
     }
 
     uint32_t head = atomic_load_explicit(&ring->head, memory_order_relaxed);
-    uint32_t idx  = head & IPC_RING_MASK;
+    uint32_t idx  = head % capacity;
 
     for (size_t i = 0; i < sizeof(header); ++i) {
-        ((uint8_t*)&header)[i] = ring->data[(idx + i) & IPC_RING_MASK];
+        ((uint8_t*)&header)[i] = ring->data[(idx + i) % capacity];
     }
 
     if (header.magic != MSG_MAGIC) {
@@ -191,15 +199,20 @@ int ipc_recv_msg(
     }
 
     for (size_t i = 0; i < header.payload_len; ++i) {
-        ((uint8_t*)buffer)[i] = ring->data[(idx + sizeof(header) + i) & IPC_RING_MASK];
+        ((uint8_t*)buffer)[i] = ring->data[(idx + sizeof(header) + i) % capacity];
     }
 
     size_t recv = 0;
 
     char buf[128];
     while (recv < header.handle_count) {
-        recv +=
-            (size_t)ipc_recv_handles(chan_handle, &handles_out[recv], header.handle_count - recv);
+        int n = ipc_recv_handles(chan_handle, &handles_out[recv], header.handle_count - recv);
+
+        if (n < 0) {
+            return n;
+        }
+
+        recv += (size_t)n;
 
         if (recv < header.handle_count) {
             ipc_wait(port_set, &event, 100);

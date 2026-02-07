@@ -23,8 +23,11 @@ typedef struct {
 typedef struct [[gnu::aligned(64)]] {
     atomic_uint tail;
     atomic_uint head;
+    uint32_t capacity;
 
-    uint8_t data[IPC_RING_SIZE];
+    uint8_t pad[52];
+
+    uint8_t data[];
 } ipc_ring_t;
 
 typedef struct {

@@ -4,7 +4,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#define IPC_RING_SIZE (4096 * 4)
+#define IPC_RING_SIZE (4096ul * 4)
 
 #define IPC_EVENT_READABLE (1 << 0)
 #define IPC_EVENT_WRITABLE (1 << 1)
@@ -13,8 +13,11 @@
 typedef struct [[gnu::aligned(64)]] {
     atomic_uint tail;
     atomic_uint head;
+    uint32_t capacity;
 
-    uint8_t data[IPC_RING_SIZE];
+    uint8_t pad[52];
+
+    uint8_t data[];
 } ipc_ring_t;
 
 typedef struct {
