@@ -14,7 +14,7 @@ int64_t write(int fd, const char* str, size_t len) {
 int ipc_create_channel(int32_t* handles, uintptr_t* ring_vaddr_out) {
     long ret = syscall(SYS_IPC_CREATE_CHANNEL, (long)handles, (long)ring_vaddr_out);
 
-    if (ret < 0) {
+    if (ret != 0) {
         return -1;
     }
 

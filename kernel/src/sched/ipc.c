@@ -9,6 +9,7 @@
 #include "drivers/timer.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
+#include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
@@ -167,7 +168,7 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
 
     void* kpage = vmalloc(
         &me->space,
-        PAGE_SIZE_SMALL,
+        sizeof(ipc_ring_t),
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER,
         CACHE_WRITE_BACK,
         PAGE_SIZE_SMALL
@@ -191,6 +192,8 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
     int handle2 = alloc_handle(me, &ch2->header, IPC_RIGHTS_ALL);
 
     if (handle2 < 0) {
+        sys_ipc_close(handle1);
+        kmem_cache_free(channel_cache, ch2);
         return handle2;
     }
 
@@ -201,8 +204,7 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
 }
 
 int sys_ipc_create_port_set(int32_t* handle_out) {
-    process_t* me = smp_current_core()->curr_thread->owner;
-
+    process_t* me       = smp_current_core()->curr_thread->owner;
     ipc_port_set_t* set = kmalloc(sizeof(ipc_port_set_t));
 
     if (!set) {
@@ -224,7 +226,10 @@ int sys_ipc_create_port_set(int32_t* handle_out) {
         return handle;
     }
 
-    *handle_out = handle;
+    if (handle_out) {
+        *handle_out = handle;
+    }
+
     return 0;
 }
 
@@ -317,8 +322,7 @@ int sys_ipc_notify(int32_t chan_handle) {
 }
 
 int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
-    process_t* me = smp_current_core()->curr_thread->owner;
-
+    process_t* me       = smp_current_core()->curr_thread->owner;
     ipc_port_set_t* set = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_READ);
 
     if (!set) {
@@ -332,10 +336,14 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
             struct dlist_head* first  = set->event_queue.next;
             ipc_kernel_event_t* event = dlist_entry(first, ipc_kernel_event_t, node);
 
-            *out_event = event->data;
+            if (out_event) {
+                *out_event = event->data;
+            }
+
             dlist_del(first);
+
             if (!event->is_embedded) {
-                kfree(event, sizeof(ipc_kernel_event_t));
+                kmem_cache_free(event_cache, event);
             }
 
             release_spinlock(&set->header.lock);
@@ -344,8 +352,6 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
 
         thread_t* t = smp_current_core()->curr_thread;
         thread_queue_push(&set->waiters, t);
-
-        t->state = THREAD_BLOCKED;
 
         release_spinlock(&set->header.lock);
         scheduler_sleep((uint32_t)timeout_ms);
@@ -413,6 +419,7 @@ int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t coun
     }
 
     acquire_spinlock(&dest->header.lock);
+    dlist_init(&dest->handle_queue);
 
     for (size_t i = 0; i < count; ++i) {
         struct ipc_handle_msg* msg = kmem_cache_alloc(msg_cache);
@@ -442,7 +449,7 @@ int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_c
 
     acquire_spinlock(&channel->header.lock);
 
-    size_t read_count = 0;
+    int read_count = 0;
 
     while (read_count < max_count && !dlist_empty(&channel->handle_queue)) {
         struct dlist_head* node    = channel->handle_queue.next;
@@ -458,7 +465,7 @@ int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_c
     }
 
     release_spinlock(&channel->header.lock);
-    return (int)read_count;
+    return read_count;
 }
 
 static void ipc_timer_callback(void* ctx) {
@@ -598,6 +605,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
     }
 
     acquire_spinlock(&shm->header.lock);
+
     for (size_t i = 0; i < page_count; ++i) {
         void* virt_addr = vmalloc(
             &me->space,
@@ -616,7 +624,8 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
         memset(virt_addr, 0, PAGE_SIZE_SMALL);
         shm->pages[i] = (uintptr_t)virt_addr;
     }
-    acquire_spinlock(&shm->header.lock);
+
+    release_spinlock(&shm->header.lock);
 
     int32_t handle = alloc_handle(me, &shm->header, IPC_RIGHTS_ALL);
 

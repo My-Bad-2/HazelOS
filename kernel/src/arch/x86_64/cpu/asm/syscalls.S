@@ -34,14 +34,9 @@ syscall_entry:
     # %rdi = ARG1
     # %rsi = ARG2
     # %rdx = ARG3
-    # %rcx = ARG4
+    # %r10 = ARG4
     # %r8  = ARG5
     # %r9  = ARG6
-    # Userspace sends: %rdi, %rsi, %rdx, %r10, %r8, %r9
-    # SYSCALL destroyed %rcx, so userspace puts ARG4 in %r10
-
-    # Now we fix it
-    movq %r10, %rcx
     
     movq %rax, %rsi # Syscall number
     movq %rsp, %rdi # Pointer to the stack frame

@@ -45,26 +45,39 @@ void syscall_init(void) {
     syscalls_init();
 }
 
-static void* custom_syscalls[] = {
-    sys_ipc_create_channel,
-    sys_ipc_create_port_set,
-    sys_ipc_bind,
-    sys_ipc_notify,
-    sys_ipc_wait,
-    sys_ipc_close,
-    sys_ipc_send_handles,
-    sys_ipc_recv_handles,
-    sys_ipc_timer_arm,
-    sys_ipc_shm_alloc,
+typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+static uint64_t sys_ipc_close_wrapper(uint64_t handle) {
+    sys_ipc_close((int32_t)handle);
+    return 0;
+}
+
+static uint64_t sys_ipc_recv_handles_wrapper(uint64_t h, uint64_t buf, uint64_t max) {
+    return (uint64_t)sys_ipc_recv_handles((int32_t)h, (int32_t*)buf, (size_t)max);
+}
+
+static syscall_fn_t custom_syscalls[] = {
+    (syscall_fn_t)sys_ipc_create_channel,
+    (syscall_fn_t)sys_ipc_create_port_set,
+    (syscall_fn_t)sys_ipc_bind,
+    (syscall_fn_t)sys_ipc_notify,
+    (syscall_fn_t)sys_ipc_wait,
+    (syscall_fn_t)sys_ipc_close_wrapper,
+    (syscall_fn_t)sys_ipc_send_handles,
+    (syscall_fn_t)sys_ipc_recv_handles_wrapper,
+    (syscall_fn_t)sys_ipc_timer_arm,
+    (syscall_fn_t)sys_ipc_shm_alloc,
 };
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
 uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
+    uint64_t res = 0;
+
     if (regs->rax < 450) {
         switch (regs->rax) {
             case SYS_WRITE:
                 // RDI = FD; RSI = Buffer Pointer; RDX = count
-                regs->rax = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
+                res = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
                 break;
             default:
                 KLOG_DEBUG("Syscall %lu called!\n", num);
@@ -73,9 +86,15 @@ uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
     } else if (regs->rax >= 500) {
         int idx = (int)regs->rax - 500;
 
-        uint64_t (*func)(...) = custom_syscalls[idx];
-        regs->rax = func(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
+        if (idx < 0 || idx >= sizeof(custom_syscalls) / sizeof(syscall_fn_t)) {
+            return (uint64_t)-1;
+        }
+
+        syscall_fn_t func = custom_syscalls[idx];
+        res               = func(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
     }
 
-    return 0;
+    regs->rax = res;
+
+    return res;
 }
