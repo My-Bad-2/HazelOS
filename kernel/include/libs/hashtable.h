@@ -5,7 +5,6 @@
 #include <stdint.h>
 
 #include "compiler.h"
-#include "libs/log.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,7 +67,6 @@ static inline bool ht_empty(const struct hlist_head* head) {
 
 static inline void __ht_link_node(struct hlist_head* head, struct hlist_node* node) {
     if (unlikely(!ht_unhashed(node))) {
-        PANIC("key collision Detected!");
         return;
     }
 

@@ -12,6 +12,18 @@
 #define IPC_EVENT_WRITABLE (1 << 1)
 #define IPC_EVENT_CLOSED   (1 << 2)
 
+#define IPC_RIGHT_NONE      0
+#define IPC_RIGHT_READ      (1 << 0)  // Can read / wait
+#define IPC_RIGHT_WRITE     (1 << 1)  // Can write / notify
+#define IPC_RIGHT_TRANSFER  (1 << 2)  // Can send this handle to others
+#define IPC_RIGHT_MAP       (1 << 3)  // Can Map (for Shared Mem)
+#define IPC_RIGHT_DUPLICATE (1 << 4)  // Can Clone the Handle
+
+#define IPC_RIGHTS_ALL UINT32_MAX
+#define IPC_RIGHTS_READ_ONLY \
+    (IPC_RIGHT_READ | IPC_RIGHT_TRANSFER | IPC_RIGHT_MAP | IPC_RIGHT_DUPLICATE)
+#define IPC_RIGHTS_WRITE_ONLY (IPC_RIGHT_WRITE | IPC_RIGHT_TRANSFER)
+
 // Shared Memory Ring Buffer
 typedef struct [[gnu::aligned(64)]] {
     atomic_uint_fast32_t tail;

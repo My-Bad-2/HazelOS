@@ -24,6 +24,7 @@
 struct ipc_handle_msg {
     struct dlist_head node;
     ipc_object_t* object;
+    uint32_t rights;
 };
 
 struct ipc_timer {
@@ -73,8 +74,8 @@ static thread_t* thread_queue_pop(struct thread_queue* tq) {
     return t;
 }
 
-static int32_t alloc_handle(process_t* proc, ipc_object_t* obj) {
-    handle_t h = handle_alloc(&proc->handle_table, obj);
+static int32_t alloc_handle(process_t* proc, ipc_object_t* obj, uint32_t rights) {
+    handle_t h = handle_alloc(&proc->handle_table, obj, rights);
 
     if (h < 0) {
         return -EMFILE;
@@ -84,8 +85,8 @@ static int32_t alloc_handle(process_t* proc, ipc_object_t* obj) {
     return (int32_t)h;
 }
 
-static void* get_object(process_t* proc, int32_t handle, ipc_obj_type_t type) {
-    ipc_object_t* obj = handle_lookup(&proc->handle_table, (handle_t)handle);
+static void* get_object(process_t* proc, int32_t handle, ipc_obj_type_t type, uint32_t rights) {
+    ipc_object_t* obj = handle_lookup(&proc->handle_table, (handle_t)handle, rights);
 
     if (!obj) {
         return nullptr;
@@ -98,6 +99,10 @@ static void* get_object(process_t* proc, int32_t handle, ipc_obj_type_t type) {
     return obj;
 }
 
+static int get_handle_rights(process_t* proc, int32_t handle, uint32_t* rights_out) {
+    return handle_get_rights(&proc->handle_table, (handle_t)handle, rights_out);
+}
+
 void sys_ipc_close(int32_t handle) {
     process_t* me = smp_current_core()->curr_thread->owner;
 
@@ -108,7 +113,10 @@ void sys_ipc_close(int32_t handle) {
             if (obj->type == OBJ_CHANNEL) {
                 kmem_cache_free(channel_cache, obj);
             } else if (obj->type == OBJ_TIMER) {
+                timer_cancel(&((struct ipc_timer*)obj)->hw_timer);
                 kmem_cache_free(timer_cache, obj);
+            } else if (obj->type == OBJ_SHARED_MEM) {
+                kfree(obj, sizeof(struct ipc_shared_mem));
             } else {
                 kfree(obj, sizeof(ipc_object_t));
             }
@@ -133,6 +141,14 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
     ipc_channel_t* ch2 = kmem_cache_alloc(channel_cache);
 
     if (!ch1 || !ch2) {
+        if (ch1) {
+            kmem_cache_free(channel_cache, ch1);
+        }
+
+        if (ch2) {
+            kmem_cache_free(channel_cache, ch2);
+        }
+
         return -ENOMEM;
     }
 
@@ -157,10 +173,26 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
         PAGE_SIZE_SMALL
     );
 
+    if (!kpage) {
+        kmem_cache_free(channel_cache, ch1);
+        kmem_cache_free(channel_cache, ch2);
+
+        return -ENOMEM;
+    }
+
     *ring_vaddr_out = (uintptr_t)kpage;
 
-    int handle1 = alloc_handle(me, &ch1->header);
-    int handle2 = alloc_handle(me, &ch2->header);
+    int handle1 = alloc_handle(me, &ch1->header, IPC_RIGHTS_ALL);
+
+    if (handle1 < 0) {
+        return handle1;
+    }
+
+    int handle2 = alloc_handle(me, &ch2->header, IPC_RIGHTS_ALL);
+
+    if (handle2 < 0) {
+        return handle2;
+    }
 
     handles_out[0] = handle1;
     handles_out[1] = handle2;
@@ -172,6 +204,11 @@ int sys_ipc_create_port_set(int32_t* handle_out) {
     process_t* me = smp_current_core()->curr_thread->owner;
 
     ipc_port_set_t* set = kmalloc(sizeof(ipc_port_set_t));
+
+    if (!set) {
+        return -ENOMEM;
+    }
+
     memset(set, 0, sizeof(ipc_port_set_t));
 
     set->header.type = OBJ_PORT_SET;
@@ -180,7 +217,7 @@ int sys_ipc_create_port_set(int32_t* handle_out) {
     dlist_init(&set->event_queue);
     thread_queue_init(&set->waiters);
 
-    int32_t handle = alloc_handle(me, &set->header);
+    int32_t handle = alloc_handle(me, &set->header, IPC_RIGHTS_ALL);
 
     if (handle == 0) {
         kfree(set, sizeof(ipc_object_t));
@@ -194,11 +231,12 @@ int sys_ipc_create_port_set(int32_t* handle_out) {
 int sys_ipc_bind(int32_t port_handle, int32_t chan_handle, uint64_t key) {
     process_t* me = smp_current_core()->curr_thread->owner;
 
-    ipc_port_set_t* set    = get_object(me, port_handle, OBJ_PORT_SET);
-    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL);
+    // We need Write rights on the channel and read rights on the port set
+    ipc_port_set_t* set    = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_READ);
+    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
 
     if (!set || !channel) {
-        return -EBADF;
+        return -EACCES;
     }
 
     acquire_spinlock(&channel->header.lock);
@@ -235,7 +273,6 @@ static void sys_ipc_notify_internal(ipc_channel_t* dest) {
 
     if (!thread_queue_empty(&set->waiters)) {
         thread_t* t = thread_queue_pop(&set->waiters);
-
         scheduler_unblock(t);
     }
 
@@ -254,7 +291,7 @@ int sys_ipc_notify(int32_t chan_handle) {
     }
 
     process_t* me      = smp_current_core()->curr_thread->owner;
-    ipc_channel_t* src = get_object(me, chan_handle, OBJ_CHANNEL);
+    ipc_channel_t* src = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
 
     if (!src) {
         return -EBADF;
@@ -280,11 +317,12 @@ int sys_ipc_notify(int32_t chan_handle) {
 }
 
 int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
-    process_t* me       = smp_current_core()->curr_thread->owner;
-    ipc_port_set_t* set = get_object(me, port_handle, OBJ_PORT_SET);
+    process_t* me = smp_current_core()->curr_thread->owner;
+
+    ipc_port_set_t* set = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_READ);
 
     if (!set) {
-        return -EBADF;
+        return -EACCES;
     }
 
     while (true) {
@@ -340,15 +378,26 @@ int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t coun
     }
 
     process_t* me          = smp_current_core()->curr_thread->owner;
-    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL);
+    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
 
     if (!channel) {
-        return -EBADF;
+        return -EACCES;
     }
 
     ipc_object_t* objs[8];
+    uint32_t rights[8];
+
     for (size_t i = 0; i < count; ++i) {
-        objs[i] = handle_lookup(&me->handle_table, (handle_t)user_handles[i]);
+        if (get_handle_rights(me, user_handles[i], &rights[i]) < 0) {
+            return -EBADF;
+        }
+
+        // Do we have permission to transfer this handle?
+        if (!(rights[i] & IPC_RIGHT_TRANSFER)) {
+            return -EACCES;
+        }
+
+        objs[i] = handle_lookup(&me->handle_table, (handle_t)user_handles[i], 0);
 
         if (!objs[i]) {
             return -EBADF;
@@ -367,7 +416,9 @@ int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t coun
 
     for (size_t i = 0; i < count; ++i) {
         struct ipc_handle_msg* msg = kmem_cache_alloc(msg_cache);
-        msg->object                = objs[i];
+
+        msg->object = objs[i];
+        msg->rights = rights[i];
 
         atomic_fetch_add(&msg->object->ref_count, 1);
         dlist_add_tail(&msg->node, &dest->handle_queue);
@@ -383,10 +434,10 @@ int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t coun
 
 int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_count) {
     process_t* me          = smp_current_core()->curr_thread->owner;
-    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL);
+    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_READ);
 
     if (!channel) {
-        return -EBADF;
+        return -EACCES;
     }
 
     acquire_spinlock(&channel->header.lock);
@@ -398,7 +449,7 @@ int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_c
         struct ipc_handle_msg* msg = dlist_entry(node, struct ipc_handle_msg, node);
         dlist_del(node);
 
-        int32_t new_h = alloc_handle(me, msg->object);
+        int32_t new_h = alloc_handle(me, msg->object, msg->rights);
 
         atomic_fetch_sub(&msg->object->ref_count, 1);
 
@@ -444,11 +495,11 @@ int sys_ipc_timer_arm(
     }
 
     process_t* me        = smp_current_core()->curr_thread->owner;
-    ipc_port_set_t* set  = get_object(me, port_handle, OBJ_PORT_SET);
+    ipc_port_set_t* set  = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_WRITE);
     timer_manager_t* mgr = &smp_current_core()->timer_manager;
 
     if (!set) {
-        return -EBADF;
+        return -EACCES;
     }
 
     if (!timer_cache) {
@@ -491,7 +542,7 @@ int sys_ipc_timer_arm(
         timer_arm_oneshot(mgr, &t->hw_timer, ticks, ipc_timer_callback, t);
     }
 
-    int32_t handle = alloc_handle(me, &t->header);
+    int32_t handle = alloc_handle(me, &t->header, IPC_RIGHTS_ALL);
 
     if (handle < 0) {
         timer_cancel(&t->hw_timer);
@@ -501,7 +552,6 @@ int sys_ipc_timer_arm(
     }
 
     *handle_out = handle;
-
     return 0;
 }
 
@@ -568,7 +618,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
     }
     acquire_spinlock(&shm->header.lock);
 
-    int32_t handle = alloc_handle(me, &shm->header);
+    int32_t handle = alloc_handle(me, &shm->header, IPC_RIGHTS_ALL);
 
     if (handle == 0) {
         ipc_shm_free(me, shm);

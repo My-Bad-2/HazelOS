@@ -1,5 +1,6 @@
 #include "libs/handles.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 
 #include "libs/spinlock.h"
@@ -30,7 +31,7 @@ void handle_table_init(handle_table_t* table) {
     table->slots[HANDLE_MAX - 1].next_free = (uint32_t)(-1);
 }
 
-handle_t handle_alloc(handle_table_t* table, void* ptr) {
+handle_t handle_alloc(handle_table_t* table, void* ptr, uint32_t rights) {
     acquire_spinlock(&table->lock);
 
     if (table->next_free_idx == (uint32_t)-1) {
@@ -49,7 +50,8 @@ handle_t handle_alloc(handle_table_t* table, void* ptr) {
         slot->generation++;
     }
 
-    slot->obj = ptr;
+    slot->obj    = ptr;
+    slot->rights = rights;
     __atomic_store_n(&slot->generation, new_gen, memory_order_release);
 
     table->active_count++;
@@ -58,7 +60,7 @@ handle_t handle_alloc(handle_table_t* table, void* ptr) {
     return (handle_t)((new_gen << 16) | idx);
 }
 
-void* handle_lookup(handle_table_t* table, handle_t handle) {
+void* handle_lookup(handle_table_t* table, handle_t handle, uint32_t rights) {
     uint32_t idx     = handle & HANDLE_IDX_MASK;
     uint32_t req_gen = (handle >> 16);
 
@@ -77,7 +79,13 @@ void* handle_lookup(handle_table_t* table, handle_t handle) {
     void* ptr         = slot->obj;
     uint32_t post_gen = __atomic_load_n(&slot->generation, memory_order_acquire);
 
-    if (post_gen != req_gen) {
+    if (post_gen != req_gen || slot->obj == nullptr) {
+        return nullptr;
+    }
+
+    // We check if the handle has all the bits requested in `required_rights`
+    if ((slot->rights & rights) != rights) {
+        // Access denied
         return nullptr;
     }
 
@@ -112,4 +120,22 @@ void* handle_free(handle_table_t* table, handle_t handle) {
 
     release_spinlock(&table->lock);
     return ptr;
+}
+
+int handle_get_rights(handle_table_t* table, handle_t handle, uint32_t* rights_out) {
+    uint32_t idx = handle & HANDLE_IDX_MASK;
+    uint32_t gen = handle >> 16;
+
+    if (idx >= HANDLE_MAX) {
+        return -EBADF;
+    }
+
+    handle_slot_t* slot = &table->slots[idx];
+
+    if (slot->generation != gen) {
+        return -EBADF;
+    }
+
+    *rights_out = slot->rights;
+    return 0;
 }

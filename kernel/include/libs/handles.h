@@ -15,9 +15,13 @@ extern "C" {
 typedef uint32_t handle_t;
 
 typedef struct [[gnu::aligned(16)]] {
-    void* obj;            // Pointer to Process/Thread
-    uint32_t generation;  // (Version counter)
-    uint32_t next_free;   // Free list link
+    union {
+        void* obj;           // Pointer to Process/Thread
+        uint32_t next_free;  // Free list link
+    };
+
+    uint32_t generation;  // Version counter
+    uint32_t rights;      // rights
 } handle_slot_t;
 
 typedef struct {
@@ -28,9 +32,10 @@ typedef struct {
 } handle_table_t;
 
 void handle_table_init(handle_table_t* table);
-handle_t handle_alloc(handle_table_t* table, void* ptr);
-void* handle_lookup(handle_table_t* table, handle_t handle);
+handle_t handle_alloc(handle_table_t* table, void* ptr, uint32_t rights);
+void* handle_lookup(handle_table_t* table, handle_t handle, uint32_t rights);
 void* handle_free(handle_table_t* table, handle_t handle);
+int handle_get_rights(handle_table_t* table, handle_t handle, uint32_t* rights_out);
 
 #ifdef __cplusplus
 }

@@ -48,7 +48,7 @@ process_t* process_create(bool is_kernel) {
 
     handle_table_init(&proc->handle_table);
 
-    proc->pid = handle_alloc(&pid_handle_tbl, proc);
+    proc->pid = handle_alloc(&pid_handle_tbl, proc, 0);
 
     proc->thread_tree = RB_ROOT;
     create_spinlock(&proc->lock);
@@ -197,7 +197,7 @@ thread_t* thread_create(thread_create_args_t* args) {
 
     memset(t, 0, sizeof(thread_t));
 
-    t->tid = handle_alloc(&tid_handle_tbl, t);
+    t->tid = handle_alloc(&tid_handle_tbl, t, 0);
 
     t->owner        = args->proc;
     t->state        = THREAD_READY;
@@ -306,7 +306,7 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
 
     memset(child, 0, sizeof(thread_t));
 
-    child->tid = handle_alloc(&tid_handle_tbl, child);
+    child->tid = handle_alloc(&tid_handle_tbl, child, 0);
 
     if (child->tid == 0) {
         kmem_cache_free(thread_cache, child);
