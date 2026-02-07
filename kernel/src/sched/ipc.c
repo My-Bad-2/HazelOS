@@ -184,6 +184,7 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
     memset(ring, 0, sizeof(ipc_ring_t));
 
     ring->capacity = IPC_RING_SIZE - sizeof(ipc_ring_t);
+
     if (ring_vaddr_out) {
         *ring_vaddr_out = (uintptr_t)kpage;
     }
