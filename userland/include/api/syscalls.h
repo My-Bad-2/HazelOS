@@ -10,8 +10,11 @@
 extern "C" {
 #endif
 
-#define SYS_WRITE 1
-#define SYS_EXIT  60
+#define SYS_WRITE    1
+#define SYS_MMAP     9
+#define SYS_MPROTECT 10
+#define SYS_MUNMAP   11
+#define SYS_EXIT     60
 
 // Custom syscalls
 #define SYS_IPC_CREATE_CHANNEL  500
@@ -25,7 +28,32 @@ extern "C" {
 #define SYS_IPC_TIMER_ARM       508
 #define SYS_IPC_SHM_ALLOC       509
 
+#define MAP_HUGE_SHIFT 26
+#define MAP_HUGE_MASK  0x3f
+
+#define PROT_NONE  0
+#define PROT_EXEC  0x01
+#define PROT_READ  0x02
+#define PROT_WRITE 0x04
+
+#define MAP_SHARED    0x01
+#define MAP_PRIVATE   0x02
+#define MAP_ANONYMOUS 0x04
+#define MAP_FIXED     0x08
+#define MAP_GROWSDOWN 0x10
+#define MAP_HUGETLB   0x20
+#define MAP_POPULATE  0x40
+#define MAP_STACK     0x80
+
+#define MAP_HUGE_2MB (21 << MAP_HUGE_SHIFT)
+#define MAP_HUGE_1GB (30 << MAP_HUGE_SHIFT)
+
+typedef long off_t;
+
 int64_t write(int fd, const char* str, size_t len);
+void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset);
+int munmmap(void* addr, size_t length);
+int mprotect(void* addr, size_t length, int prot);
 
 int ipc_create_channel(int32_t* handles, uintptr_t* out);
 int ipc_create_port_set(void);

@@ -1,5 +1,6 @@
 #include "memory/vma.h"
 
+#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
@@ -977,4 +978,100 @@ void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_
     create_rwlock(&space->lock);
 
     vma_expand_pool(space);
+}
+
+static uint32_t sys_flags_to_vmm(int prot, int flags) {
+    uint32_t ret = VMM_FLAG_USER;
+
+    if (prot & PROT_EXEC) {
+        ret |= VMM_FLAG_EXECUTE;
+    }
+
+    if (prot & PROT_READ) {
+        ret |= VMM_FLAG_READ;
+    }
+
+    if (prot & PROT_WRITE) {
+        ret |= VMM_FLAG_WRITE;
+    }
+
+    if (flags & MAP_GROWSDOWN || flags & MAP_STACK) {
+        ret |= VMM_FLAG_STACK;
+    }
+
+    if (flags & MAP_SHARED) {
+        ret |= VMM_FLAG_SHARED;
+    }
+
+    return ret;
+}
+
+static size_t get_page_size_from_flags(int flags) {
+    if (!(flags & MAP_HUGETLB)) {
+        return PAGE_SIZE_SMALL;
+    }
+
+    uint32_t huge_page_code = (flags >> MAP_HUGE_SHIFT) & MAP_HUGE_MASK;
+
+    if (huge_page_code == 0) {
+        return PAGE_SIZE_MEDIUM;
+    }
+
+    return 1ul << huge_page_code;
+}
+
+void* sys_mmap(
+    vm_space_t* space,
+    void* addr,
+    size_t length,
+    int prot,
+    int flags,
+    int fd,
+    long offset
+) {
+    if (!length || !space) {
+        return (void*)-EINVAL;
+    }
+
+    size_t page_size = get_page_size_from_flags(flags);
+
+    if (page_size != PAGE_SIZE_SMALL && page_size != PAGE_SIZE_MEDIUM &&
+        page_size != PAGE_SIZE_LARGE) {
+        return (void*)-EINVAL;
+    }
+
+    size_t aligned_length = align_up(length, page_size);
+    cache_type_t cache    = CACHE_WRITE_BACK;
+    uint32_t vma_flags    = sys_flags_to_vmm(prot, flags);
+
+    if (flags & MAP_FIXED || addr) {
+        return vmalloc_addr(space, addr, aligned_length, vma_flags, cache, page_size);
+    }
+
+    return vmalloc(space, aligned_length, vma_flags, cache, page_size);
+}
+
+int sys_munmmap(vm_space_t* space, void* addr, size_t length) {
+    if (!space || !addr) {
+        return -EINVAL;
+    }
+
+    vmfree(space, addr, length);
+    return 0;
+}
+
+int sys_mprotect(vm_space_t* space, void* addr, size_t size, int prot) {
+    if (!space || !addr) {
+        return -EINVAL;
+    }
+
+    uint32_t flags = sys_flags_to_vmm(prot, 0);
+
+    pagemap_protect_args_t args = {
+        .virt_addr = (uint8_t*)addr + size,
+        .flags     = flags,
+    };
+
+    pagemap_protect(space->map, &args);
+    return 0;
 }

@@ -290,3 +290,27 @@ int ipc_recv_msg(
 
     return 0;
 }
+
+void* ipc_ring_peek(ipc_ring_t* ring, uint32_t* out_len) {
+    uint32_t head = atomic_load_explicit(&ring->head, memory_order_relaxed);
+    uint32_t cap  = ring->capacity;
+
+    if (out_len) {
+        *out_len = cap - head;
+    }
+
+    return &ring->data[head];
+}
+
+void ipc_ring_advance(ipc_ring_t* ring, uint32_t len) {
+    uint32_t head = atomic_load_explicit(&ring->head, memory_order_relaxed);
+    uint32_t cap  = ring->capacity;
+
+    uint32_t new_head = head + len;
+
+    if (new_head >= cap) {
+        new_head -= cap;
+    }
+
+    atomic_store_explicit(&ring->head, new_head, memory_order_release);
+}

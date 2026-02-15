@@ -8,8 +8,12 @@
 extern "C" {
 #endif
 
-#define SYS_WRITE               1
-#define SYS_EXIT                60
+#define SYS_WRITE    1
+#define SYS_MMAP     9
+#define SYS_MPROTECT 10
+#define SYS_MUNMAP   11
+#define SYS_EXIT     60
+
 #define SYS_IPC_CREATE_CHANNEL  500
 #define SYS_IPC_CREATE_PORT_SET 501
 #define SYS_IPC_BIND            502

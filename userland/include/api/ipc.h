@@ -39,6 +39,9 @@ typedef struct {
 int ipc_ring_write(ipc_ring_t* ring, const void* src, uint32_t len);
 uint32_t ipc_ring_read(ipc_ring_t* ring, void* dest, uint32_t max_len);
 
+void* ipc_ring_peek(ipc_ring_t* ring, uint32_t* out_len);
+void ipc_ring_advance(ipc_ring_t* ring, uint32_t len);
+
 int ipc_send_msg(
     int32_t chan_handle,
     ipc_ring_t* ring,

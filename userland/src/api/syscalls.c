@@ -11,6 +11,18 @@ int64_t write(int fd, const char* str, size_t len) {
     return syscall(SYS_WRITE, (long)fd, (long)str, (long)len);
 }
 
+void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    return (void*)syscall(SYS_MMAP, (long)addr, (long)length, prot, flags, fd, offset);
+}
+
+int mprotect(void* addr, size_t length, int prot) {
+    return (int)syscall(SYS_MPROTECT, (long)addr, (long)length, prot);
+}
+
+int munmmap(void* addr, size_t length) {
+    return (int)syscall(SYS_MUNMAP, (long)addr, (long)length);
+}
+
 int ipc_create_channel(int32_t* handles, uintptr_t* ring_vaddr_out) {
     long ret = syscall(SYS_IPC_CREATE_CHANNEL, (long)handles, (long)ring_vaddr_out);
 
