@@ -499,6 +499,8 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
 
     if (handler) {
         handler(tf, ctx);
+    } else if (tf->vector == EXCEPTION_PAGE_FAULT) {
+        pf_handler(tf);
     } else {
         handle_crash(tf);
     }

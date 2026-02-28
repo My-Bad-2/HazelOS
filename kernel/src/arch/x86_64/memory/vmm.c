@@ -1,13 +1,15 @@
-#include "memory/vmm.h"
-
 #include <errno.h>
 #include <string.h>
 
+#include "cpu/registers.h"
+#include "cpu/smp.h"
 #include "libs/elf.h"
 #include "libs/log.h"
 #include "libs/math.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
+#include "memory/paging.h"
+#include "memory/vma.h"
 
 static uint32_t vmm_get_segment_flags(uint32_t elf_flags) {
     uint32_t flags = 0;
@@ -103,5 +105,32 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
             );
             return;
         }
+    }
+}
+
+struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code) {
+    struct vmm_fault_info info = {0};
+
+    info.is_present = (error_code & X86_PAGE_FAULT_PRESENT) != 0;
+    info.is_write   = (error_code & X86_PAGE_FAULT_WRITE) != 0;
+    info.is_user    = (error_code & X86_PAGE_FAULT_USER) != 0;
+    info.is_exec    = (error_code & X86_PAGE_FAULT_INSTRUCTION_FETCH) != 0;
+
+    return info;
+}
+
+void pf_handler(interrupt_trapframe_t* tf) {
+    uintptr_t fault_addr = read_cr2();
+
+    vm_space_t* curr_space = &smp_current_core()->curr_thread->owner->space;
+
+    if (vmm_handle_fault(curr_space, fault_addr, tf->error_code)) {
+        return;
+    }
+
+    if (tf->error_code & X86_PAGE_FAULT_USER) {
+        // terminate the user process
+    } else {
+        PANIC("Kernel page fault at %p! (RIP: %p)", fault_addr, tf->rip);
     }
 }

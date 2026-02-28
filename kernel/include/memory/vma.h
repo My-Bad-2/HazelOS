@@ -1,6 +1,7 @@
 #ifndef KERNEL_MEMORY_VMA_H
 #define KERNEL_MEMORY_VMA_H 1
 
+#include "cpu/exception.h"
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 #include "memory/pagemap.h"
@@ -39,6 +40,13 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
     uintptr_t allocation_hint;
 } vm_space_t;
 
+struct vmm_fault_info {
+    bool is_present;
+    bool is_write;
+    bool is_user;
+    bool is_exec;
+};
+
 void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_t end);
 
 void* vmalloc(
@@ -51,6 +59,12 @@ void* vmalloc(
 );
 
 void vmfree(vm_space_t* space, void* ptr, size_t size);
+
+struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code);
+bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_code);
+
+void pf_handler(interrupt_trapframe_t* tf);
+
 extern vm_space_t* kernel_space;
 
 #define MAP_HUGE_SHIFT 26
