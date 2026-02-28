@@ -30,7 +30,8 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
         stack = bootstrap_stack;
     } else {
         stack = vmalloc(
-            &kernel_space,
+            kernel_space,
+            nullptr,
             KSTACK_SIZE,
             VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
             CACHE_WRITE_BACK,
@@ -45,7 +46,8 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
 
     cpu->kstack_top = (uintptr_t)stack + KSTACK_SIZE;
     cpu->rcu        = vmalloc(
-        &kernel_space,
+        kernel_space,
+        nullptr,
         sizeof(struct rcu_data),
         VMM_FLAG_READ | VMM_FLAG_WRITE,
         CACHE_WRITE_BACK,

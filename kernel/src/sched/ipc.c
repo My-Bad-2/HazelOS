@@ -167,6 +167,7 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
 
     void* kpage = vmalloc(
         &me->space,
+        nullptr,
         IPC_RING_SIZE,
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER,
         CACHE_WRITE_BACK,
@@ -615,6 +616,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
     for (size_t i = 0; i < page_count; ++i) {
         void* virt_addr = vmalloc(
             &me->space,
+            nullptr,
             PAGE_SIZE_SMALL,
             (uint32_t)flags,
             CACHE_WRITE_BACK,

@@ -174,8 +174,9 @@ void term_init(term_font_t* font) {
     style.underline = false;
     style.reverse   = false;
 
-    shadow_buffer = vmalloc(
-        &kernel_space,
+    shadow_buffer = (void*)vmalloc(
+        kernel_space,
+        nullptr,
         fb_size,
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
         CACHE_WRITE_BACK,

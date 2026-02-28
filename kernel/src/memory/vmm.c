@@ -148,8 +148,7 @@ void vmm_init(void) {
     uintptr_t vma_start = align_up(to_higher_half(highest_address), PAGE_SIZE_LARGE);
     uintptr_t vma_end   = virt_base;
 
-    vmm_init_global();
-    vmm_init_space(&kernel_space, &kernel_pagemap, vma_start, vma_end);
+    vmm_init_space(kernel_space, &kernel_pagemap, vma_start, vma_end);
 
     KLOG_INFO(
         "VMM: init complete pagemap loaded vma=[0x%lx,0x%lx) highest_phys=0x%lx\n",

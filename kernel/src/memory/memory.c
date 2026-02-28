@@ -2,6 +2,7 @@
 
 #include "memory/heap.h"
 #include "memory/pmm.h"
+#include "memory/vma.h"
 #include "memory/vmm.h"
 
 void memory_init(void) {

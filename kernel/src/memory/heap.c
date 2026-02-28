@@ -142,7 +142,8 @@ format_slab(kmem_cache_t* cache, struct slab* slab, void* page_base, size_t tota
 
 static struct slab* slab_grow(kmem_cache_t* cache) {
     void* page = vmalloc(
-        &kernel_space,
+        kernel_space,
+        nullptr,
         PAGE_SIZE,
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
         CACHE_WRITE_BACK,
@@ -160,7 +161,7 @@ static struct slab* slab_grow(kmem_cache_t* cache) {
 
         if (!slab) {
             KLOG_WARN("slab_grow: Failed to allocate metadata for cache %s", cache->name);
-            vmfree(&kernel_space, page, PAGE_SIZE);
+            vmfree(kernel_space, page, PAGE_SIZE);
             errno = ENOMEM;
             return nullptr;
         }
@@ -255,7 +256,7 @@ static void slab_flush(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
             dlist_del(&slab->list);
             map_remove(slab);
 
-            vmfree(&kernel_space, slab->base, PAGE_SIZE);
+            vmfree(kernel_space, slab->base, PAGE_SIZE);
 
             if (!(cache->flags & SLAB_NO_OFFSLAB)) {
                 release_spinlock(&cache->lock);
@@ -350,7 +351,8 @@ kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, voi
 
     size_t hash_bytes = sizeof(struct hlist_head) * SLAB_CACHE_HASH_SIZE;
     cache->slab_hash  = (struct hlist_head*)vmalloc(
-        &kernel_space,
+        kernel_space,
+        nullptr,
         hash_bytes,
         VMM_FLAG_READ | VMM_FLAG_WRITE,
         CACHE_WRITE_BACK,
@@ -371,17 +373,18 @@ kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, voi
     size_t total_req   = struct_size + mag_size;
     total_req          = align_up(total_req, PAGE_SIZE);
 
-    void* ptr = vmalloc(
-        &kernel_space,
+    void* ptr = (void*)vmalloc(
+        kernel_space,
+        nullptr,
         total_req,
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
         CACHE_WRITE_BACK,
-        PAGE_SIZE
+        PAGE_SIZE_SMALL
     );
 
     if (!ptr) {
         KLOG_ERROR("kmem_cache_create: Failed to allocate cpu_slab for cache %s", name);
-        vmfree(&kernel_space, cache->slab_hash, hash_bytes);
+        vmfree(kernel_space, cache->slab_hash, hash_bytes);
         kmem_cache_free(&cache_boot, cache);
         errno = ENOMEM;
         return nullptr;
@@ -506,13 +509,13 @@ void kmem_cache_destroy(kmem_cache_t* cache) {
     size_t struct_size = sizeof(struct kmem_cache_cpu) * num_cpus;
     size_t mag_size    = CPU_CACHE_SIZE * sizeof(void*) * num_cpus;
 
-    vmfree(&kernel_space, cache->cpu_slab, struct_size + mag_size);
+    vmfree(kernel_space, cache->cpu_slab, struct_size + mag_size);
 
     struct slab *pos, *n;
     dlist_for_each_entry_safe(pos, n, &cache->partial, list) {
         dlist_del(&pos->list);
         map_remove(pos);
-        vmfree(&kernel_space, pos->base, PAGE_SIZE);
+        vmfree(kernel_space, pos->base, PAGE_SIZE);
 
         if (!(cache->flags & SLAB_NO_OFFSLAB)) {
             kmem_cache_free(&cache_metadata, pos);
@@ -520,7 +523,7 @@ void kmem_cache_destroy(kmem_cache_t* cache) {
     }
 
     size_t hash_bytes = sizeof(struct hlist_head) * SLAB_CACHE_HASH_SIZE;
-    vmfree(&kernel_space, cache->slab_hash, hash_bytes);
+    vmfree(kernel_space, cache->slab_hash, hash_bytes);
 
     kmem_cache_free(&cache_boot, cache);
 }
@@ -532,7 +535,8 @@ void* kmalloc(size_t size) {
 
     if (size > PAGE_SIZE) {
         void* ptr = vmalloc(
-            &kernel_space,
+            kernel_space,
+            nullptr,
             size,
             VMM_FLAG_READ | VMM_FLAG_WRITE,
             CACHE_WRITE_BACK,
@@ -565,7 +569,7 @@ void kfree(void* ptr, size_t size) {
     if (!ptr || size == 0) return;
 
     if (size > PAGE_SIZE) {
-        vmfree(&kernel_space, ptr, size);
+        vmfree(kernel_space, ptr, size);
         return;
     }
 

@@ -42,7 +42,7 @@ void* uacpi_kernel_map(uacpi_phys_addr addr, uacpi_size len) {
     uacpi_size total_size = len + offset;
     total_size            = align_up(total_size, PAGE_SIZE_SMALL);
 
-    void* virt = vmalloc(&kernel_space, total_size, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
+    void* virt = vmalloc(kernel_space, 0, total_size, VMM_FLAG_MMIO, CACHE_MMIO, PAGE_SIZE_SMALL);
 
     if (!virt) {
         return nullptr;

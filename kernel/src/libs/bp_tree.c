@@ -1,6 +1,9 @@
 #include "libs/bp_tree.h"
 
+#include <stdint.h>
 #include <string.h>
+
+#include "libs/log.h"
 
 static struct bp_node* bp_alloc_node(struct bp_tree* tree, bool leaf) {
     struct bp_node* n = tree->alloc(sizeof(struct bp_node), tree->alloc_ctx);
@@ -92,28 +95,6 @@ static void update_gap_upwards(struct bp_tree* tree, struct bp_node* node) {
     }
 }
 
-static void bp_split_leaf_links(struct bp_tree* tree, struct bp_node* left, struct bp_node* right) {
-    if (left->count == 0 || right->count == 0) {
-        return;
-    }
-
-    void* left_last_item   = left->children[left->count - 1];
-    void* right_first_item = right->children[0];
-
-    struct bp_link* l_link = get_link(tree, left_last_item);
-    struct bp_link* r_link = get_link(tree, right_first_item);
-
-    r_link->prev = l_link;
-    r_link->next = l_link->next;
-
-    if (l_link->next) {
-        struct bp_link* next_link = l_link->next;
-        next_link->prev           = r_link;
-    }
-
-    l_link->next = r_link;
-}
-
 static void bp_reparent_items(struct bp_tree* tree, struct bp_node* new_owner) {
     if (new_owner->is_leaf) {
         for (int i = 0; i < new_owner->count; ++i) {
@@ -157,9 +138,8 @@ bp_split_child(struct bp_tree* tree, struct bp_node* parent, int index, struct b
 
     child->count = t;
 
-    if (child->is_leaf) {
-        bp_split_leaf_links(tree, child, new_node);
-    }
+    bp_reparent_items(tree, new_node);
+    new_node->parent = parent;
 
     bp_reparent_items(tree, new_node);
     new_node->parent = parent;
@@ -539,6 +519,7 @@ int bp_insert(struct bp_tree* tree, void* item) {
         tree->count  = 1;
 
         root->max_gap = calculate_node_gap(tree, root);
+        tree->cached  = item;
 
         return 0;
     }
@@ -574,6 +555,7 @@ int bp_insert(struct bp_tree* tree, void* item) {
 
         if (ret == 0) {
             tree->count++;
+            tree->cached = item;
         }
 
         return ret;
@@ -583,6 +565,7 @@ int bp_insert(struct bp_tree* tree, void* item) {
 
     if (ret == 0) {
         tree->count++;
+        tree->cached = item;
     }
 
     return ret;
@@ -618,6 +601,15 @@ void* bp_remove(struct bp_tree* tree, uintptr_t key) {
     }
 
     void* item = curr->children[pos];
+
+    if (tree->cached == item) {
+        tree->cached = nullptr;
+
+        struct bp_link* link = get_link(tree, item);
+        if (link->prev) {
+            tree->cached = get_item_from_link(tree, link->prev);
+        }
+    }
 
     bp_unlink_item(tree, item);
 
@@ -665,6 +657,7 @@ void* bp_search(struct bp_tree* tree, uintptr_t key) {
     int i = 0;
     while (i < curr->count) {
         if (curr->keys[i] == key) {
+            tree->cached = curr->children[i];
             return curr->children[i];
         }
 
@@ -706,6 +699,7 @@ void* bp_search_covering(struct bp_tree* tree, uintptr_t addr) {
         uintptr_t end   = tree->get_end(candidate);
 
         if (addr >= start && addr < end) {
+            tree->cached = curr->children[i];
             return candidate;
         }
     }
@@ -753,6 +747,158 @@ uintptr_t bp_find_free_gap(struct bp_tree* tree, size_t size) {
         if (next_start - item_end >= size) {
             return item_end;
         }
+    }
+
+    return 0;
+}
+
+uintptr_t bp_find_gap_bottom_up(struct bp_tree* tree, uintptr_t min_addr, size_t size) {
+    if (!tree->root) {
+        return min_addr;
+    }
+
+    struct bp_node* curr = tree->root;
+
+    while (!curr->is_leaf) {
+        int i = 0;
+        while (i < curr->count && min_addr >= curr->keys[i]) {
+            ++i;
+        }
+
+        curr = (struct bp_node*)curr->children[i];
+    }
+
+    void* prev_item = nullptr;
+
+    int i = 0;
+    for (; i < curr->count; ++i) {
+        uintptr_t item_start = tree->get_start(curr->children[i]);
+        if (item_start >= min_addr) {
+            break;
+        }
+
+        prev_item = curr->children[i];
+    }
+
+    struct bp_link* link = nullptr;
+    void* curr_item      = nullptr;
+
+    if (i < curr->count) {
+        curr_item = curr->children[i];
+        link      = get_link(tree, curr_item);
+    } else if (curr->count > 0) {
+        void* last                = curr->children[curr->count - 1];
+        struct bp_link* last_link = get_link(tree, last);
+
+        if (last_link->next) {
+            link      = last_link->next;
+            curr_item = get_item_from_link(tree, link);
+        } else {
+            uintptr_t last_end = tree->get_end(last);
+            return (last_end < min_addr) ? min_addr : last_end;
+        }
+    }
+
+    uintptr_t gap_start = min_addr;
+
+    if (prev_item) {
+        uintptr_t prev_end = tree->get_end(prev_item);
+
+        if (prev_end > gap_start) {
+            gap_start = prev_end;
+        }
+    } else if (link && link->prev) {
+        void* prev_vma     = get_item_from_link(tree, link->prev);
+        uintptr_t prev_end = tree->get_end(prev_vma);
+
+        if (prev_end > gap_start) {
+            gap_start = prev_end;
+        }
+    }
+
+    while (curr_item) {
+        uintptr_t item_start = tree->get_start(curr_item);
+
+        if (item_start > gap_start && (item_start - gap_start) >= size) {
+            return gap_start;
+        }
+
+        gap_start = tree->get_end(curr_item);
+        link      = get_link(tree, curr_item);
+
+        if (link->next) {
+            curr_item = get_item_from_link(tree, link->next);
+        } else {
+            return gap_start;
+        }
+    }
+
+    return gap_start;
+}
+
+uintptr_t bp_find_gap_top_down(struct bp_tree* tree, uintptr_t max_addr, size_t size) {
+    if (!tree->root) {
+        return max_addr;
+    }
+
+    struct bp_node* curr = tree->root;
+    while (!curr->is_leaf) {
+        int i = 0;
+
+        while (i < curr->count && max_addr >= curr->keys[i]) {
+            ++i;
+        }
+
+        curr = (struct bp_node*)curr->children[i];
+    }
+
+    int i = 0;
+    while (i < curr->count && max_addr >= tree->get_start(curr->children[i])) {
+        ++i;
+    }
+
+    void* curr_item = nullptr;
+    if (i > 0) {
+        curr_item = curr->children[i - 1];
+    } else {
+        if (curr->count > 0) {
+            struct bp_link* link = get_link(tree, curr->children[0]);
+
+            if (link->prev) {
+                curr_item = get_item_from_link(tree, link->prev);
+            }
+        }
+    }
+
+    if (!curr_item) {
+        return max_addr - size;
+    }
+
+    uintptr_t ceiling = max_addr;
+    while (curr_item) {
+        uintptr_t item_start = tree->get_start(curr_item);
+        uintptr_t item_end   = tree->get_end(curr_item);
+
+        if (item_end > ceiling) {
+            ceiling = item_start;
+        } else {
+            if (ceiling - item_end >= size) {
+                return ceiling - size;
+            }
+
+            ceiling = item_start;
+        }
+
+        struct bp_link* link = get_link(tree, curr_item);
+        if (link->prev) {
+            curr_item = get_item_from_link(tree, link->prev);
+        } else {
+            curr_item = nullptr;
+        }
+    }
+
+    if (ceiling >= size) {
+        return ceiling - size;
     }
 
     return 0;

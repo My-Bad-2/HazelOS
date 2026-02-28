@@ -54,6 +54,8 @@ struct bp_tree {
 
     size_t height;
     size_t count;
+
+    void* cached;
 };
 
 void bp_init(
@@ -72,6 +74,8 @@ void* bp_search(struct bp_tree* tree, uintptr_t key);
 void* bp_search_covering(struct bp_tree* tree, uintptr_t addr);
 
 uintptr_t bp_find_free_gap(struct bp_tree* tree, size_t size);
+uintptr_t bp_find_gap_bottom_up(struct bp_tree* tree, uintptr_t hint_addr, size_t size);
+uintptr_t bp_find_gap_top_down(struct bp_tree* tree, uintptr_t min_addr, size_t size);
 
 #define bp_entry(ptr, type, member) container_of(ptr, type, member)
 

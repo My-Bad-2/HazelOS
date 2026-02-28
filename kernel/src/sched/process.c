@@ -56,7 +56,7 @@ process_t* process_create(bool is_kernel) {
     if (is_kernel) {
         // Shared kernel map
         memcpy(&proc->map, vmm_get_kernel_pagemap(), sizeof(pagemap_t));
-        memcpy(&proc->space, &kernel_space, sizeof(vm_space_t));
+        memcpy(&proc->space, kernel_space, sizeof(vm_space_t));
 
         proc->is_kernel = true;
     } else {
@@ -338,7 +338,8 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
     }
 
     child->kernel_stack = vmalloc(
-        &kernel_space,
+        kernel_space,
+        nullptr,
         KSTACK_SIZE,
         VMM_FLAG_STACK | VMM_FLAG_WRITE | VMM_FLAG_READ,
         CACHE_WRITE_BACK,

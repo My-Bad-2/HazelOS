@@ -14,8 +14,9 @@ void handle_table_init(handle_table_t* table) {
     table->active_count  = 0;
     table->next_free_idx = 0;
 
-    table->slots = vmalloc(
-        &kernel_space,
+    table->slots = (handle_slot_t*)vmalloc(
+        kernel_space,
+        nullptr,
         sizeof(handle_slot_t) * HANDLE_MAX,
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
         CACHE_WRITE_BACK,

@@ -8,7 +8,6 @@
 #include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "libs/log.h"
-#include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 
@@ -45,12 +44,13 @@ void idt_init(void) {
         return;
     }
 
-    idt = vmalloc(
-        &kernel_space,
+    idt = (idt_table_t*)vmalloc(
+        kernel_space,
+        nullptr,
         sizeof(idt_table_t),
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
         CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
+        sizeof(idt_table_t)
     );
 
     if (!idt) {

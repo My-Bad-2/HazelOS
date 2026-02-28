@@ -31,21 +31,19 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
     _Atomic(vm_area_t*) cached_vma;
     rwlock_t lock;
 
+    spinlock_t pool_lock;
+    vm_area_t* free_vma_pool;
+
     uintptr_t start_limit;
     uintptr_t end_limit;
     uintptr_t allocation_hint;
-
-    vm_area_t* free_vma_pool;
 } vm_space_t;
 
-void vmm_init_global(void);
 void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_t end);
 
-void* vmalloc(vm_space_t* space, size_t size, uint32_t flags, cache_type_t cache, size_t alignment);
-
-void* vmalloc_addr(
+void* vmalloc(
     vm_space_t* space,
-    void* addr,
+    void* hint_addr,
     size_t size,
     uint32_t flags,
     cache_type_t cache,
@@ -53,7 +51,7 @@ void* vmalloc_addr(
 );
 
 void vmfree(vm_space_t* space, void* ptr, size_t size);
-extern vm_space_t kernel_space;
+extern vm_space_t* kernel_space;
 
 #define MAP_HUGE_SHIFT 26
 #define MAP_HUGE_MASK  0x3f

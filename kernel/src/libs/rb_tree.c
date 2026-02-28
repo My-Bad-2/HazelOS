@@ -141,16 +141,21 @@ __rb_erase_color(struct rb_node* node, struct rb_node* parent, struct rb_root* r
                 parent          = node->rb_parent;
             } else {
                 if (!other->rb_right || other->rb_right->rb_color == RB_BLACK) {
-                    other->rb_left->rb_color = RB_BLACK;
-                    other->rb_color          = RB_RED;
+                    if (other->rb_left) {
+                        other->rb_left->rb_color = RB_BLACK;
+                    }
+
+                    other->rb_color = RB_RED;
 
                     __rb_rotate_right(other, root);
                     other = parent->rb_right;
                 }
 
-                other->rb_color           = parent->rb_color;
-                parent->rb_color          = RB_BLACK;
-                other->rb_right->rb_color = RB_BLACK;
+                other->rb_color  = parent->rb_color;
+                parent->rb_color = RB_BLACK;
+                if (other->rb_right) {
+                    other->rb_right->rb_color = RB_BLACK;
+                }
 
                 __rb_rotate_left(parent, root);
                 node = root->rb_node;
@@ -173,15 +178,21 @@ __rb_erase_color(struct rb_node* node, struct rb_node* parent, struct rb_root* r
                 parent          = node->rb_parent;
             } else {
                 if (!other->rb_left || other->rb_left->rb_color == RB_BLACK) {
-                    other->rb_right->rb_color = RB_BLACK;
-                    other->rb_color           = RB_RED;
+                    if (other->rb_right) {
+                        other->rb_right->rb_color = RB_BLACK;
+                    }
+
+                    other->rb_color = RB_RED;
                     __rb_rotate_left(other, root);
                     other = parent->rb_left;
                 }
 
-                other->rb_color          = parent->rb_color;
-                parent->rb_color         = RB_BLACK;
-                other->rb_left->rb_color = RB_BLACK;
+                other->rb_color  = parent->rb_color;
+                parent->rb_color = RB_BLACK;
+
+                if (other->rb_left) {
+                    other->rb_left->rb_color = RB_BLACK;
+                }
 
                 __rb_rotate_right(parent, root);
                 node = root->rb_node;
@@ -222,7 +233,7 @@ __rb_erase_color(struct rb_node* node, struct rb_node* parent, struct rb_root* r
                 parent          = node->rb_parent;
             } else {
                 if (!other->rb_right || other->rb_right->rb_color == RB_BLACK) {
-                    if (other->rb_right) {
+                    if (other->rb_left) {
                         other->rb_left->rb_color = RB_BLACK;
                     }
 
@@ -369,6 +380,7 @@ void rb_erase(struct rb_node* node, struct rb_root* root) {
             root->rb_node = nullptr;
         }
 
+        RB_CLEAR_NODE(node);
         return;
     }
 
@@ -399,26 +411,19 @@ void rb_erase(struct rb_node* node, struct rb_root* root) {
             parent = successor;
         } else {
             parent->rb_left = child;
-
             if (child) {
                 child->rb_parent = parent;
             }
 
-            parent = successor;
+            successor->rb_right       = node->rb_right;
+            node->rb_right->rb_parent = successor;
         }
+
+        successor->rb_left       = node->rb_left;
+        node->rb_left->rb_parent = successor;
 
         successor->rb_parent = node->rb_parent;
         successor->rb_color  = node->rb_color;
-        successor->rb_right  = node->rb_right;
-        successor->rb_left   = node->rb_left;
-
-        if (node->rb_left) {
-            node->rb_left->rb_parent = successor;
-        }
-
-        if (node->rb_right) {
-            node->rb_right->rb_parent = successor;
-        }
 
         if (node->rb_parent) {
             if (node->rb_parent->rb_left == node) {
@@ -434,6 +439,7 @@ void rb_erase(struct rb_node* node, struct rb_root* root) {
             __rb_erase_color(rebalance, parent, root);
         }
 
+        RB_CLEAR_NODE(node);
         return;
     }
 
@@ -454,6 +460,8 @@ void rb_erase(struct rb_node* node, struct rb_root* root) {
     if (color == RB_BLACK) {
         __rb_erase_color(child, parent, root);
     }
+
+    RB_CLEAR_NODE(node);
 }
 
 struct rb_node* rb_first(const struct rb_root* root) {
@@ -673,24 +681,19 @@ void rb_erase_augmented(struct rb_node* node, struct rb_root* root, rb_augment_f
             parent = successor;
         } else {
             parent->rb_left = child;
-
             if (child) {
                 child->rb_parent = parent;
             }
+
+            successor->rb_right       = node->rb_right;
+            node->rb_right->rb_parent = successor;
         }
+
+        successor->rb_left       = node->rb_left;
+        node->rb_left->rb_parent = successor;
 
         successor->rb_parent = node->rb_parent;
         successor->rb_color  = node->rb_color;
-        successor->rb_right  = node->rb_right;
-        successor->rb_left   = node->rb_left;
-
-        if (node->rb_left) {
-            node->rb_left->rb_parent = successor;
-        }
-
-        if (node->rb_right) {
-            node->rb_right->rb_parent = successor;
-        }
 
         if (node->rb_parent) {
             if (node->rb_parent->rb_left == node) {
@@ -737,4 +740,6 @@ propagate:
 
         deepest = deepest->rb_parent;
     }
+
+    RB_CLEAR_NODE(node);
 }

@@ -22,6 +22,8 @@ extern "C" {
 #define VMM_FLAG_STACK   0x200u
 #define VMM_FLAG_MMIO    0x400u
 #define VMM_FLAG_GUARD   0x800u
+#define VMM_FLAG_FIXED   0x1000u
+#define VMM_FLAG_COW     VMM_FLAG_SHARED
 
 typedef enum {
     CACHE_UNCACHEABLE = 0,

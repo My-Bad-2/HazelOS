@@ -28,7 +28,8 @@ static void rcu_gp_thread(void*);
 
 static void init_ring_buffers(struct rcu_batch** batch_ptr, uint32_t cpu_count) {
     *batch_ptr = vmalloc(
-        &kernel_space,
+        kernel_space,
+        nullptr,
         sizeof(struct rcu_batch) * cpu_count,
         VMM_FLAG_READ | VMM_FLAG_WRITE,
         CACHE_WRITE_BACK,
