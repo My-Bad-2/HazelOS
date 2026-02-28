@@ -1,11 +1,11 @@
-#include "internal/vma_tree.h"
+#include "../internal/vma_tree.h"
 
 #include <stdatomic.h>
 
 #include "libs/log.h"
 #include "libs/math.h"
 
-#include "internal/vma_pool.h"
+#include "../internal/vma_pool.h"
 
 #define max(a, b) ((a) > (b) ? (a) : (b))
 

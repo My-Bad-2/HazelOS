@@ -48,6 +48,7 @@ struct vmm_fault_info {
 };
 
 void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_t end);
+void vmm_destroy_space(vm_space_t* space);
 
 void* vmalloc(
     vm_space_t* space,
@@ -62,6 +63,7 @@ void vmfree(vm_space_t* space, void* ptr, size_t size);
 
 struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code);
 bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_code);
+bool vmm_clone_space(vm_space_t* parent, vm_space_t* child);
 
 void pf_handler(interrupt_trapframe_t* tf);
 

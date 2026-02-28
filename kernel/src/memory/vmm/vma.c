@@ -5,12 +5,13 @@
 
 #include "libs/log.h"
 #include "libs/math.h"
+#include "libs/spinlock.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/pmm.h"
 
-#include "internal/vma_pool.h"
-#include "internal/vma_tree.h"
+#include "../internal/vma_pool.h"
+#include "../internal/vma_tree.h"
 
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define min(a, b) ((a) < (b) ? (a) : (b))
@@ -398,4 +399,147 @@ void vmfree(vm_space_t* space, void* ptr, size_t size) {
 
     atomic_store_explicit(&space->cached_vma, nullptr, memory_order_relaxed);
     release_write(&space->lock);
+}
+
+void vmm_destroy_space(vm_space_t* space) {
+    if (!space) {
+        return;
+    }
+
+    acquire_write(&space->lock);
+
+    struct rb_node* node = rb_first(&space->rb_root);
+
+    while (node) {
+        vm_area_t* vma       = rb_entry(node, vm_area_t, rb_node);
+        struct rb_node* next = rb_next(node);
+
+        uintptr_t addr       = vma->start;
+        size_t frames_needed = vma->page_size / PAGE_SIZE_SMALL;
+
+        while (addr < vma->end) {
+            uintptr_t phys = pagemap_translate(space->map, addr);
+            if (phys) {
+                pagemap_unmap_args_t args = {
+                    .virt_addr = (void*)addr,
+                    .length    = vma->page_size,
+                    .free_phys = false,
+                };
+
+                pagemap_unmap(space->map, &args);
+                pmm_dec_ref((void*)phys);
+            }
+
+            addr += vma->page_size;
+        }
+
+        rb_erase_augmented(&vma->rb_node, &space->rb_root, vma_compute_subtree_gap);
+        vma_free_struct(space, vma);
+
+        node = next;
+    }
+
+    atomic_store_explicit(&space->cached_vma, nullptr, memory_order_relaxed);
+    space->rb_root = RB_ROOT;
+
+    release_write(&space->lock);
+}
+
+bool vmm_clone_space(vm_space_t* parent, vm_space_t* child) {
+    if (!parent || !child) {
+        return false;
+    }
+
+    acquire_read(&parent->lock);
+    acquire_write(&child->lock);
+
+    struct rb_node* node = rb_first(&parent->rb_root);
+
+    while (node) {
+        vm_area_t* parent_vma = rb_entry(node, vm_area_t, rb_node);
+
+        vm_area_t* child_vma = vma_new(child);
+
+        if (!child_vma) {
+            KLOG_ERROR(
+                "VMM: OOM allocating child VMA during clone at %p",
+                (void*)parent_vma->start
+            );
+
+            goto clone_fail;
+        }
+
+        child_vma->start     = parent_vma->start;
+        child_vma->end       = parent_vma->end;
+        child_vma->size      = parent_vma->size;
+        child_vma->page_size = parent_vma->page_size;
+        child_vma->cache     = parent_vma->cache;
+        child_vma->flags     = parent_vma->flags;
+
+        bool is_cow_candidate =
+            !(parent_vma->flags & VMM_FLAG_SHARED) && (parent_vma->flags & VMM_FLAG_WRITE);
+
+        if (is_cow_candidate) {
+            parent_vma->flags |= VMM_FLAG_COW;
+            child_vma->flags |= VMM_FLAG_COW;
+        }
+
+        uintptr_t addr       = parent_vma->start;
+        size_t frames_needed = parent_vma->page_size / PAGE_SIZE_SMALL;
+
+        while (addr < parent_vma->end) {
+            uintptr_t phys = pagemap_translate(parent->map, addr);
+
+            if (phys) {
+                uint32_t pte_flags = child_vma->flags;
+
+                if (is_cow_candidate || (parent_vma->flags & VMM_FLAG_COW)) {
+                    pte_flags &= ~VMM_FLAG_WRITE;
+
+                    pagemap_protect_args_t prot_args = {
+                        .virt_addr = (void*)addr,
+                        .flags     = pte_flags,
+                    };
+
+                    pagemap_protect(parent->map, &prot_args);
+                }
+
+                pagemap_map_args_t map_args = {
+                    .virt_addr = (void*)addr,
+                    .phys_addr = (void*)phys,
+                    .length    = child_vma->page_size,
+                    .flags     = pte_flags,
+                    .cache     = child_vma->cache,
+                    .page_size = child_vma->page_size,
+                };
+
+                if (!pagemap_map(child->map, &map_args)) {
+                    KLOG_ERROR("VMM: Failed to map page during clone at %p", (void*)addr);
+
+                    vma_free_struct(child, child_vma);
+                    goto clone_fail;
+                }
+
+                pmm_inc_ref((void*)phys);
+            }
+
+            addr += parent_vma->page_size;
+        }
+
+        vmm_insert_vma(child, child_vma);
+        node = rb_next(node);
+    }
+
+    release_write(&child->lock);
+    release_read(&parent->lock);
+    return true;
+
+clone_fail:
+    release_write(&child->lock);
+    release_read(&parent->lock);
+
+    KLOG_ERROR("VMM: Clone failed. Tearing down partial child address space.");
+    vmm_destroy_space(child);
+
+    return false;
 }

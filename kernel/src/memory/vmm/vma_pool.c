@@ -1,4 +1,4 @@
-#include "internal/vma_pool.h"
+#include "../internal/vma_pool.h"
 
 #include <string.h>
 
@@ -8,7 +8,7 @@
 #include "memory/pmm.h"
 #include "memory/vma.h"
 
-#include "internal/vma_tree.h"
+#include "../internal/vma_tree.h"
 
 #define VMA_SLAB_SIZE PAGE_SIZE_SMALL
 #define VMAS_PER_SLAB (VMA_SLAB_SIZE / sizeof(vm_area_t))

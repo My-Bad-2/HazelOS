@@ -7,7 +7,7 @@
 #include "memory/pmm.h"
 #include "memory/vma.h"
 
-#include "internal/vma_tree.h"
+#include "../internal/vma_tree.h"
 
 bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_code) {
     struct vmm_fault_info info = arch_decode_fault_error(error_code);
@@ -131,11 +131,7 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_co
         };
 
         pagemap_map(space->map, &map_args);
-
         pmm_dec_ref((void*)old_phys);
-        if (pmm_get_ref((void*)old_phys) == 0) {
-            pmm_free((void*)old_phys);
-        }
 
         release_read(&space->lock);
         return true;
