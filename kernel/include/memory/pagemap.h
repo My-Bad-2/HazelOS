@@ -10,20 +10,24 @@
 extern "C" {
 #endif
 
-#define VMM_FLAG_NONE    0x001u
-#define VMM_FLAG_READ    0x002u
-#define VMM_FLAG_WRITE   0x004u
-#define VMM_FLAG_EXECUTE 0x008u
-#define VMM_FLAG_USER    0x010u
-#define VMM_FLAG_GLOBAL  0x020u
-#define VMM_FLAG_SHARED  0x040u
-#define VMM_FLAG_PRIVATE 0x080u
-#define VMM_FLAG_DEMAND  0x100u
-#define VMM_FLAG_STACK   0x200u
-#define VMM_FLAG_MMIO    0x400u
-#define VMM_FLAG_GUARD   0x800u
-#define VMM_FLAG_FIXED   0x1000u
-#define VMM_FLAG_COW     VMM_FLAG_SHARED
+#define VMM_FLAG_NONE            0x001u
+#define VMM_FLAG_READ            0x002u
+#define VMM_FLAG_WRITE           0x004u
+#define VMM_FLAG_EXECUTE         0x008u
+#define VMM_FLAG_USER            0x010u
+#define VMM_FLAG_GLOBAL          0x020u
+#define VMM_FLAG_SHARED          0x040u
+#define VMM_FLAG_PRIVATE         0x080u
+#define VMM_FLAG_DEMAND          0x100u
+#define VMM_FLAG_STACK           0x200u
+#define VMM_FLAG_MMIO            0x400u
+#define VMM_FLAG_GUARD           0x800u
+#define VMM_FLAG_FIXED           0x1000u
+#define VMM_FLAG_LOCKED          0x2000u
+#define VMM_FLAG_POPULATE        0x4000u
+#define VMM_FLAG_FIXED_NOREPLACE 0x8000u
+
+#define VMM_FLAG_COW VMM_FLAG_SHARED
 
 typedef enum {
     CACHE_UNCACHEABLE = 0,

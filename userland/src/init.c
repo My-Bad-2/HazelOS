@@ -66,7 +66,8 @@ void user_start() {
 
     ipc_test();
 
-    void* addr = mmap(nullptr, 0x1000, PROT_READ, MAP_POPULATE, -1, 0);
+    void* addr =
+        mmap((void*)0x1000, 0x1000, PROT_READ, MAP_POPULATE | MAP_FIXED | MAP_PRIVATE, 0, 0);
 
     char buf[128];
     snprintf(buf, 128, "addr = %p\n", addr);

@@ -5,6 +5,7 @@
 
 #include "arch.h"
 #include "boot/boot.h"
+#include "compiler.h"
 #include "cpu/smp.h"
 #include "libs/dlist.h"
 #include "libs/log.h"
@@ -49,7 +50,7 @@ void rcu_init(void) {
     uint32_t cpus = mp_request.response->cpu_count;
 
     atomic_store(&rcu_state.gp_seq, 0);
-    rcu_state.gp_request = false;
+    atomic_init(&rcu_state.gp_request, false);
     create_spinlock(&rcu_state.gp_lock);
 
     uint32_t num_leaves  = (cpus + RCU_FANOUT - 1) / RCU_FANOUT;
@@ -180,9 +181,9 @@ static void internal_queue_callback(
 
     size_t h    = atomic_load(&batch->head);
     size_t t    = atomic_load(&batch->tail);
-    size_t next = (h + 1) % RCU_CALLBACK_RING_SIZE;
+    size_t next = (h + 1) & RCU_CALLBACK_RING_MASK;
 
-    if (next == t) {
+    if (unlikely(next == t)) {
         KLOG_ERROR("RCU: Ring buffer full on CPU %u. Callback dropped.\n", cpu);
     } else {
         batch->buffer[h] = head;
@@ -202,7 +203,7 @@ static void internal_drain_batch(struct rcu_batch* batch) {
     while (t != h) {
         struct rcu_head* cb = batch->buffer[t];
 
-        t = (t + 1) % RCU_CALLBACK_RING_SIZE;
+        t = (t + 1) & RCU_CALLBACK_RING_MASK;
 
         atomic_store(&batch->tail, t);
         release_spinlock(&batch->lock);
@@ -223,7 +224,11 @@ int srcu_read_lock(struct srcu_domain* ssp) {
 
     int idx = atomic_load_explicit(&ssp->idx, memory_order_consume) & 0x1;
 
-    ssp->per_cpu[smp_current_core()->cpu_idx].lock_count[idx]++;
+    atomic_fetch_add_explicit(
+        &ssp->per_cpu[smp_current_core()->cpu_idx].lock_count[idx],
+        1,
+        memory_order_relaxed
+    );
     atomic_thread_fence(memory_order_acquire);
 
     arch_enable_interrupts();
@@ -233,19 +238,23 @@ int srcu_read_lock(struct srcu_domain* ssp) {
 void srcu_read_unlock(struct srcu_domain* ssp, int idx) {
     arch_disable_interrupts();
 
-    atomic_thread_fence(memory_order_acquire);
-    ssp->per_cpu[smp_current_core()->cpu_idx].unlock_count[idx & 0x1]++;
+    atomic_thread_fence(memory_order_release);
+    atomic_fetch_add_explicit(
+        &ssp->per_cpu[smp_current_core()->cpu_idx].unlock_count[idx & 0x1],
+        1,
+        memory_order_relaxed
+    );
 
     arch_enable_interrupts();
 }
 
-static bool srcu_readers_active(struct srcu_domain* ssp, int idx) {
+static bool srcu_readers_drained(struct srcu_domain* ssp, int idx) {
     uint64_t locks   = 0;
     uint64_t unlocks = 0;
 
     for (uint32_t i = 0; i < ssp->cpu_count; ++i) {
-        locks += ssp->per_cpu[i].lock_count[idx];
-        unlocks += ssp->per_cpu[i].unlock_count[idx];
+        locks += atomic_load_explicit(&ssp->per_cpu[i].lock_count[idx], memory_order_acquire);
+        unlocks += atomic_load_explicit(&ssp->per_cpu[i].unlock_count[idx], memory_order_acquire);
     }
 
     return locks == unlocks;
@@ -259,7 +268,7 @@ void synchronize_srcu(struct srcu_domain* ssp) {
 
     int old_idx = idx & 0x1;
 
-    while (!srcu_readers_active(ssp, old_idx)) {
+    while (!srcu_readers_drained(ssp, old_idx)) {
         release_spinlock(&ssp->gp_lock);
         scheduler_sleep(1);
         acquire_spinlock(&ssp->gp_lock);
@@ -442,10 +451,10 @@ void call_rcu(struct rcu_head* head, void (*func)(struct rcu_head*)) {
     acquire_spinlock(&batch->lock);
 
     size_t h    = atomic_load_explicit(&batch->head, memory_order_relaxed);
-    size_t next = (h + 1) % RCU_CALLBACK_RING_SIZE;
+    size_t next = (h + 1) & RCU_CALLBACK_RING_MASK;
     size_t t    = atomic_load_explicit(&batch->tail, memory_order_relaxed);
 
-    if (next == t) {
+    if (unlikely(next == t)) {
         PANIC("RCU: Callback buffer overflow on CPU %u!", smp_current_core()->cpu_idx);
     }
 
@@ -455,11 +464,11 @@ void call_rcu(struct rcu_head* head, void (*func)(struct rcu_head*)) {
     release_spinlock(&batch->lock);
 
     // Wake up GP thread if needed
-    if (!rcu_state.gp_request) {
+    if (!atomic_load_explicit(&rcu_state.gp_request, memory_order_relaxed)) {
         acquire_spinlock(&rcu_state.gp_lock);
 
-        if (!rcu_state.gp_request) {
-            rcu_state.gp_request = true;
+        if (!atomic_load_explicit(&rcu_state.gp_request, memory_order_relaxed)) {
+            atomic_store_explicit(&rcu_state.gp_request, true, memory_order_relaxed);
 
             if (rcu_state.gp_thread) {
                 scheduler_unblock(rcu_state.gp_thread);
@@ -485,7 +494,7 @@ void rcu_check_callbacks(void) {
 
     while (t != limit) {
         struct rcu_head* callback = batch->buffer[t];
-        t                         = (t + 1) % RCU_CALLBACK_RING_SIZE;
+        t                         = (t + 1) & RCU_CALLBACK_RING_MASK;
         atomic_store_explicit(&batch->tail, t, memory_order_relaxed);
 
         if (callback && callback->func) {
@@ -500,7 +509,7 @@ static void rcu_gp_thread(void*) {
     while (true) {
         acquire_spinlock(&rcu_state.gp_lock);
 
-        while (!rcu_state.gp_request) {
+        while (!atomic_load_explicit(&rcu_state.gp_request, memory_order_relaxed)) {
             thread_t* curr = smp_current_core()->curr_thread;
 
             arch_disable_interrupts();
@@ -513,7 +522,7 @@ static void rcu_gp_thread(void*) {
             acquire_spinlock(&rcu_state.gp_lock);
         }
 
-        rcu_state.gp_request = false;
+        atomic_store_explicit(&rcu_state.gp_request, false, memory_order_relaxed);
         release_spinlock(&rcu_state.gp_lock);
 
         atomic_fetch_add(&rcu_state.gp_seq, 1);
@@ -604,6 +613,7 @@ void complete(struct completion* x) {
     }
 
     release_spinlock(&x->lock);
+    arch_enable_interrupts();
 }
 
 void wait_for_completion(struct completion* x) {
@@ -624,8 +634,11 @@ void wait_for_completion(struct completion* x) {
     dlist_add_tail(&w.list, &x->wait);
 
     while (true) {
+        arch_disable_interrupts();
         curr->state = THREAD_BLOCKED;
         release_spinlock(&x->lock);
+        arch_enable_interrupts();
+
         schedule();
 
         acquire_spinlock(&x->lock);

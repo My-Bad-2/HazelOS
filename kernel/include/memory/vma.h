@@ -10,6 +10,32 @@
 extern "C" {
 #endif
 
+#define MAP_HUGE_SHIFT 26
+#define MAP_HUGE_MASK  0x3f
+
+#define PROT_NONE  0
+#define PROT_EXEC  0x01
+#define PROT_READ  0x02
+#define PROT_WRITE 0x04
+
+#define MAP_SHARED          0x001
+#define MAP_PRIVATE         0x002
+#define MAP_ANONYMOUS       0x004
+#define MAP_FIXED_NOREPLACE 0x008
+#define MAP_FIXED           0x010
+#define MAP_GROWSDOWN       0x020
+#define MAP_HUGETLB         0x040
+#define MAP_POPULATE        0x080
+#define MAP_STACK           0x100
+#define MAP_LOCKED          0x200
+
+#define MAP_HUGE_2MB (21 << MAP_HUGE_SHIFT)
+#define MAP_HUGE_1GB (30 << MAP_HUGE_SHIFT)
+
+#define MREMAP_MAYMOVE   0x01
+#define MREMAP_FIXED     0x02
+#define MREMAP_DONTUNMAP 0x04
+
 typedef struct vm_area {
     struct rb_node rb_node;
 
@@ -67,27 +93,14 @@ bool vmm_clone_space(vm_space_t* parent, vm_space_t* child);
 
 void pf_handler(interrupt_trapframe_t* tf);
 
-extern vm_space_t* kernel_space;
-
-#define MAP_HUGE_SHIFT 26
-#define MAP_HUGE_MASK  0x3f
-
-#define PROT_NONE  0
-#define PROT_EXEC  0x01
-#define PROT_READ  0x02
-#define PROT_WRITE 0x04
-
-#define MAP_SHARED    0x01
-#define MAP_PRIVATE   0x02
-#define MAP_ANONYMOUS 0x04
-#define MAP_FIXED     0x08
-#define MAP_GROWSDOWN 0x10
-#define MAP_HUGETLB   0x20
-#define MAP_POPULATE  0x40
-#define MAP_STACK     0x80
-
-#define MAP_HUGE_2MB (21 << MAP_HUGE_SHIFT)
-#define MAP_HUGE_1GB (30 << MAP_HUGE_SHIFT)
+bool vmm_map_range(
+    vm_space_t* space,
+    uintptr_t start,
+    size_t size,
+    size_t page_size,
+    uint32_t flags,
+    cache_type_t cache
+);
 
 void* sys_mmap(
     vm_space_t* space,
@@ -98,8 +111,20 @@ void* sys_mmap(
     int fd,
     long offset
 );
-int sys_munmmap(vm_space_t* space, void* addr, size_t length);
+
+int sys_munmap(vm_space_t* space, void* addr, size_t length);
 int sys_mprotect(vm_space_t* space, void* addr, size_t size, int prot);
+
+void* sys_mremap(
+    vm_space_t* space,
+    void* old_address,
+    size_t old_size,
+    size_t new_size,
+    int flags,
+    void* new_address
+);
+
+extern vm_space_t* kernel_space;
 
 #ifdef __cplusplus
 }

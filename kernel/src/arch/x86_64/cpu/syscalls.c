@@ -82,24 +82,34 @@ uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
                 // RDI = FD; RSI = Buffer Pointer; RDX = count
                 res = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
                 break;
-            // case SYS_MMAP:
-            //     res = (uint64_t)sys_mmap(
-            //         &proc->space,
-            //         (void*)regs->rdi,
-            //         regs->rsi,
-            //         (int)regs->rdx,
-            //         (int)regs->r10,
-            //         (int)regs->r8,
-            //         (long)regs->r9
-            //     );
-            //     break;
-            // case SYS_MPROTECT:
-            //     res = (uint64_t)
-            //         sys_mprotect(&proc->space, (void*)regs->rdi, regs->rsi, (int)regs->rdx);
-            //     break;
-            // case SYS_MUNMAP:
-            //     res = (uint64_t)sys_munmmap(&proc->space, (void*)regs->rdi, regs->rsi);
-            //     break;
+            case SYS_MMAP:
+                res = (uint64_t)sys_mmap(
+                    &proc->space,
+                    (void*)regs->rdi,
+                    regs->rsi,
+                    (int)regs->rdx,
+                    (int)regs->r10,
+                    (int)regs->r8,
+                    (long)regs->r9
+                );
+                break;
+            case SYS_MPROTECT:
+                res = (uint64_t)
+                    sys_mprotect(&proc->space, (void*)regs->rdi, regs->rsi, (int)regs->rdx);
+                break;
+            case SYS_MUNMAP:
+                res = (uint64_t)sys_munmap(&proc->space, (void*)regs->rdi, regs->rsi);
+                break;
+            case SYS_MREMAP:
+                res = (uint64_t)sys_mremap(
+                    &proc->space,
+                    (void*)regs->rdi,
+                    regs->rsi,
+                    regs->rdx,
+                    (int)regs->r10,
+                    (void*)regs->r8
+                );
+                break;
             default:
                 KLOG_DEBUG("Syscall %lu called!\n", num);
                 break;

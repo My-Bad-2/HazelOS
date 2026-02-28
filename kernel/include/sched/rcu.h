@@ -14,7 +14,13 @@ extern "C" {
 #endif
 
 #define RCU_CALLBACK_RING_SIZE 4096
+#define RCU_CALLBACK_RING_MASK (RCU_CALLBACK_RING_SIZE - 1)
 #define RCU_QSBR_OFFLINE_EPOCH 0
+
+_Static_assert(
+    (RCU_CALLBACK_RING_SIZE & RCU_CALLBACK_RING_MASK) == 0,
+    "RCU_CALLBACK_RING_SIZE must be a power of 2"
+);
 
 struct rcu_head {
     void (*func)(struct rcu_head*);
@@ -60,7 +66,7 @@ struct rcu_state {
     uint32_t num_nodes;
 
     atomic_size_t gp_seq;
-    bool gp_request;
+    atomic_bool gp_request;
     thread_t* gp_thread;
     spinlock_t gp_lock;
 };
@@ -70,9 +76,9 @@ struct srcu_domain {
     atomic_size_t gp_seq;
     spinlock_t gp_lock;
 
-    struct srcu_cpu_data {
-        uint64_t lock_count[2];
-        uint64_t unlock_count[2];
+    struct [[gnu::aligned(CACHE_LINE_SIZE)]] srcu_cpu_data {
+        atomic_uint_fast64_t lock_count[2];
+        atomic_uint_fast64_t unlock_count[2];
     }* per_cpu;
 
     uint32_t cpu_count;
@@ -82,7 +88,7 @@ struct qsbr_domain {
     atomic_size_t global_epoch;
     spinlock_t gp_lock;
 
-    struct qsbr_cpu_data {
+    struct [[gnu::aligned(CACHE_LINE_SIZE)]] qsbr_cpu_data {
         atomic_size_t local_epoch;
     }* per_cpu;
 

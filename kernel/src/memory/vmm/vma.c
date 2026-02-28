@@ -38,10 +38,12 @@ static size_t select_page_size(size_t size, uintptr_t addr) {
     if (size >= PAGE_SIZE_LARGE && (size % PAGE_SIZE_LARGE == 0) && (addr % PAGE_SIZE_LARGE == 0)) {
         return PAGE_SIZE_LARGE;
     }
+
     if (size >= PAGE_SIZE_MEDIUM && (size % PAGE_SIZE_MEDIUM == 0) &&
         (addr % PAGE_SIZE_MEDIUM == 0)) {
         return PAGE_SIZE_MEDIUM;
     }
+
     return PAGE_SIZE_SMALL;
 }
 
@@ -61,17 +63,13 @@ static void vmm_unmap_and_free(vm_space_t* space, uintptr_t start, size_t size, 
 
             pagemap_unmap(space->map, &args);
             pmm_dec_ref((void*)phys);
-
-            if (pmm_get_ref((void*)phys) == 0) {
-                pmm_free((void*)phys);
-            }
         }
 
         addr += page_size;
     }
 }
 
-static bool vmm_map_range(
+bool vmm_map_range(
     vm_space_t* space,
     uintptr_t start,
     size_t size,
@@ -83,7 +81,7 @@ static bool vmm_map_range(
         return true;
     }
 
-    if (flags & VMM_FLAG_DEMAND) {
+    if ((flags & VMM_FLAG_DEMAND) && !(flags & VMM_FLAG_POPULATE)) {
         return true;
     }
 
@@ -149,7 +147,7 @@ void* vmalloc(
     alignment = max(alignment, PAGE_SIZE_SMALL);
     size      = align_up(size, PAGE_SIZE_SMALL);
 
-    bool is_fixed = (flags & VMM_FLAG_FIXED);
+    bool is_fixed = (flags & VMM_FLAG_FIXED) || (flags & VMM_FLAG_FIXED_NOREPLACE);
     if (is_fixed && !hint_addr) {
         KLOG_WARN("VMM: VMM_FLAG_FIXED requested but no hint_addr provided");
         return nullptr;
@@ -388,6 +386,10 @@ void vmfree(vm_space_t* space, void* ptr, size_t size) {
             if (right_half) {
                 vma->end  = unmap_start;
                 vma->size = vma->end - vma->start;
+
+                right_half->own_gap = right_half->start - vma->end;
+
+                vma_propagate_gap_up(&right_half->rb_node);
                 vma_propagate_gap_up(&vma->rb_node);
             } else {
                 KLOG_ERROR("VMM: Failed to split VMA during partial free at %p", (void*)unmap_end);
@@ -414,8 +416,7 @@ void vmm_destroy_space(vm_space_t* space) {
         vm_area_t* vma       = rb_entry(node, vm_area_t, rb_node);
         struct rb_node* next = rb_next(node);
 
-        uintptr_t addr       = vma->start;
-        size_t frames_needed = vma->page_size / PAGE_SIZE_SMALL;
+        uintptr_t addr = vma->start;
 
         while (addr < vma->end) {
             uintptr_t phys = pagemap_translate(space->map, addr);
@@ -484,8 +485,7 @@ bool vmm_clone_space(vm_space_t* parent, vm_space_t* child) {
             child_vma->flags |= VMM_FLAG_COW;
         }
 
-        uintptr_t addr       = parent_vma->start;
-        size_t frames_needed = parent_vma->page_size / PAGE_SIZE_SMALL;
+        uintptr_t addr = parent_vma->start;
 
         while (addr < parent_vma->end) {
             uintptr_t phys = pagemap_translate(parent->map, addr);
