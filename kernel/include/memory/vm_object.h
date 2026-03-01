@@ -36,6 +36,7 @@ void vm_object_deref(vm_object_t* obj);
 
 vm_object_t* vm_object_create_shadow(vm_object_t* parent_obj);
 uintptr_t vm_object_get_page(vm_object_t* obj, size_t offset, bool allocate_on_miss, bool is_write);
+uintptr_t vm_object_get_huge_page(vm_object_t* obj, size_t offset, bool is_write);
 
 void vm_object_collapse(vm_object_t* obj);
 void vm_object_truncate(vm_object_t* obj, size_t start_offset, size_t end_offset);

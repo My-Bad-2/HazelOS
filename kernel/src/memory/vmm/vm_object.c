@@ -1,5 +1,6 @@
 #include "memory/vm_object.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #include "libs/math.h"
@@ -295,7 +296,6 @@ vm_object_get_page(vm_object_t* obj, size_t offset, bool allocate_on_miss, bool 
 
     if (xa_store(&obj->pages, page_index, xa_mk_value(packed_val)) != XA_OK) {
         pmm_dec_ref(new_phys);
-        pmm_free(new_phys);
 
         release_write(&obj->lock);
         return 0;
@@ -303,4 +303,67 @@ vm_object_get_page(vm_object_t* obj, size_t offset, bool allocate_on_miss, bool 
 
     release_write(&obj->lock);
     return (uintptr_t)new_phys;
+}
+
+uintptr_t vm_object_get_huge_page(vm_object_t* obj, size_t offset, bool is_write) {
+    if (!obj || offset >= obj->size || obj->type != VM_OBJ_ANONYMOUS) {
+        return 0;
+    }
+
+    if (offset % PAGE_SIZE_MEDIUM != 0) {
+        return 0;
+    }
+
+    uint64_t base_page_index = offset / PAGE_SIZE_SMALL;
+    size_t frames_needed     = PAGE_SIZE_MEDIUM / PAGE_SIZE_SMALL;
+
+    acquire_write(&obj->lock);
+
+    for (size_t i = 0; i < frames_needed; i++) {
+        if (xa_load(&obj->pages, base_page_index + i) != nullptr) {
+            release_write(&obj->lock);
+            return 0;
+        }
+    }
+
+    void* huge_phys = pmm_alloc(frames_needed);
+    if (!huge_phys) {
+        release_write(&obj->lock);
+        return 0;
+    }
+
+    memset((void*)to_higher_half((uintptr_t)huge_phys), 0, PAGE_SIZE_MEDIUM);
+
+    uint32_t flags      = is_write ? PAGE_FLAG_DIRTY : 0;
+    bool xarray_success = true;
+
+    for (size_t i = 0; i < frames_needed; i++) {
+        uintptr_t sub_phys  = (uintptr_t)huge_phys + (i * PAGE_SIZE_SMALL);
+        uint64_t packed_val = pack_page_val(sub_phys, flags);
+
+        if (xa_store(&obj->pages, base_page_index + i, xa_mk_value(packed_val)) != XA_OK) {
+            xarray_success = false;
+            break;
+        }
+
+        pmm_inc_ref((void*)sub_phys);
+    }
+
+    if (!xarray_success) {
+        for (size_t i = 0; i < frames_needed; i++) {
+            xa_entry_t entry = xa_erase(&obj->pages, base_page_index + i);
+
+            if (entry && xa_is_value(entry)) {
+                uintptr_t p = unpack_phys(xa_to_value(entry));
+                pmm_dec_ref((void*)p);
+            }
+        }
+
+        pmm_free(huge_phys);
+        release_write(&obj->lock);
+        return 0;
+    }
+
+    release_write(&obj->lock);
+    return (uintptr_t)huge_phys;
 }

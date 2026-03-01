@@ -3,6 +3,8 @@
 
 #include "libs/log.h"
 #include "libs/math.h"
+#include "memory/memory.h"
+#include "memory/vm_object.h"
 #include "memory/vma.h"
 
 #include "../internal/vma_tree.h"
@@ -47,7 +49,23 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_co
     uintptr_t aligned_addr = align_down(fault_addr, vma->page_size);
     size_t object_offset   = vma->object_offset + (aligned_addr - vma->start);
 
-    uintptr_t phys = vm_object_get_page(vma->object, object_offset, true, info.is_write);
+    uintptr_t phys       = vm_object_get_page(vma->object, object_offset, true, info.is_write);
+    size_t map_page_size = vma->page_size;
+
+    // Transparent Huge page promotion attempt
+    // Essentially, merge 512 4KB entries into a single 2MB entry
+    uintptr_t huge_vaddr = align_down(fault_addr, PAGE_SIZE_MEDIUM);
+    size_t huge_offset   = vma->object_offset + (huge_vaddr - vma->start);
+
+    if (vma->page_size == PAGE_SIZE_SMALL && vma->object && vma->object->type == VM_OBJ_ANONYMOUS &&
+        huge_vaddr >= vma->start && (huge_vaddr + PAGE_SIZE_MEDIUM) <= vma->end) {
+        phys = vm_object_get_huge_page(vma->object, huge_offset, info.is_write);
+
+        if (phys) {
+            aligned_addr  = huge_vaddr;
+            map_page_size = PAGE_SIZE_MEDIUM;
+        }
+    }
 
     if (!phys) {
         KLOG_ERROR("VMM: Failed to resolve page fault at %p (OOM or VFS Error)", (void*)fault_addr);
