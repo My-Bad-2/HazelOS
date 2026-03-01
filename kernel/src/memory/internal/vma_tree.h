@@ -18,7 +18,9 @@ bool vmm_try_merge(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t page_size
+    size_t page_size,
+    vm_object_t* object,
+    size_t object_offset
 );
 
 vm_area_t* vmm_split_vma(vm_space_t* space, vm_area_t* vma, uintptr_t split_addr);

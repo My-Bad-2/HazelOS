@@ -6,6 +6,7 @@
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/pagemap.h"
+#include "memory/vm_object.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,9 +48,11 @@ typedef struct vm_area {
     uintptr_t end;  // Exclusive: [Start, end)
     size_t size;
     size_t page_size;  // Actual page size used (4K, 2M or 1G)
-
     uint32_t flags;
     cache_type_t cache;
+
+    vm_object_t* object;
+    size_t object_offset;
 } vm_area_t;
 
 typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
@@ -91,14 +94,7 @@ bool vmm_clone_space(vm_space_t* parent, vm_space_t* child);
 
 void pf_handler(interrupt_trapframe_t* tf);
 
-bool vmm_map_range(
-    vm_space_t* space,
-    uintptr_t start,
-    size_t size,
-    size_t page_size,
-    uint32_t flags,
-    cache_type_t cache
-);
+bool vmm_populate_vma_range(vm_space_t* space, vm_area_t* vma, uintptr_t start, size_t size);
 
 void* sys_mmap(
     vm_space_t* space,

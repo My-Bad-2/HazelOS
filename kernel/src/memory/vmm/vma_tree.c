@@ -5,6 +5,8 @@
 
 #include "libs/log.h"
 #include "libs/math.h"
+#include "memory/pagemap.h"
+#include "memory/vm_object.h"
 #include "memory/vma.h"
 
 #define max(a, b) ((a) > (b) ? (a) : (b))
@@ -87,111 +89,57 @@ vm_area_t* vmm_find_vma_unsafe(vm_space_t* space, uintptr_t addr) {
 
 bool vmm_find_gap_bottom_up(vm_space_t* space, size_t size, size_t align, uintptr_t* addr) {
     struct rb_node* node = space->rb_root.rb_node;
+    uintptr_t best_addr  = 0;
+    bool found           = false;
 
-    if (!node) {
-        uintptr_t candidate = align_up(space->start_limit, align);
+    struct rb_node* first = rb_first(&space->rb_root);
+    uintptr_t first_start = first ? rb_entry(first, vm_area_t, rb_node)->start : space->end_limit;
+    uintptr_t candidate   = align_up(space->start_limit, align);
 
-        if (candidate >= space->start_limit && candidate + size > candidate &&
-            candidate + size <= space->end_limit) {
-            *addr = candidate;
-            return true;
-        }
-
-        return false;
+    if (candidate >= space->start_limit && candidate + size <= first_start) {
+        *addr = candidate;
+        return true;
     }
 
     while (node) {
+        vm_area_t* vma = rb_entry(node, vm_area_t, rb_node);
+
         if (node->rb_left && rb_entry(node->rb_left, vm_area_t, rb_node)->subtree_max_gap >= size) {
             node = node->rb_left;
             continue;
         }
 
-        while (true) {
-            vm_area_t* vma       = rb_entry(node, vm_area_t, rb_node);
-            struct rb_node* prev = rb_prev(node);
-            uintptr_t prev_end =
-                prev ? rb_entry(prev, vm_area_t, rb_node)->end : space->start_limit;
-            uintptr_t candidate = align_up(prev_end, align);
+        struct rb_node* prev = rb_prev(node);
+        uintptr_t prev_end   = prev ? rb_entry(prev, vm_area_t, rb_node)->end : space->start_limit;
+        candidate            = align_up(prev_end, align);
 
-            if (candidate >= prev_end && candidate + size > candidate &&
-                candidate + size <= vma->start) {
-                *addr = candidate;
-                return true;
-            }
-
-            if (node->rb_right &&
-                rb_entry(node->rb_right, vm_area_t, rb_node)->subtree_max_gap >= size) {
-                node = node->rb_right;
-                break;
-            }
-
-            struct rb_node* parent = node->rb_parent;
-            if (!parent) {
-                goto check_tail;
-            }
-
-            while (parent && node == parent->rb_right) {
-                node   = parent;
-                parent = parent->rb_parent;
-            }
-
-            if (!parent) {
-                goto check_tail;
-            }
-
-            node = parent;
-        }
-    }
-
-check_tail:
-    struct rb_node* last = rb_last(&space->rb_root);
-    if (last) {
-        vm_area_t* vma      = rb_entry(last, vm_area_t, rb_node);
-        uintptr_t candidate = align_up(vma->end, align);
-
-        if (candidate >= vma->end && candidate + size > candidate &&
-            candidate + size <= space->end_limit) {
+        if (candidate >= prev_end && candidate + size <= vma->start) {
             *addr = candidate;
             return true;
         }
-    }
 
-    return false;
-}
-
-static bool find_gap_top_down_recurse(
-    struct rb_node* node,
-    size_t size,
-    size_t align,
-    uintptr_t start_limit,
-    uintptr_t* found_addr
-) {
-    if (!node) {
-        return false;
-    }
-
-    vm_area_t* vma = rb_entry(node, vm_area_t, rb_node);
-
-    if (node->rb_right && rb_entry(node->rb_right, vm_area_t, rb_node)->subtree_max_gap >= size) {
-        if (find_gap_top_down_recurse(node->rb_right, size, align, start_limit, found_addr)) {
-            return true;
+        if (node->rb_right &&
+            rb_entry(node->rb_right, vm_area_t, rb_node)->subtree_max_gap >= size) {
+            node = node->rb_right;
+            continue;
         }
-    }
 
-    struct rb_node* prev = rb_prev(node);
-    uintptr_t prev_end   = prev ? rb_entry(prev, vm_area_t, rb_node)->end : start_limit;
-
-    if (vma->own_gap >= size && vma->start >= size) {
-        uintptr_t candidate = align_down(vma->start - size, align);
-
-        if (candidate >= prev_end) {
-            *found_addr = candidate;
-            return true;
+        struct rb_node* parent = node->rb_parent;
+        while (parent && node == parent->rb_right) {
+            node   = parent;
+            parent = parent->rb_parent;
         }
+
+        node = parent;
     }
 
-    if (node->rb_left && rb_entry(node->rb_left, vm_area_t, rb_node)->subtree_max_gap >= size) {
-        if (find_gap_top_down_recurse(node->rb_left, size, align, start_limit, found_addr)) {
+    struct rb_node* last = rb_last(&space->rb_root);
+    if (last) {
+        vm_area_t* vma = rb_entry(last, vm_area_t, rb_node);
+        candidate      = align_up(vma->end, align);
+
+        if (candidate >= vma->end && candidate + size <= space->end_limit) {
+            *addr = candidate;
             return true;
         }
     }
@@ -214,16 +162,51 @@ bool vmm_find_gap_top_down(vm_space_t* space, size_t size, size_t align, uintptr
         vm_area_t* vma = rb_entry(last, vm_area_t, rb_node);
 
         if (space->end_limit >= size) {
-            uintptr_t top_candidate = align_down(space->end_limit - size, align);
-
-            if (top_candidate >= vma->end) {
-                *addr = top_candidate;
+            uintptr_t candidate = align_down(space->end_limit - size, align);
+            if (candidate >= vma->end) {
+                *addr = candidate;
                 return true;
             }
         }
     }
 
-    return find_gap_top_down_recurse(space->rb_root.rb_node, size, align, space->start_limit, addr);
+    struct rb_node* node = space->rb_root.rb_node;
+    while (node) {
+        vm_area_t* vma = rb_entry(node, vm_area_t, rb_node);
+
+        if (node->rb_right &&
+            rb_entry(node->rb_right, vm_area_t, rb_node)->subtree_max_gap >= size) {
+            node = node->rb_right;
+            continue;
+        }
+
+        struct rb_node* prev = rb_prev(node);
+        uintptr_t prev_end   = prev ? rb_entry(prev, vm_area_t, rb_node)->end : space->start_limit;
+
+        if (vma->own_gap >= size && vma->start >= size) {
+            uintptr_t candidate = align_down(vma->start - size, align);
+
+            if (candidate >= prev_end) {
+                *addr = candidate;
+                return true;
+            }
+        }
+
+        if (node->rb_left && rb_entry(node->rb_left, vm_area_t, rb_node)->subtree_max_gap >= size) {
+            node = node->rb_left;
+            continue;
+        }
+
+        struct rb_node* parent = node->rb_parent;
+        while (parent && node == parent->rb_left) {
+            node   = parent;
+            parent = parent->rb_parent;
+        }
+
+        node = parent;
+    }
+
+    return false;
 }
 
 bool vmm_try_merge(
@@ -232,27 +215,35 @@ bool vmm_try_merge(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t page_size
+    size_t page_size,
+    vm_object_t* object,
+    size_t object_offset
 ) {
     vm_area_t* prev = (addr > space->start_limit) ? vmm_find_vma_unsafe(space, addr - 1) : nullptr;
     vm_area_t* next =
         ((addr + size) < space->end_limit) ? vmm_find_vma_unsafe(space, addr + size) : nullptr;
 
-    if (prev && (prev->end != addr || prev->flags != flags || prev->cache != cache ||
-                 prev->page_size != page_size)) {
-        prev = nullptr;
+    if (prev) {
+        if (prev->end != addr || prev->flags != flags || prev->cache != cache ||
+            prev->page_size != page_size || prev->object != object ||
+            (object && (prev->object_offset + prev->size) != object_offset)) {
+            prev = nullptr;
+        }
     }
 
-    if (next && (next->start != addr + size || next->flags != flags || next->cache != cache ||
-                 next->page_size != page_size)) {
-        next = nullptr;
+    if (next) {
+        if (next->start != addr + size || next->flags != flags || next->cache != cache ||
+            next->page_size != page_size || next->object != object ||
+            (object && (object_offset + size) != next->object_offset)) {
+            next = nullptr;
+        }
     }
 
     if (!prev && !next) {
         return false;
     }
 
-    // Case A: Coalesce
+    // CASE A: Coalesce (Prev + Current + Next)
     if (prev && next) {
         rb_erase_augmented(&next->rb_node, &space->rb_root, vma_compute_subtree_gap);
 
@@ -271,11 +262,15 @@ bool vmm_try_merge(
         vm_area_t* cached = atomic_load_explicit(&space->cached_vma, memory_order_relaxed);
         if (cached == next) atomic_store_explicit(&space->cached_vma, prev, memory_order_relaxed);
 
+        if (next->object) {
+            vm_object_deref(next->object);
+        }
+
         kmem_cache_free(vma_cache, next);
         return true;
     }
 
-    // Case B: Merge Left
+    // Case B: Merge Left (Prev + Current)
     if (prev) {
         prev->end += size;
         prev->size += size;
@@ -292,13 +287,18 @@ bool vmm_try_merge(
         return true;
     }
 
-    // Case C: Merge Right
+    // Case C: Merge Right (Current + Next)
     if (next) {
         rb_erase_augmented(&next->rb_node, &space->rb_root, vma_compute_subtree_gap);
+
         next->start = addr;
         next->size += size;
-        vmm_insert_vma(space, next);
 
+        if (next->object) {
+            next->object_offset = object_offset;
+        }
+
+        vmm_insert_vma(space, next);
         atomic_store_explicit(&space->cached_vma, next, memory_order_relaxed);
         return true;
     }
@@ -325,6 +325,14 @@ vm_area_t* vmm_split_vma(vm_space_t* space, vm_area_t* vma, uintptr_t split_addr
     right_vma->flags     = vma->flags;
     right_vma->cache     = vma->cache;
     right_vma->page_size = vma->page_size;
+
+    right_vma->object = vma->object;
+    if (vma->object) {
+        vm_object_ref(vma->object);
+        right_vma->object_offset = vma->object_offset + (split_addr - vma->start);
+    } else {
+        right_vma->object_offset = 0;
+    }
 
     vma->end  = split_addr;
     vma->size = vma->end - vma->start;

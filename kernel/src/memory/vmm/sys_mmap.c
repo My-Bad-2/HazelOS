@@ -3,6 +3,7 @@
 #include "libs/math.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
+#include "memory/vm_object.h"
 #include "memory/vma.h"
 
 #include "../internal/vma_tree.h"
@@ -216,10 +217,22 @@ int sys_mprotect(vm_space_t* space, void* addr, size_t length, int prot) {
         }
 
         uintptr_t next_addr = vma->end;
-
         rb_erase_augmented(&vma->rb_node, &space->rb_root, vma_compute_subtree_gap);
 
-        if (vmm_try_merge(space, vma->start, vma->size, vma->flags, vma->cache, vma->page_size)) {
+        if (vmm_try_merge(
+                space,
+                vma->start,
+                vma->size,
+                vma->flags,
+                vma->cache,
+                vma->page_size,
+                vma->object,
+                vma->object_offset
+            )) {
+            if (vma->object) {
+                vm_object_deref(vma->object);
+            }
+
             kmem_cache_free(vma_cache, vma);
         } else {
             vmm_insert_vma(space, vma);
@@ -294,14 +307,11 @@ void* sys_mremap(
             next_node ? rb_entry(next_node, vm_area_t, rb_node)->start : space->end_limit;
 
         if (vma->end + extra_size <= next_start) {
-            if (vmm_map_range(
-                    space,
-                    vma->end,
-                    extra_size,
-                    vma->page_size,
-                    vma->flags,
-                    vma->cache
-                )) {
+            if (vma->object && vma->object_offset + new_size > vma->object->size) {
+                vma->object->size = vma->object_offset + new_size;
+            }
+
+            if (vmm_populate_vma_range(space, vma, vma->end, extra_size)) {
                 vma->end += extra_size;
                 vma->size = new_size;
 
@@ -349,13 +359,25 @@ void* sys_mremap(
     uintptr_t new_start = (uintptr_t)new_addr_ptr;
 
     acquire_write(&space->lock);
-
     vma = vmm_find_vma_unsafe(space, old_addr);
 
     if (!vma || vma->start != old_addr || vma->size != old_size) {
         release_write(&space->lock);
         vmfree(space, new_addr_ptr, new_size);
         return (void*)-EAGAIN;
+    }
+
+    vm_area_t* new_vma = vmm_find_vma_unsafe(space, new_start);
+
+    if (new_vma->object) {
+        vm_object_deref(new_vma->object);
+    }
+
+    new_vma->object        = vma->object;
+    new_vma->object_offset = vma->object_offset;
+
+    if (new_vma->object && new_vma->object_offset + new_size > new_vma->object->size) {
+        new_vma->object->size = new_vma->object_offset + new_size;
     }
 
     uintptr_t current_old = old_addr;
@@ -396,15 +418,7 @@ void* sys_mremap(
 
     if (new_size > old_size) {
         size_t extra_size = new_size - old_size;
-
-        if (!vmm_map_range(
-                space,
-                new_start + old_size,
-                extra_size,
-                vma_page_size,
-                vma_flags,
-                vma_caching
-            )) {
+        if (!vmm_populate_vma_range(space, new_vma, new_start + old_size, extra_size)) {
             release_write(&space->lock);
             vmfree(space, new_addr_ptr, new_size);
             return (void*)-ENOMEM;
@@ -412,15 +426,15 @@ void* sys_mremap(
     }
 
     if (flags & MREMAP_DONTUNMAP) {
-        vm_area_t* old_vma = vmm_find_vma_unsafe(space, old_addr);
+        vma->flags |= VMM_FLAG_DEMAND;
+        vma->flags &= ~(VMM_FLAG_SHARED | VMM_FLAG_POPULATE);
 
-        if (old_vma && old_vma->start == old_addr && old_vma->size == old_size) {
-            old_vma->flags |= VMM_FLAG_DEMAND;
-            old_vma->flags &= ~(VMM_FLAG_SHARED | VMM_FLAG_POPULATE);
-        }
+        vma->object        = vm_object_create(VM_OBJ_ANONYMOUS, old_size);
+        vma->object_offset = 0;
 
         release_write(&space->lock);
     } else {
+        vma->object = nullptr;
         release_write(&space->lock);
         sys_munmap(space, old_address, old_size);
     }
