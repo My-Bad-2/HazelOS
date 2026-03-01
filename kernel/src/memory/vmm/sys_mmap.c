@@ -5,7 +5,6 @@
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 
-#include "../internal/vma_pool.h"
 #include "../internal/vma_tree.h"
 
 static uint32_t sys_prot_to_vmm(int prot) {
@@ -221,7 +220,7 @@ int sys_mprotect(vm_space_t* space, void* addr, size_t length, int prot) {
         rb_erase_augmented(&vma->rb_node, &space->rb_root, vma_compute_subtree_gap);
 
         if (vmm_try_merge(space, vma->start, vma->size, vma->flags, vma->cache, vma->page_size)) {
-            vma_free_struct(space, vma);
+            kmem_cache_free(vma_cache, vma);
         } else {
             vmm_insert_vma(space, vma);
         }
@@ -326,9 +325,9 @@ void* sys_mremap(
         return (void*)-ENOMEM;
     }
 
-    uint32_t vma_flags     = vma->flags;
-    cache_type_t vma_cache = vma->cache;
-    size_t vma_page_size   = vma->page_size;
+    uint32_t vma_flags       = vma->flags;
+    cache_type_t vma_caching = vma->cache;
+    size_t vma_page_size     = vma->page_size;
 
     release_write(&space->lock);
 
@@ -339,7 +338,7 @@ void* sys_mremap(
         new_address,
         new_size,
         alloc_flags | VMM_FLAG_DEMAND,
-        vma_cache,
+        vma_caching,
         vma_page_size
     );
 
@@ -351,7 +350,6 @@ void* sys_mremap(
 
     acquire_write(&space->lock);
 
-    // Re-validate: the old VMA may have been modified while we released the lock.
     vma = vmm_find_vma_unsafe(space, old_addr);
 
     if (!vma || vma->start != old_addr || vma->size != old_size) {
@@ -385,7 +383,7 @@ void* sys_mremap(
                 .phys_addr = (void*)phys,
                 .length    = vma_page_size,
                 .flags     = pte_flags,
-                .cache     = vma_cache,
+                .cache     = vma_caching,
                 .page_size = vma_page_size,
             };
 
@@ -405,7 +403,7 @@ void* sys_mremap(
                 extra_size,
                 vma_page_size,
                 vma_flags,
-                vma_cache
+                vma_caching
             )) {
             release_write(&space->lock);
             vmfree(space, new_addr_ptr, new_size);

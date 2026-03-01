@@ -1,3 +1,4 @@
+#include "memory/heap.h"
 #ifndef KERNEL_LIBS_XARRAY_H
 #define KERNEL_LIBS_XARRAY_H 1
 
@@ -6,25 +7,26 @@
 
 #include "libs/spinlock.h"
 
-#define XA_BITS  5
-#define XA_SLOTS (1u << XA_BITS)
-#define XA_MASK  (XA_SLOTS - 1)
-
 #define XA_TAG_MASK  0x3ul
-#define XA_MAX_DEPTH 14
+#define XA_MAX_DEPTH 64
 
 typedef void* xa_entry_t;
 
 typedef struct xa_node {
     uint8_t shift;
-    uint8_t count;
-    struct xa_node* slots[XA_SLOTS];
+    uint32_t count;
+    struct xa_node* slots[];
 } xa_node_t;
 
 typedef struct xarray {
     xa_node_t* root;
-
     rwlock_t lock;
+
+    uint8_t bits;
+    uint32_t slots;
+    uint64_t mask;
+
+    kmem_cache_t* node_cache;
 
     struct {
         xa_node_t* node;
@@ -46,19 +48,18 @@ typedef struct {
 
 typedef enum {
     XA_OK = 0,
-    XA_NEED_NODE,
+    XA_ERR_NOMEM,
     XA_ERR_PARAM,
     XA_ERR_BOUNDS,
 } xa_result_t;
 
-void xa_init(xarray_t* xa);
-void xa_destory(xarray_t* xa);
+void xa_init(xarray_t* xa, uint8_t bits);
+void xa_destroy(xarray_t* xa);
 
-[[nodiscard]] xa_result_t
-xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t entry, xa_node_t** restrict spare);
-[[nodiscard]] xa_entry_t xa_load(xarray_t* restrict xa, uint64_t index);
+xa_result_t xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t entry);
+xa_entry_t xa_load(xarray_t* restrict xa, uint64_t index);
 
-xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index, xa_node_t** freed_node);
+xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index);
 xa_entry_t xa_find_after(xarray_t* restrict xa, uint64_t* restrict index);
 
 void xa_cursor_reset(xa_cursor_t* cursor, const xarray_t* xa, uint64_t start_idx);

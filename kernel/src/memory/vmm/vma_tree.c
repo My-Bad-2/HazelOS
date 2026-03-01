@@ -1,11 +1,11 @@
 #include "../internal/vma_tree.h"
 
 #include <stdatomic.h>
+#include <string.h>
 
 #include "libs/log.h"
 #include "libs/math.h"
-
-#include "../internal/vma_pool.h"
+#include "memory/vma.h"
 
 #define max(a, b) ((a) > (b) ? (a) : (b))
 
@@ -271,7 +271,7 @@ bool vmm_try_merge(
         vm_area_t* cached = atomic_load_explicit(&space->cached_vma, memory_order_relaxed);
         if (cached == next) atomic_store_explicit(&space->cached_vma, prev, memory_order_relaxed);
 
-        vma_free_struct(space, next);
+        kmem_cache_free(vma_cache, next);
         return true;
     }
 
@@ -311,11 +311,13 @@ vm_area_t* vmm_split_vma(vm_space_t* space, vm_area_t* vma, uintptr_t split_addr
         return nullptr;
     }
 
-    vm_area_t* right_vma = vma_new(space);
+    vm_area_t* right_vma = kmem_cache_alloc(vma_cache);
     if (!right_vma) {
         KLOG_ERROR("VMM: OOM during VMA split");
         return nullptr;
     }
+
+    memset(right_vma, 0, sizeof(vm_area_t));
 
     right_vma->start     = split_addr;
     right_vma->end       = vma->end;

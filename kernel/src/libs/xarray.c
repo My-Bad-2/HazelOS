@@ -5,25 +5,76 @@
 
 #include "compiler.h"
 #include "libs/spinlock.h"
+#include "memory/heap.h"
 
-static void xa_node_reset(xa_node_t* node, uint8_t shift) {
-    node->shift = shift;
-    node->count = 0;
+static inline xa_node_t* xa_node_alloc(xarray_t* xa, uint8_t shift) {
+    xa_node_t* node = (xa_node_t*)kmem_cache_alloc(xa->node_cache);
 
-    memset((void*)node->slots, 0, sizeof(node->slots));
+    if (likely(node)) {
+        size_t node_size = sizeof(xa_node_t) + (sizeof(xa_node_t*) * xa->slots);
+        memset(node, 0, node_size);
+        node->shift = shift;
+    }
+
+    return node;
 }
 
-void xa_init(xarray_t* xa) {
+static inline void xa_node_free(xarray_t* xa, xa_node_t* node) {
+    kmem_cache_free(xa->node_cache, node);
+}
+
+void xa_init(xarray_t* xa, uint8_t bits) {
     xa->root       = nullptr;
     xa->hint.node  = nullptr;
     xa->hint.index = 0;
 
+    xa->bits  = bits;
+    xa->slots = 1u << bits;
+    xa->mask  = xa->slots - 1;
+
+    size_t node_size = sizeof(xa_node_t) + (sizeof(xa_node_t*) * xa->slots);
+
+    xa->node_cache = kmem_cache_create("xarray_nodes", node_size, 0, 0, nullptr);
+
     create_rwlock(&xa->lock);
 }
 
-xa_result_t
-xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t entry, xa_node_t** restrict spare) {
-    if (unlikely(!xa || !spare)) {
+static void xa_destroy_node(xarray_t* xa, xa_node_t* node) {
+    if (!node) {
+        return;
+    }
+
+    if (node->shift > 0) {
+        for (uint32_t i = 0; i < xa->slots; ++i) {
+            if (node->slots[i]) {
+                xa_destroy_node(xa, (xa_node_t*)node->slots[i]);
+            }
+        }
+    }
+
+    xa_node_free(xa, node);
+}
+
+void xa_destroy(xarray_t* xa) {
+    if (unlikely(!xa)) return;
+
+    acquire_write(&xa->lock);
+
+    xa_destroy_node(xa, xa->root);
+
+    if (xa->node_cache) {
+        kmem_cache_destroy(xa->node_cache);
+        xa->node_cache = nullptr;
+    }
+
+    xa->root      = nullptr;
+    xa->hint.node = nullptr;
+
+    release_write(&xa->lock);
+}
+
+xa_result_t xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t entry) {
+    if (unlikely(!xa || xa->bits == 0)) {
         return XA_ERR_PARAM;
     }
 
@@ -31,7 +82,7 @@ xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t entry, xa_node_t** re
 
     uint64_t max_idx = -1ul;
     if (xa->root) {
-        uint32_t total_bits = xa->root->shift + XA_BITS;
+        uint32_t total_bits = xa->root->shift + xa->bits;
 
         if (total_bits < sizeof(uint64_t) * 8) {
             max_idx = (1ul << total_bits) - 1;
@@ -39,22 +90,18 @@ xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t entry, xa_node_t** re
     }
 
     while (xa->root == nullptr || index > max_idx) {
-        if (*spare == nullptr) {
-            release_write(&xa->lock);
-            return XA_NEED_NODE;
-        }
-
-        xa_node_t* new_root = *spare;
-        *spare              = nullptr;
-
-        uint8_t next_shift = (xa->root) ? (xa->root->shift + XA_BITS) : 0;
+        uint8_t next_shift = (xa->root) ? (xa->root->shift + xa->bits) : 0;
 
         if (xa->root && next_shift >= sizeof(uint64_t) * 8) {
             release_write(&xa->lock);
             return XA_ERR_BOUNDS;
         }
 
-        xa_node_reset(new_root, next_shift);
+        xa_node_t* new_root = xa_node_alloc(xa, next_shift);
+        if (unlikely(!new_root)) {
+            release_write(&xa->lock);
+            return XA_ERR_NOMEM;
+        }
 
         if (xa->root) {
             new_root->slots[0] = xa->root;
@@ -63,47 +110,42 @@ xa_store(xarray_t* restrict xa, uint64_t index, xa_entry_t entry, xa_node_t** re
 
         xa->root = new_root;
 
-        uint32_t total_bits = xa->root->shift + XA_BITS;
+        uint32_t total_bits = xa->root->shift + xa->bits;
         max_idx             = (total_bits < sizeof(uint64_t) * 8) ? (1ul << total_bits) - 1 : -1ul;
     }
 
     xa_node_t* node = xa->root;
 
-    if (xa->hint.node && xa->hint.node->shift == 0) {
-        if ((index & ~XA_MASK) == xa->hint.index) {
-            node = xa->hint.node;
-            goto insert_entry;
-        }
+    if (xa->hint.node && xa->hint.node->shift == 0 && ((index & ~xa->mask) == xa->hint.index)) {
+        node = xa->hint.node;
+        goto insert_entry;
     }
 
     uint64_t shift = node->shift;
-
     while (shift > 0) {
-        uint64_t offset = (index >> shift) & XA_MASK;
+        uint64_t offset = (index >> shift) & xa->mask;
 
         if (node->slots[offset] == nullptr) {
-            if (*spare == nullptr) {
+            xa_node_t* child = xa_node_alloc(xa, shift - xa->bits);
+
+            if (unlikely(!child)) {
                 release_write(&xa->lock);
-                return XA_NEED_NODE;
+                return XA_ERR_NOMEM;
             }
 
-            xa_node_t* child = *spare;
-            *spare           = nullptr;
-
-            xa_node_reset(child, shift - XA_BITS);
             node->slots[offset] = child;
             node->count++;
         }
 
         node = node->slots[offset];
-        shift -= XA_BITS;
+        shift -= xa->bits;
     }
 
     xa->hint.node  = node;
-    xa->hint.index = index & ~XA_MASK;
+    xa->hint.index = index & ~xa->mask;
 
 insert_entry:
-    uint64_t offset = index & XA_MASK;
+    uint64_t offset = index & xa->mask;
 
     if (node->slots[offset] == nullptr && entry != nullptr) {
         node->count++;
@@ -124,25 +166,22 @@ xa_entry_t xa_load(xarray_t* restrict xa, uint64_t index) {
 
     acquire_read(&xa->lock);
 
-    if (xa->hint.node && (index & ~XA_MASK) == xa->hint.index) {
-        xa_entry_t ret = (xa_entry_t)(xa_entry_t)xa->hint.node->slots[index & XA_MASK];
+    if (xa->hint.node && (index & ~xa->mask) == xa->hint.index) {
+        xa_entry_t ret = (xa_entry_t)(xa_entry_t)xa->hint.node->slots[index & xa->mask];
         release_read(&xa->lock);
         return ret;
     }
 
-    xa_node_t* node = xa->root;
+    xa_node_t* node     = xa->root;
+    uint32_t total_bits = node->shift + xa->bits;
 
-    uint32_t total_bits = node->shift + XA_BITS;
-
-    if (total_bits < sizeof(uint64_t) * 8) {
-        if (index >= (1ul << total_bits)) {
-            release_read(&xa->lock);
-            return nullptr;
-        }
+    if (total_bits < sizeof(uint64_t) * 8 && index >= (1ul << total_bits)) {
+        release_read(&xa->lock);
+        return nullptr;
     }
 
     while (node && node->shift > 0) {
-        uint64_t offset = (index >> node->shift) & XA_MASK;
+        uint64_t offset = (index >> node->shift) & xa->mask;
         node            = node->slots[offset];
     }
 
@@ -152,19 +191,14 @@ xa_entry_t xa_load(xarray_t* restrict xa, uint64_t index) {
     }
 
     xa->hint.node  = node;
-    xa->hint.index = index & ~XA_MASK;
+    xa->hint.index = index & ~xa->mask;
 
-    xa_entry_t ret = (xa_entry_t)node->slots[index & XA_MASK];
-
+    xa_entry_t ret = (xa_entry_t)node->slots[index & xa->mask];
     release_read(&xa->lock);
     return ret;
 }
 
-xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index, xa_node_t** freed_node) {
-    if (freed_node) {
-        *freed_node = nullptr;
-    }
-
+xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index) {
     if (!xa->root) {
         return nullptr;
     }
@@ -177,7 +211,7 @@ xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index, xa_node_t** freed_nod
 
     while (node && node->shift > 0) {
         path[path_idx++] = node;
-        uint64_t offset  = (index >> node->shift) & XA_MASK;
+        uint64_t offset  = (index >> node->shift) & xa->mask;
         node             = node->slots[offset];
     }
 
@@ -186,14 +220,14 @@ xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index, xa_node_t** freed_nod
         return nullptr;
     }
 
-    uint64_t offset = index & XA_MASK;
+    uint64_t offset = index & xa->mask;
     xa_entry_t val  = (xa_entry_t)node->slots[offset];
 
     if (val) {
         node->slots[offset] = nullptr;
         node->count--;
 
-        if (xa->hint.node == node && xa->hint.index == (index & ~XA_MASK)) {
+        if (xa->hint.node == node && xa->hint.index == (index & ~xa->mask)) {
             xa->hint.node  = nullptr;
             xa->hint.index = 0;
         }
@@ -203,24 +237,17 @@ xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index, xa_node_t** freed_nod
         while (curr->count == 0) {
             if (path_idx == 0) {
                 xa->root = nullptr;
-
-                if (freed_node) {
-                    *freed_node = curr;
-                }
-
+                xa_node_free(xa, node);
                 break;
             }
 
             xa_node_t* parent = path[path_idx - 1];
-            uint64_t p_offset = (index >> parent->shift) & XA_MASK;
+            uint64_t p_offset = (index >> parent->shift) & xa->mask;
 
             parent->slots[p_offset] = nullptr;
             parent->count--;
 
-            if (freed_node) {
-                *freed_node = node;
-            }
-
+            xa_node_free(xa, node);
             curr = parent;
         }
     }
@@ -230,20 +257,14 @@ xa_entry_t xa_erase(xarray_t* restrict xa, uint64_t index, xa_node_t** freed_nod
 }
 
 xa_entry_t xa_find_after(xarray_t* restrict xa, uint64_t* restrict index) {
-    if (unlikely(!xa->root || !xa)) {
-        return nullptr;
-    }
-
-    if (unlikely(!index)) {
+    if (unlikely(!xa->root || !xa || index == 0)) {
         return nullptr;
     }
 
     acquire_read(&xa->lock);
 
     xa_cursor_t cursor;
-
     xa_cursor_reset(&cursor, xa, *index);
-
     xa_entry_t entry = xa_cursor_next(&cursor);
 
     if (entry) {
@@ -265,12 +286,10 @@ void xa_cursor_reset(xa_cursor_t* cursor, const xarray_t* xa, uint64_t start_idx
 
     xa_node_t* node = xa->root;
 
-    uint32_t total_bits = node->shift + XA_BITS;
+    uint32_t total_bits = node->shift + xa->bits;
 
-    if (total_bits < sizeof(uint64_t) * 8) {
-        if (start_idx >= (1ul << total_bits)) {
-            return;
-        }
+    if (total_bits < sizeof(uint64_t) * 8 && start_idx >= (1ul << total_bits)) {
+        return;
     }
 
     cursor->depth          = 0;
@@ -280,7 +299,7 @@ void xa_cursor_reset(xa_cursor_t* cursor, const xarray_t* xa, uint64_t start_idx
     int d = 0;
     while (node->shift > 0) {
         uint64_t shift  = node->shift;
-        uint64_t offset = (start_idx >> shift) & XA_MASK;
+        uint64_t offset = (start_idx >> shift) & xa->mask;
 
         cursor->path[d].node   = node;
         cursor->path[d].offset = (uint8_t)offset;
@@ -294,7 +313,7 @@ void xa_cursor_reset(xa_cursor_t* cursor, const xarray_t* xa, uint64_t start_idx
     }
 
     cursor->path[d].node   = node;
-    cursor->path[d].offset = (uint8_t)(start_idx & XA_MASK);
+    cursor->path[d].offset = (uint8_t)(start_idx & xa->mask);
     cursor->depth          = d;
 }
 
@@ -308,7 +327,7 @@ xa_entry_t xa_cursor_next(xa_cursor_t* cursor) {
         xa_node_t* node = cursor->path[d].node;
         uint8_t offset  = cursor->path[d].offset;
 
-        if (offset >= XA_SLOTS) {
+        if (offset >= cursor->xa->slots) {
             cursor->depth--;
 
             if (cursor->depth >= 0) {
@@ -330,10 +349,9 @@ xa_entry_t xa_cursor_next(xa_cursor_t* cursor) {
             cursor->path[d].offset++;
 
             uint64_t reconstructed_index = 0;
-
             for (int i = 0; i <= cursor->depth; ++i) {
                 uint64_t shift = cursor->path[i].node->shift;
-                uint64_t off   = cursor->path[i].offset;
+                uint64_t off   = cursor->path[i].offset - (i == cursor->depth ? 1 : 0);
 
                 reconstructed_index |= (off << shift);
             }

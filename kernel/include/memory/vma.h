@@ -4,6 +4,7 @@
 #include "cpu/exception.h"
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"
+#include "memory/heap.h"
 #include "memory/pagemap.h"
 
 #ifdef __cplusplus
@@ -57,9 +58,6 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
 
     _Atomic(vm_area_t*) cached_vma;
     rwlock_t lock;
-
-    spinlock_t pool_lock;
-    vm_area_t* free_vma_pool;
 
     uintptr_t start_limit;
     uintptr_t end_limit;
@@ -125,6 +123,9 @@ void* sys_mremap(
 );
 
 extern vm_space_t* kernel_space;
+extern kmem_cache_t* vma_cache;
+
+void vma_cache_init(void);
 
 #ifdef __cplusplus
 }
