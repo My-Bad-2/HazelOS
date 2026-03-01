@@ -66,15 +66,6 @@ void user_start() {
 
     ipc_test();
 
-    void* addr =
-        mmap((void*)0x1000, 0x1000, PROT_READ, MAP_POPULATE | MAP_FIXED | MAP_PRIVATE, 0, 0);
-
-    char buf[128];
-    snprintf(buf, 128, "addr = %p\n", addr);
-    write(1, buf, 128);
-
-    mprotect(addr, 0, PROT_READ | PROT_WRITE);
-
     write(1, str, len);
 
 halt:

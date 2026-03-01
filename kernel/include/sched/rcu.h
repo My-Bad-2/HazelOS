@@ -7,7 +7,6 @@
 #include <stdint.h>
 
 #include "libs/spinlock.h"
-#include "sched/process.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,7 +66,7 @@ struct rcu_state {
 
     atomic_size_t gp_seq;
     atomic_bool gp_request;
-    thread_t* gp_thread;
+    struct thread* gp_thread;
     spinlock_t gp_lock;
 };
 
@@ -103,7 +102,7 @@ struct completion {
 
 struct completion_waiter {
     struct dlist_head list;
-    thread_t* task;
+    struct thread* task;
 };
 
 extern struct srcu_domain g_srcu;

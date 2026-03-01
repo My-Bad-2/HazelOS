@@ -7,6 +7,9 @@
 extern "C" {
 #endif
 
+#define DLIST_POISON_PREV ((void*)(0x00100100))
+#define DLIST_POISON_NEXT ((void*)(0x00200200))
+
 #ifndef container_of
 #define container_of(ptr, type, member)                  \
     ({                                                   \
@@ -30,8 +33,12 @@ static inline void dlist_init(struct dlist_head* list) {
     list->prev = list;
 }
 
-static inline bool dlist_linked(struct dlist_head* node) {
-    return node->next != nullptr && node->prev != nullptr;
+static inline bool dlist_linked(const struct dlist_head* node) {
+    if (!node || node->next == DLIST_POISON_NEXT) {
+        return false;
+    }
+
+    return node->next != nullptr && node->prev != nullptr && node->next != node;
 }
 
 static inline void
@@ -79,8 +86,8 @@ static inline void dlist_del(struct dlist_head* entry) {
 
     __dlist_del(entry->prev, entry->next);
 
-    entry->next = nullptr;
-    entry->prev = nullptr;
+    entry->next = DLIST_POISON_NEXT;
+    entry->prev = DLIST_POISON_PREV;
 }
 
 static inline void dlist_del_init(struct dlist_head* entry) {
@@ -118,13 +125,12 @@ static inline void dlist_splice(struct dlist_head* list, struct dlist_head* head
     dlist_init(list);
 }
 
-static size_t dlist_count(struct dlist_head* head) {
+static size_t dlist_count(const struct dlist_head* head) {
     if (!head) {
         return 0;
     }
 
-    size_t count = 0;
-
+    size_t count            = 0;
     struct dlist_head* curr = head->next;
 
     while (curr != head) {
@@ -139,18 +145,15 @@ static size_t dlist_count(struct dlist_head* head) {
 
 #define dlist_for_each(pos, head) for ((pos) = (head)->next; (pos) != (head); (pos) = (pos)->next)
 
-#define dlist_for_each_entry(pos, head, member)                                               \
-    for ((pos) = dlist_entry((head)->next, typeof(*(pos)), member); &(pos)->member != (head); \
-         (pos) = dlist_entry((pos)->member.next, typeof(*(pos)), member))
+#define dlist_for_each_entry(pos, head, member)                                                   \
+    for ((pos) = dlist_entry((head)->next, __typeof__(*(pos)), member); &(pos)->member != (head); \
+         (pos) = dlist_entry((pos)->member.next, __typeof__(*(pos)), member))
 
-#define dlist_for_each_entry_safe(pos, n, head, member)                          \
-    for ((pos) = dlist_entry((head)->next, typeof(*(pos)), member),              \
-        (n)    = dlist_entry((pos)->member.next, typeof(*(pos)), member);        \
-         &(pos)->member != (head);                                               \
-         (pos) = (n), (n) = dlist_entry((n)->member.next, typeof(*(n)), member)) \
-        if (&(n)->member != (head)) {                                            \
-            prefetch((n)->member.next);                                          \
-        }
+#define dlist_for_each_entry_safe(pos, n, head, member)                       \
+    for ((pos) = dlist_entry((head)->next, __typeof__(*(pos)), member),       \
+        (n)    = dlist_entry((pos)->member.next, __typeof__(*(pos)), member); \
+         &(pos)->member != (head);                                            \
+         (pos) = (n), (n) = dlist_entry((n)->member.next, __typeof__(*(n)), member))
 
 #ifdef __cplusplus
 }

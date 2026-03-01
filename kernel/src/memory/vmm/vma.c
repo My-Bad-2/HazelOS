@@ -9,7 +9,6 @@
 #include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
-#include "memory/pmm.h"
 #include "memory/vm_object.h"
 
 #include "../internal/vma_tree.h"
