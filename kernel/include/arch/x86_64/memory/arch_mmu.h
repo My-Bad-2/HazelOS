@@ -69,4 +69,11 @@ uintptr_t arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_
 void arch_mmu_load(arch_pagemap_t* map);
 void arch_mmu_flush_tlb(arch_pagemap_t* map, uintptr_t virt, size_t length);
 
+int arch_mmu_shatter(arch_pagemap_t* map, uintptr_t virt);
+int arch_mmu_collapse(arch_pagemap_t* map, uintptr_t virt);
+bool arch_mmu_test_and_clear_dirty(arch_pagemap_t* map, uintptr_t virt);
+bool arch_mmu_test_and_clear_accessed(arch_pagemap_t* map, uintptr_t virt);
+int arch_mmu_clone(arch_pagemap_t* dest, arch_pagemap_t* src);
+void arch_mmu_sync_kernel(arch_pagemap_t* target_map);
+
 #endif

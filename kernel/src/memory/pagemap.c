@@ -2,7 +2,6 @@
 
 #include <errno.h>
 
-#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
 
@@ -12,7 +11,6 @@ void pagemap_create(pagemap_t* map) {
     }
 
     create_interrupt_lock(&map->lock);
-
     arch_mmu_create(&map->arch);
 }
 
@@ -53,7 +51,9 @@ void pagemap_free_pkey(pagemap_t* map, uint8_t pkey) {
 }
 
 bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args) {
-    if (!map || !args) return false;
+    if (!map || !args) {
+        return false;
+    }
 
     int status = arch_mmu_map(
         &map->arch,
@@ -65,10 +65,6 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args) {
         args->pkey,
         args->page_size
     );
-
-    if (status != 0) {
-        KLOG_DEBUG("status = %d\n", status);
-    }
 
     return (status == 0);
 }
@@ -105,9 +101,67 @@ uintptr_t pagemap_translate(pagemap_t* map, uintptr_t virt_addr) {
 }
 
 size_t pagemap_get_flags(pagemap_t* map, uintptr_t virt_addr) {
-    if (!map) return 0;
+    if (!map) {
+        return 0;
+    }
 
     uint32_t generic_flags = 0;
     arch_mmu_translate(&map->arch, virt_addr, &generic_flags);
     return generic_flags;
+}
+
+bool pagemap_shatter(pagemap_t* map, uintptr_t virt_addr) {
+    if (!map) {
+        return false;
+    }
+
+    return arch_mmu_shatter(&map->arch, virt_addr) == 0;
+}
+
+bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr) {
+    if (!map) {
+        return false;
+    }
+
+    return arch_mmu_collapse(&map->arch, virt_addr) == 0;
+}
+
+bool pagemap_test_and_clear_dirty(pagemap_t* map, uintptr_t virt_addr) {
+    if (!map) {
+        return false;
+    }
+
+    return arch_mmu_test_and_clear_dirty(&map->arch, virt_addr);
+}
+
+bool pagemap_test_and_clear_accessed(pagemap_t* map, uintptr_t virt_addr) {
+    if (!map) {
+        return false;
+    }
+
+    return arch_mmu_test_and_clear_accessed(&map->arch, virt_addr);
+}
+
+void pagemap_sync_kernel(pagemap_t* target_map) {
+    if (!target_map) {
+        return;
+    }
+
+    arch_mmu_sync_kernel(&target_map->arch);
+}
+
+bool pagemap_clone(pagemap_t* dest, pagemap_t* src) {
+    if (!dest || !src) {
+        return false;
+    }
+
+    acquire_interrupt_lock(&src->lock);
+    acquire_interrupt_lock(&dest->lock);
+
+    int status = arch_mmu_clone(&dest->arch, &src->arch);
+
+    release_interrupt_lock(&dest->lock);
+    release_interrupt_lock(&src->lock);
+
+    return (status == 0);
 }

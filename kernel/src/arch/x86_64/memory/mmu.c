@@ -943,3 +943,313 @@ int arch_mmu_protect(
 
     return status;
 }
+
+#define PTE_PRESERVED_FLAGS                                                                      \
+    (X86_PAGE_ADDRESS_MASK | X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND | X86_PAGE_FLAG_HUGE | \
+     X86_PAGE_FLAG_DIRTY | X86_PAGE_FLAG_ACCESSED | X86_PAGE_FLAG_LARGE_PAT | X86_PAGE_FLAG_PAT)
+
+int arch_mmu_shatter(arch_pagemap_t* map, uintptr_t virt) {
+    if (!map || !arch_is_canonical(virt, paging_max_levels)) {
+        return -EINVAL;
+    }
+
+    void* new_pt = pmm_alloc(1);
+    if (!new_pt) {
+        return -ENOMEM;
+    }
+
+    uint64_t* new_table = (uint64_t*)to_higher_half((uintptr_t)new_pt);
+
+    acquire_spinlock(&map->lock);
+
+    uintptr_t curr_phys = map->phys_root;
+    uint64_t* pte       = nullptr;
+    int hit_level       = 0;
+
+    for (int level = paging_max_levels; level >= 1; level--) {
+        uint64_t* table = (uint64_t*)to_higher_half(curr_phys);
+        int idx         = (int)((virt >> (12 + (level - 1) * 9)) & 0x1ff);
+        uint64_t entry  = table[idx];
+
+        if (!(entry & X86_PAGE_FLAG_PRESENT) && !(entry & X86_PAGE_FLAG_DEMAND)) {
+            release_spinlock(&map->lock);
+            pmm_free(new_pt);
+            return -ENOENT;
+        }
+
+        if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) {
+            pte       = &table[idx];
+            hit_level = level;
+            break;
+        } else if (level == 1) {
+            release_spinlock(&map->lock);
+            pmm_free(new_pt);
+            return 0;
+        }
+
+        curr_phys = entry & X86_PAGE_ADDRESS_MASK;
+    }
+
+    if (!pte) {
+        release_spinlock(&map->lock);
+        pmm_free(new_pt);
+        return -ENOENT;
+    }
+
+    uint64_t entry      = *pte;
+    uintptr_t base_phys = entry & X86_PAGE_ADDRESS_MASK;
+
+    size_t flags = entry & ~(X86_PAGE_ADDRESS_MASK | X86_PAGE_FLAG_HUGE | X86_PAGE_FLAG_LARGE_PAT);
+    if (entry & X86_PAGE_FLAG_LARGE_PAT) {
+        flags |= X86_PAGE_FLAG_PAT;
+    }
+
+    size_t step_size   = (hit_level == 3) ? PAGE_SIZE_MEDIUM : PAGE_SIZE_SMALL;
+    size_t child_flags = flags | ((hit_level == 3) ? X86_PAGE_FLAG_HUGE : 0);
+
+    for (int i = 0; i < 512; i++) {
+        new_table[i] = base_phys | child_flags;
+        base_phys += step_size;
+    }
+
+    *pte = (uintptr_t)new_pt | X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_WRITE | X86_PAGE_FLAG_USER;
+
+    release_spinlock(&map->lock);
+
+    arch_mmu_flush_tlb(
+        map,
+        virt & ~((hit_level == 3 ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM) - 1),
+        hit_level == 3 ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM
+    );
+
+    return 0;
+}
+
+int arch_mmu_collapse(arch_pagemap_t* map, uintptr_t virt) {
+    if (!map || !is_aligned(virt, PAGE_SIZE_MEDIUM)) {
+        return -EINVAL;
+    }
+
+    acquire_spinlock(&map->lock);
+
+    uintptr_t curr_phys = map->phys_root;
+    for (int level = paging_max_levels; level > 2; level--) {
+        uint64_t* table = (uint64_t*)to_higher_half(curr_phys);
+        uint64_t entry  = table[(virt >> (12 + (level - 1) * 9)) & 0x1ff];
+
+        if (!(entry & X86_PAGE_FLAG_PRESENT) || (entry & X86_PAGE_FLAG_HUGE)) {
+            release_spinlock(&map->lock);
+            return -ENOENT;
+        }
+
+        curr_phys = entry & X86_PAGE_ADDRESS_MASK;
+    }
+
+    uint64_t* pde = &((uint64_t*)to_higher_half(curr_phys))[(virt >> 21) & 0x1ff];
+
+    if (!(*pde & X86_PAGE_FLAG_PRESENT)) {
+        release_spinlock(&map->lock);
+        return -ENOENT;
+    }
+    if (*pde & X86_PAGE_FLAG_HUGE) {
+        release_spinlock(&map->lock);
+        return 0;
+    }
+
+    uintptr_t pt_phys = *pde & X86_PAGE_ADDRESS_MASK;
+    uint64_t* pt      = (uint64_t*)to_higher_half(pt_phys);
+
+    if (!(pt[0] & X86_PAGE_FLAG_PRESENT)) {
+        release_spinlock(&map->lock);
+        return -ENOENT;
+    }
+
+    uintptr_t base_phys = pt[0] & X86_PAGE_ADDRESS_MASK;
+    if (!is_aligned(base_phys, PAGE_SIZE_MEDIUM)) {
+        release_spinlock(&map->lock);
+        return -EINVAL;
+    }
+
+    uint64_t expected_entry = pt[0];
+
+    for (int i = 1; i < 512; i++) {
+        expected_entry += PAGE_SIZE_SMALL;
+
+        if (pt[i] != expected_entry) {
+            release_spinlock(&map->lock);
+            return -EINVAL;
+        }
+    }
+
+    size_t new_flags = (pt[0] & ~X86_PAGE_ADDRESS_MASK) | X86_PAGE_FLAG_HUGE;
+    if (new_flags & X86_PAGE_FLAG_PAT) {
+        new_flags = (new_flags & ~X86_PAGE_FLAG_PAT) | X86_PAGE_FLAG_LARGE_PAT;
+    }
+
+    *pde = base_phys | new_flags;
+
+    release_spinlock(&map->lock);
+
+    pmm_free((void*)pt_phys);
+    arch_mmu_flush_tlb(map, virt, PAGE_SIZE_MEDIUM);
+    return 0;
+}
+
+bool arch_mmu_test_and_clear_dirty(arch_pagemap_t* map, uintptr_t virt) {
+    if (!map) {
+        return false;
+    }
+
+    acquire_spinlock(&map->lock);
+    uintptr_t curr_phys = map->phys_root;
+    bool dirty          = false;
+    size_t flush_size   = PAGE_SIZE_SMALL;
+
+    for (int level = paging_max_levels; level >= 1; level--) {
+        uint64_t* pte =
+            &((uint64_t*)to_higher_half(curr_phys))[(virt >> (12 + (level - 1) * 9)) & 0x1ff];
+
+        if (!(*pte & X86_PAGE_FLAG_PRESENT)) {
+            break;
+        }
+
+        if (level == 1 || (*pte & X86_PAGE_FLAG_HUGE)) {
+            if (*pte & X86_PAGE_FLAG_DIRTY) {
+                dirty = true;
+                *pte &= ~X86_PAGE_FLAG_DIRTY;
+                flush_size = (level == 1) ? PAGE_SIZE_SMALL
+                                          : ((level == 2) ? PAGE_SIZE_MEDIUM : PAGE_SIZE_LARGE);
+            }
+
+            break;
+        }
+
+        curr_phys = *pte & X86_PAGE_ADDRESS_MASK;
+    }
+
+    release_spinlock(&map->lock);
+
+    if (dirty) {
+        arch_mmu_flush_tlb(map, virt, flush_size);
+    }
+
+    return dirty;
+}
+
+bool arch_mmu_test_and_clear_accessed(arch_pagemap_t* map, uintptr_t virt) {
+    if (!map) {
+        return false;
+    }
+
+    acquire_spinlock(&map->lock);
+    uintptr_t curr_phys = map->phys_root;
+    bool accessed       = false;
+    size_t flush_size   = PAGE_SIZE_SMALL;
+
+    for (int level = paging_max_levels; level >= 1; level--) {
+        uint64_t* pte =
+            &((uint64_t*)to_higher_half(curr_phys))[(virt >> (12 + (level - 1) * 9)) & 0x1ff];
+
+        if (!(*pte & X86_PAGE_FLAG_PRESENT)) {
+            break;
+        }
+
+        if (level == 1 || (*pte & X86_PAGE_FLAG_HUGE)) {
+            if (*pte & X86_PAGE_FLAG_ACCESSED) {
+                accessed = true;
+                *pte &= ~X86_PAGE_FLAG_ACCESSED;
+                flush_size = (level == 1) ? PAGE_SIZE_SMALL
+                                          : ((level == 2) ? PAGE_SIZE_MEDIUM : PAGE_SIZE_LARGE);
+            }
+
+            break;
+        }
+
+        curr_phys = *pte & X86_PAGE_ADDRESS_MASK;
+    }
+
+    release_spinlock(&map->lock);
+
+    if (accessed) {
+        arch_mmu_flush_tlb(map, virt, flush_size);
+    }
+
+    return accessed;
+}
+
+static int clone_table(uintptr_t dest_phys, uintptr_t src_phys, int level) {
+    uint64_t* dest = (uint64_t*)to_higher_half(dest_phys);
+    uint64_t* src  = (uint64_t*)to_higher_half(src_phys);
+
+    int max_idx = (level == paging_max_levels) ? 256 : 512;
+
+    for (int i = 0; i < max_idx; i++) {
+        uint64_t entry = src[i];
+
+        if (!(entry & (X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND))) {
+            continue;
+        }
+
+        if (level == 1 || (entry & X86_PAGE_FLAG_HUGE)) {
+            if (entry & X86_PAGE_FLAG_WRITE) {
+                entry  = (entry & ~X86_PAGE_FLAG_WRITE) | X86_PAGE_FLAG_DEMAND;
+                src[i] = entry;
+            }
+
+            if (entry & X86_PAGE_FLAG_PRESENT) {
+                pmm_inc_ref((void*)(entry & X86_PAGE_ADDRESS_MASK));
+            }
+
+            dest[i] = entry;
+        } else {
+            void* new_pt = pmm_alloc(1);
+            if (!new_pt) {
+                return -ENOMEM;
+            }
+
+            memset((void*)to_higher_half((uintptr_t)new_pt), 0, PAGE_SIZE_SMALL);
+            dest[i] = (uintptr_t)new_pt | X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_WRITE |
+                      X86_PAGE_FLAG_USER;
+
+            int status = clone_table((uintptr_t)new_pt, entry & X86_PAGE_ADDRESS_MASK, level - 1);
+            if (status != 0) {
+                return status;
+            }
+        }
+    }
+
+    return 0;
+}
+
+int arch_mmu_clone(arch_pagemap_t* dest, arch_pagemap_t* src) {
+    if (!dest || !src) {
+        return -EINVAL;
+    }
+
+    int status = clone_table(dest->phys_root, src->phys_root, paging_max_levels);
+
+    uint64_t cr3 = read_cr3();
+    if ((cr3 & X86_PAGE_ADDRESS_MASK) == (src->phys_root & X86_PAGE_ADDRESS_MASK)) {
+        arch_mmu_load(src);
+    }
+
+    return status;
+}
+
+void arch_mmu_sync_kernel(arch_pagemap_t* target_map) {
+    arch_pagemap_t* kernel_map = (arch_pagemap_t*)vmm_get_kernel_pagemap();
+
+    if (!target_map || !kernel_map || kernel_map == target_map) {
+        return;
+    }
+
+    acquire_spinlock(&target_map->lock);
+
+    memcpy(
+        &((uint64_t*)to_higher_half(target_map->phys_root))[256],
+        &((uint64_t*)to_higher_half(kernel_map->phys_root))[256],
+        256 * sizeof(uint64_t)
+    );
+
+    release_spinlock(&target_map->lock);
+}
