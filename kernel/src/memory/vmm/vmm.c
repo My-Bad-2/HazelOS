@@ -6,6 +6,7 @@
 #include "boot/limine.h"
 #include "libs/log.h"
 #include "libs/math.h"
+#include "memory/arch_mmu.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
@@ -140,7 +141,7 @@ void vmm_init(void) {
         phys_delta
     );
 
-    pagemap_global_init();
+    arch_mmu_init();
     vmm_map_memory(&kernel_pagemap);
     vmm_map_kernel(&kernel_pagemap, kernel_base, phys_delta);
     pagemap_load(&kernel_pagemap);

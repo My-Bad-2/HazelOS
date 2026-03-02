@@ -10,6 +10,7 @@
 // NOLINTNEXTLINE(misc-use-internal-linkage)
 void kmain(void) {
     arch_serial_init();
+    drivers_early_init();
 
     memory_init();
     smp_init();

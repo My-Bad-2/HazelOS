@@ -12,7 +12,17 @@
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 
+#ifndef TERM_USE_SHADOW_BUFFER
+#define TERM_USE_SHADOW_BUFFER 1
+#endif
+
+#if TERM_USE_SHADOW_BUFFER
 static uint8_t* shadow_buffer = nullptr;
+#define DRAW_BUFFER shadow_buffer
+#else
+#define DRAW_BUFFER fb_address
+#endif
+
 static uint8_t* fb_address    = nullptr;
 static term_font_t* curr_font = nullptr;
 
@@ -174,6 +184,7 @@ void term_init(term_font_t* font) {
     style.underline = false;
     style.reverse   = false;
 
+#if TERM_USE_SHADOW_BUFFER
     shadow_buffer = (void*)vmalloc(
         kernel_space,
         nullptr,
@@ -184,6 +195,7 @@ void term_init(term_font_t* font) {
     );
 
     memset(shadow_buffer, 0, fb_size);
+#endif
     memset(fb_address, 0, fb_size);
 
     cursor_x = cursor_y = 0;
@@ -193,6 +205,7 @@ void term_init(term_font_t* font) {
 }
 
 static inline void mark_dirty(size_t y, size_t height) {
+#if TERM_USE_SHADOW_BUFFER
     size_t y_end = y + height;
 
     if (y_end > fb_height) {
@@ -212,9 +225,14 @@ static inline void mark_dirty(size_t y, size_t height) {
             dirty_max_y = y_end;
         }
     }
+#else
+    (void)y;
+    (void)height;
+#endif
 }
 
 void term_refresh(void) {
+#if TERM_USE_SHADOW_BUFFER
     if (!is_dirty) {
         return;
     }
@@ -227,6 +245,7 @@ void term_refresh(void) {
     dirty_min_y = fb_height;
     dirty_max_y = 0;
     is_dirty    = false;
+#endif
 }
 
 static void term_fill_rect(size_t x, size_t y, size_t w, size_t h, uint64_t color) {
@@ -246,13 +265,13 @@ static void term_fill_rect(size_t x, size_t y, size_t w, size_t h, uint64_t colo
             }
 
             if (fb_bpp == 4) {
-                mmio_write32(shadow_buffer + pixel_offset, (uint32_t)color);
+                mmio_write32(DRAW_BUFFER + pixel_offset, (uint32_t)color);
             } else if (fb_bpp == 8) {
-                mmio_write64(shadow_buffer + pixel_offset, color);
+                mmio_write64(DRAW_BUFFER + pixel_offset, color);
             } else if (fb_bpp == 2) {
-                mmio_write16(shadow_buffer + pixel_offset, (uint16_t)color);
+                mmio_write16(DRAW_BUFFER + pixel_offset, (uint16_t)color);
             } else {
-                uint8_t* p = shadow_buffer + pixel_offset;
+                uint8_t* p = DRAW_BUFFER + pixel_offset;
                 p[0]       = color & 0xff;
                 p[1]       = (color >> 8) & 0xff;
                 p[2]       = (color >> 16) & 0xff;
@@ -268,7 +287,7 @@ static void term_scroll(void) {
     size_t screen_bytes = fb_pitch * fb_height;
     size_t move_bytes   = screen_bytes - row_bytes;
 
-    memmove(shadow_buffer, shadow_buffer + row_bytes, move_bytes);
+    memmove(DRAW_BUFFER, DRAW_BUFFER + row_bytes, move_bytes);
 
     term_fill_rect(0, fb_height - font_h, fb_width, font_h, style.default_bg);
     mark_dirty(0, fb_height);
@@ -311,13 +330,13 @@ static void term_draw_char(char ch, size_t cx, size_t cy) {
             uint64_t color = on ? fg : bg;
 
             if (fb_bpp == 4) {
-                mmio_write32(shadow_buffer + offset, (uint32_t)color);
+                mmio_write32(DRAW_BUFFER + offset, (uint32_t)color);
             } else if (fb_bpp == 8) {
-                mmio_write64(shadow_buffer + offset, color);
+                mmio_write64(DRAW_BUFFER + offset, color);
             } else if (fb_bpp == 2) {
-                mmio_write16(shadow_buffer + offset, (uint16_t)color);
+                mmio_write16(DRAW_BUFFER + offset, (uint16_t)color);
             } else {
-                uint8_t* p = shadow_buffer + offset;
+                uint8_t* p = DRAW_BUFFER + offset;
                 p[0]       = color & 0xff;
                 p[1]       = (color >> 8) & 0xff;
                 p[2]       = (color >> 16) & 0xff;
@@ -338,7 +357,7 @@ static void ansi_insert_line(int n) {
     if (move_px >= total_h_px) {
         term_fill_rect(0, start_y_px, fb_width, total_h_px, style.bg);
     } else {
-        uint8_t* src = shadow_buffer + (start_y_px * fb_pitch);
+        uint8_t* src = DRAW_BUFFER + (start_y_px * fb_pitch);
         uint8_t* dst = src + (move_px * fb_pitch);
         size_t size  = (total_h_px - move_px) * fb_pitch;
 
@@ -357,7 +376,7 @@ static void ansi_delete_line(int n) {
     if (move_px >= total_h_px) {
         term_fill_rect(0, start_y_px, fb_width, total_h_px, style.bg);
     } else {
-        uint8_t* dst = shadow_buffer + (start_y_px * fb_pitch);
+        uint8_t* dst = DRAW_BUFFER + (start_y_px * fb_pitch);
         uint8_t* src = dst + (move_px * fb_pitch);
         size_t size  = (total_h_px - move_px) * fb_pitch;
 
@@ -378,7 +397,7 @@ static void ansi_delete_char(int n) {
         term_fill_rect(start_x_px, cursor_y * font_h, total_w_px, font_h, style.bg);
     } else {
         for (size_t y = 0; y < font_h; y++) {
-            uint8_t* line = shadow_buffer + row_off + (y * fb_pitch);
+            uint8_t* line = DRAW_BUFFER + row_off + (y * fb_pitch);
             uint8_t* dst  = line + (start_x_px * fb_bpp);
             uint8_t* src  = dst + (move_px * fb_bpp);
 
@@ -402,7 +421,7 @@ static void ansi_insert_char(int n) {
         term_fill_rect(start_x_px, cursor_y * font_h, total_w_px, font_h, style.bg);
     } else {
         for (size_t y = 0; y < font_h; y++) {
-            uint8_t* line = shadow_buffer + row_off + (y * fb_pitch);
+            uint8_t* line = DRAW_BUFFER + row_off + (y * fb_pitch);
             uint8_t* src  = line + (start_x_px * fb_bpp);
             uint8_t* dst  = src + (move_px * fb_bpp);
 
@@ -676,5 +695,9 @@ void term_write(const char* str) {
 }
 
 bool term_is_initialized(void) {
+#if TERM_USE_SHADOW_BUFFER
     return shadow_buffer != nullptr;
+#else
+    return fb_address != nullptr;
+#endif
 }

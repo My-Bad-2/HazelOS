@@ -7,7 +7,7 @@
 
 void memory_init(void) {
     pmm_init();
-    vmm_init();
     kheap_init();
+    vmm_init();
     vma_cache_init();
 }

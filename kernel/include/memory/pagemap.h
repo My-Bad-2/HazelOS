@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "libs/spinlock.h"
+#include "memory/arch_mmu.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,7 +44,7 @@ typedef enum {
 
 // Per Process
 typedef struct {
-    uintptr_t phys_root;
+    arch_pagemap_t arch;
     interrupt_lock_t lock;
 } pagemap_t;
 
@@ -69,8 +70,13 @@ typedef struct {
 typedef struct {
     void* virt_addr;
     uint32_t flags;
+    size_t length;
     cache_type_t cache;
+    uint8_t pkey;
 } pagemap_protect_args_t;
+
+int pagemap_allocate_pkey(pagemap_t* map);
+void pagemap_free_pkey(pagemap_t* map, uint8_t pkey);
 
 bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args);
 void pagemap_unmap(pagemap_t* map, pagemap_unmap_args_t* args);
@@ -89,8 +95,6 @@ void pagemap_load(pagemap_t* map);
 void pagemap_release(pagemap_t* map);
 void pagemap_sync_kernel(pagemap_t* target_map);
 bool pagemap_clone(pagemap_t* dest, pagemap_t* src);
-
-size_t pagemap_walk(pagemap_t* map, char* buffer, size_t size);
 
 void pagemap_global_init();
 

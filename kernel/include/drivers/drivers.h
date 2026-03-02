@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+void drivers_early_init(void);
 void drivers_init(void);
 
 #ifdef __cplusplus

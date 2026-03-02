@@ -996,7 +996,7 @@ void schedule(void) {
 #endif
 
     if (next_proc && (curr_proc != next_proc)) {
-        write_cr3(next_proc->map.phys_root);
+        write_cr3(next_proc->map.arch.phys_root);
     }
 
     thread_restore_fpu(next);

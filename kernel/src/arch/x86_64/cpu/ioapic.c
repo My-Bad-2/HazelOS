@@ -73,7 +73,7 @@ static void map_ioapic_mmio(ioapic_t* ioapic, size_t index) {
             kernel_space,
             nullptr,
             PAGE_SIZE_SMALL,
-            VMM_FLAG_MMIO,
+            VMM_FLAG_MMIO | VMM_FLAG_DEMAND,
             CACHE_MMIO,
             PAGE_SIZE_SMALL
         );
