@@ -141,7 +141,7 @@ static inline size_t resolve_page_size(size_t req_size, uintptr_t virt, uintptr_
             req_size = PAGE_SIZE_SMALL;
         }
     }
- 
+
     return req_size;
 }
 

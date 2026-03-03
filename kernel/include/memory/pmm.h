@@ -9,12 +9,11 @@
 extern "C" {
 #endif
 
-struct [[gnu::aligned(16)]] page {
-    uintptr_t phys_addr;  // Physical address of the page
-
+struct [[gnu::aligned(8)]] page {
     atomic_uint_fast16_t ref_count;
     uint8_t order;  // Order of the block
     uint8_t flags;  // Zone ID, Used, etc.
+    uint32_t section_idx;
 };
 
 typedef struct pmm_stats {

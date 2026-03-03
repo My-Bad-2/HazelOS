@@ -1,3 +1,5 @@
+#include "memory/pmm.h"
+
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
@@ -11,10 +13,9 @@
 #include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/memory.h"
-#include "memory/pmm.h"
 
 #define PAGE_SIZE     PAGE_SIZE_SMALL
-#define PMM_MAX_ORDER 11  // 2^11 pages = 8MB max contiguous block
+#define PMM_MAX_ORDER 18  // 2^18 pages = 256MB max contiguous block
 #define PAGE_SHIFT    PAGE_SHIFT_SMALL
 
 #define MAX_ZONES 3
@@ -134,12 +135,16 @@ static int zone_to_id(struct zone* zone) {
 }
 
 static inline uintptr_t page_to_phys(struct page* page) {
-    return page->phys_addr;
+    uint32_t sec_idx      = page->section_idx;
+    struct page* map_base = mem_sections[sec_idx].map;
+
+    size_t page_idx = (size_t)(page - map_base);
+    return ((uintptr_t)sec_idx << SECTION_SHIFT) + (page_idx << PAGE_SHIFT);
 }
 
 static inline struct dlist_head* page_to_list_node(struct page* page) {
-    uintptr_t virt = to_higher_half(page->phys_addr);
-    return &((struct free_area*)virt)->list;
+    uintptr_t phys = page_to_phys(page);
+    return &((struct free_area*)to_higher_half(phys))->list;
 }
 
 static inline struct page* list_node_to_page(struct dlist_head* node) {
@@ -188,11 +193,12 @@ static struct page* buddy_alloc_locked(struct zone* zone, int order) {
     struct page* page       = list_node_to_page(node);
 
     buddy_remove(zone, page, curr_order);
+    uintptr_t page_phys = page_to_phys(page);
 
     // Split down
     while (curr_order > order) {
         curr_order--;
-        uintptr_t buddy_phys = page->phys_addr + (1ul << (curr_order + PAGE_SHIFT));
+        uintptr_t buddy_phys = page_phys + (1ul << (curr_order + PAGE_SHIFT));
         struct page* buddy   = phys_to_page(buddy_phys);
 
         prefetch(buddy);
@@ -217,11 +223,12 @@ static void buddy_free_zone(struct zone* zone, struct page* page, int order) {
 
     atomic_fetch_sub_explicit(&stat_used_bytes, (1ul << order) * PAGE_SIZE, memory_order_relaxed);
 
-    int z_idx = get_page_zone_id(page);
+    int z_idx           = get_page_zone_id(page);
+    uintptr_t page_phys = page_to_phys(page);
 
     // Coalesce
     while (order < PMM_MAX_ORDER) {
-        uintptr_t buddy_phys = page->phys_addr ^ (1ul << (order + PAGE_SHIFT));
+        uintptr_t buddy_phys = page_phys ^ (1ul << (order + PAGE_SHIFT));
         struct page* buddy   = phys_to_page(buddy_phys);
 
         if (!buddy || (buddy->flags & PAGE_FLAG_USED) || (buddy->order != order) ||
@@ -231,8 +238,9 @@ static void buddy_free_zone(struct zone* zone, struct page* page, int order) {
 
         buddy_remove(zone, buddy, order);
 
-        if (buddy->phys_addr < page->phys_addr) {
-            page = buddy;
+        if (buddy_phys < page_phys) {
+            page      = buddy;
+            page_phys = buddy_phys;
         }
 
         order++;
@@ -259,10 +267,9 @@ static void* pmm_alloc_slow(size_t count) {
         struct page* page = buddy_alloc_zone(zone, order);
 
         if (likely(page)) {
+            uintptr_t page_phys = page_to_phys(page);
             atomic_store_explicit(&page->ref_count, 1, memory_order_release);
-            // KLOG_DEBUG("PMM: Allocated %lu pages (order %d) at %p\n", count, order,
-            // (void*)page->phys_addr);
-            return (void*)page->phys_addr;
+            return (void*)page_phys;
         }
     }
 
@@ -337,10 +344,9 @@ void* pmm_alloc_aligned(size_t alignment, size_t count) {
         release_spinlock(&zone->lock);
 
         if (likely(page)) {
+            uintptr_t page_phys = page_to_phys(page);
             atomic_store_explicit(&page->ref_count, 1, memory_order_release);
-            // KLOG_DEBUG("PMM: Allocated aligned %lu pages (order %d) at %p\n", count, order,
-            // (void*)page->phys_addr);
-            return (void*)page->phys_addr;
+            return (void*)page_phys;
         }
     }
 
@@ -374,8 +380,9 @@ size_t pmm_alloc_bulk(size_t count, int order, void** pages) {
                 break;
             }
 
+            uintptr_t page_phys = page_to_phys(page);
             atomic_store_explicit(&page->ref_count, 1, memory_order_release);
-            pages[allocated++] = (void*)page->phys_addr;
+            pages[allocated++] = (void*)page_phys;
         }
 
         release_spinlock(&zone->lock);
@@ -596,13 +603,12 @@ void pmm_init(void) {
             mem_sections[idx].map = (void*)to_higher_half(boot_ptr);
             boot_ptr += map_size;
 
-            for (size_t p = 0; p < PAGES_PER_SECTION; ++p) {
-                struct page* page = &mem_sections[idx].map[p];
+            memset(mem_sections[idx].map, 0, map_size);
 
-                page->phys_addr = addr + (p * PAGE_SIZE);
-                page->flags     = PAGE_FLAG_USED;
-                page->order     = 0;
-                atomic_init(&page->ref_count, 0);
+            struct page* map_page = mem_sections[idx].map;
+            for (size_t p = 0; p < PAGES_PER_SECTION; ++p) {
+                map_page[p].section_idx = idx;
+                map_page[p].flags       = PAGE_FLAG_USED;
             }
         }
     }
@@ -624,7 +630,6 @@ void pmm_init(void) {
 
     for (size_t i = 0; i < count; ++i) {
         struct limine_memmap_entry* entry = entries[i];
-
         if (entry->type != LIMINE_MEMMAP_USABLE) {
             continue;
         }
@@ -640,15 +645,24 @@ void pmm_init(void) {
         }
 
         for (uintptr_t p = start; p < end;) {
-            int max_order = 0;
-            while (max_order < PMM_MAX_ORDER) {
-                uintptr_t block_size = 1ul << ((max_order + 1) + PAGE_SHIFT);
+            size_t pages_left = (end - p) >> PAGE_SHIFT;
+            if (pages_left == 0) {
+                break;
+            }
 
-                if ((p & (block_size - 1)) != 0 || (p + block_size > end)) {
-                    break;
+            int max_order = PMM_MAX_ORDER;
+
+            if (p != 0) {
+                int align_order = ctz(p >> PAGE_SHIFT);
+
+                if (align_order < max_order) {
+                    max_order = align_order;
                 }
+            }
 
-                ++max_order;
+            int size_order = 63 - clz(pages_left);
+            if (size_order < max_order) {
+                max_order = size_order;
             }
 
             struct page* page = phys_to_page(p);

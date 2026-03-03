@@ -67,7 +67,7 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args) {
         args->page_size
     );
 
-    if(status != 0) {
+    if (status != 0) {
         KLOG_DEBUG("status = %d\n", status);
     }
 
