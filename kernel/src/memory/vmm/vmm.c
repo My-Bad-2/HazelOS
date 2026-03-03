@@ -87,7 +87,7 @@ static void vmm_map_memory(pagemap_t* map) {
             if (is_aligned(curr, PAGE_SIZE_LARGE) && (remaining >= PAGE_SIZE_LARGE)) {
                 args.page_size = PAGE_SIZE_LARGE;
                 args.length    = PAGE_SIZE_LARGE;
-            } else if (is_aligned(curr, PAGE_SIZE_LARGE) && (remaining >= PAGE_SIZE_MEDIUM)) {
+            } else if (is_aligned(curr, PAGE_SIZE_MEDIUM) && (remaining >= PAGE_SIZE_MEDIUM)) {
                 args.page_size = PAGE_SIZE_MEDIUM;
                 args.length    = PAGE_SIZE_MEDIUM;
             } else {
@@ -101,12 +101,8 @@ static void vmm_map_memory(pagemap_t* map) {
             args.phys_addr = (void*)curr;
             args.virt_addr = (void*)virt;
 
-            if (!is_aligned(phys_end, args.page_size)) {
-                phys_end = align_up(phys_end, args.page_size);
-            }
-
             if (!pagemap_map(map, &args)) {
-                int err = errno ? errno : EIO;
+                int err = errno ? errno : -EIO;
                 errno   = err;
                 KLOG_ERROR(
                     "VMM: mapping failed virt=0x%lx phys=0x%lx size=0x%zx errno=%d\n",

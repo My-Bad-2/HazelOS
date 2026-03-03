@@ -6,6 +6,7 @@
 #include "boot/boot.h"
 #include "cpu/cpu.h"
 #include "cpu/registers.h"
+#include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
@@ -140,6 +141,7 @@ static inline size_t resolve_page_size(size_t req_size, uintptr_t virt, uintptr_
             req_size = PAGE_SIZE_SMALL;
         }
     }
+ 
     return req_size;
 }
 
@@ -161,7 +163,7 @@ static uint64_t* get_pte_cursor(
     }
 
     uintptr_t curr_phys = root_phys;
-    for (int level = paging_max_levels; level > target_level; --level) {
+    for (int level = paging_max_levels; level > target_level; level--) {
         uint64_t* table = (uint64_t*)to_higher_half(curr_phys);
         int idx         = (int)((virt_addr >> (12 + (level - 1) * 9)) & 0x1ff);
         uint64_t entry  = table[idx];

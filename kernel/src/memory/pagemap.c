@@ -2,6 +2,7 @@
 
 #include <errno.h>
 
+#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
 
@@ -65,6 +66,10 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args) {
         args->pkey,
         args->page_size
     );
+
+    if(status != 0) {
+        KLOG_DEBUG("status = %d\n", status);
+    }
 
     return (status == 0);
 }
