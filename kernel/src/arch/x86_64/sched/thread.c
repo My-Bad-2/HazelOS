@@ -35,18 +35,6 @@ struct user_stack_layout {
     uint64_t thread_exit;
 };
 
-// NOLINTNEXTLINE(misc-use-internal-linkage)
-void thread_exit(int exit_code) {
-    arch_disable_interrupts();
-    thread_t* curr = smp_current_core()->curr_thread;
-    scheduler_remove_thread(curr);
-    scheduler_yield();
-
-    curr->exit_code = exit_code;
-
-    PANIC("THREAD: terminated thread called from the afterlife");
-}
-
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     if (!t) {
         errno = EINVAL;
@@ -57,11 +45,10 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     size_t fpu_size = simd_get_save_size();
 
     if (!fpu_cache) {
-        fpu_cache = kmem_cache_create("fpu_cache", fpu_size, 8, SLAB_PANIC, nullptr);
+        fpu_cache = kmem_cache_create("fpu_cache", fpu_size, 64, SLAB_PANIC, nullptr);
     }
 
     process_t* proc = t->owner;
-
     t->kernel_stack = (thread_t*)vmalloc(
         kernel_space,
         nullptr,
@@ -72,8 +59,6 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     );
 
     if (!t->kernel_stack) {
-        errno = ENOMEM;
-        KLOG_WARN("THREAD: kernel stack allocation failed tid=%u\n", t->tid);
         return false;
     }
 
@@ -81,29 +66,19 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
 
     if (!t->fpu_buffer) {
         vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
-        errno = ENOMEM;
-        PANIC("THREAD: fpu buffer allocation failed tid=%u pid=%u\n", t->tid, proc->pid);
         return false;
     }
 
-    void* clean_state = simd_get_clean_state();
-
-    if (!clean_state) {
-        errno = ENODEV;
-        KLOG_ERROR("THREAD: missing SIMD clean state tid=%u pid=%u\n", t->tid, proc->pid);
-        kmem_cache_free(fpu_cache, t->fpu_buffer);
-        vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
-        return false;
-    }
-
-    memcpy(t->fpu_buffer, clean_state, fpu_size);
+    memcpy(t->fpu_buffer, simd_get_clean_state(), fpu_size);
 
     t->kernel_stack_top = (uintptr_t)t->kernel_stack + KSTACK_SIZE;
     uintptr_t sp        = align_down(t->kernel_stack_top, 0x10);
 
     if (proc->is_kernel) {
-        sp -= sizeof(struct kernel_stack_layout);
+        sp -= sizeof(uint64_t);
+        *((uint64_t*)sp) = (uint64_t)thread_exit;
 
+        sp -= sizeof(struct kernel_stack_layout);
         struct kernel_stack_layout* kstack = (struct kernel_stack_layout*)sp;
         memset(kstack, 0, sizeof(struct kernel_stack_layout));
 
@@ -117,34 +92,34 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         struct user_stack_layout* ustack = (struct user_stack_layout*)sp;
         memset(ustack, 0, sizeof(struct user_stack_layout));
 
-        uint32_t flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER | VMM_FLAG_STACK;
-
-        size_t size = USTACK_SIZE;
-        void* ustack_base =
-            (void*)vmalloc(&proc->space, nullptr, size, flags, CACHE_WRITE_BACK, PAGE_SIZE_SMALL);
+        size_t size       = USTACK_SIZE;
+        void* ustack_base = (void*)vmalloc(
+            &proc->space,
+            nullptr,
+            size,
+            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER | VMM_FLAG_STACK,
+            CACHE_WRITE_BACK,
+            PAGE_SIZE_SMALL
+        );
 
         if (!ustack_base) {
+            kmem_cache_free(fpu_cache, t->fpu_buffer);
             vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
-            errno = ENOMEM;
-            KLOG_WARN("THREAD: user stack allocation failed tid=%u pid=%u\n", t->tid, proc->pid);
             return false;
         }
 
         t->user_stack = ustack_base;
-        uint64_t rsp  = (uintptr_t)ustack_base + USTACK_SIZE;
-        rsp           = align_down(rsp, 0x10);
+        uint64_t rsp  = align_down((uintptr_t)ustack_base + USTACK_SIZE, 0x10);
 
-        ustack->tf.rip = (uint64_t)entry;
-        ustack->tf.rdi = (uint64_t)arg;
-
-        ustack->tf.cs = USER_CODE | 3;
-        ustack->tf.ss = USER_DATA | 3;
-
+        ustack->tf.rip    = (uint64_t)entry;
+        ustack->tf.rdi    = (uint64_t)arg;
+        ustack->tf.cs     = USER_CODE | 3;
+        ustack->tf.ss     = USER_DATA | 3;
         ustack->tf.rflags = X86_FLAGS_IF | X86_FLAGS_RESERVED_ONES;
         ustack->tf.rsp    = rsp;
+        ustack->ctx.rip   = (uint64_t)isr_restore_path;
 
-        ustack->ctx.rip = (uint64_t)isr_restore_path;
-        t->context_rsp  = (uint64_t)&ustack->ctx;
+        t->context_rsp = (uint64_t)&ustack->ctx;
     }
 
     return true;
@@ -156,7 +131,6 @@ void arch_thread_destroy(thread_t* t) {
     }
 
     process_t* proc = t->owner;
-
     if (t->kernel_stack) {
         vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
     }
@@ -165,7 +139,7 @@ void arch_thread_destroy(thread_t* t) {
         kmem_cache_free(fpu_cache, t->fpu_buffer);
     }
 
-    if (!t->owner->is_kernel && t->context_rsp != 0) {
+    if (!t->owner->is_kernel && t->context_rsp != 0 && t->user_stack) {
         vmfree(&proc->space, t->user_stack, USTACK_SIZE);
     }
 }
@@ -181,24 +155,21 @@ void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf) {
     child->fpu_buffer = kmem_cache_alloc(fpu_cache);
 
     if (!child->fpu_buffer) {
-        vmfree(kernel_space, child->kernel_stack, KSTACK_SIZE);
-        errno = ENOMEM;
         PANIC(
             "THREAD: fpu buffer allocation failed tid=%u pid=%u\n",
             child->tid,
             child->owner->pid
         );
-        return;
     }
 
-    void* clean_state = simd_get_clean_state();
-    memcpy(child->fpu_buffer, clean_state, fpu_size);
+    thread_t* parent = smp_current_core()->curr_thread;
+    thread_save_fpu(parent);
+    memcpy(child->fpu_buffer, parent->fpu_buffer, fpu_size);
 
     uintptr_t sp = align_down(child->kernel_stack_top, 0x10);
-
     sp -= sizeof(struct user_stack_layout);
-    struct user_stack_layout* layout = (struct user_stack_layout*)sp;
 
+    struct user_stack_layout* layout = (struct user_stack_layout*)sp;
     memset(layout, 0, sizeof(struct user_stack_layout));
 
     layout->tf     = *tf;

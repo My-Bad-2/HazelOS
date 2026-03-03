@@ -2,10 +2,12 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "drivers/timer.h"
+#include "cpu/exception.h"
+#include "libs/dlist.h"
 #include "libs/handles.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
+#include "memory/memory.h"
 #include "sched/process.h"
 #include "sched/sched_class.h"
 
@@ -96,9 +98,64 @@ thread_t* thread_create(
     va_list list;
     va_start(list, args);
     thread_t* t = thread_create_internal(name, proc, policy, entry, args, list);
-    va_end(args);
+    va_end(list);
 
     return t;
+}
+
+thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf) {
+    if (!target_proc || !parent || !tf) {
+        return nullptr;
+    }
+
+    thread_t* child = kmem_cache_alloc(thread_cache);
+    if (!child) {
+        return nullptr;
+    }
+
+    memset(child, 0, sizeof(thread_t));
+    child->tid = handle_alloc(&tid_handle_tbl, child, 0);
+    if (child->tid == 0) {
+        kmem_cache_free(thread_cache, child);
+        return nullptr;
+    }
+
+    child->owner        = target_proc;
+    child->assigned_cpu = UINT32_MAX;
+    child->state        = THREAD_READY;
+    child->policy       = parent->policy;
+    child->sched_class  = parent->sched_class;
+
+    dlist_init(&child->wait_node);
+    dlist_init(&child->join_queue);
+
+    memcpy(&child->sched, &parent->sched, sizeof(sched_entity_t));
+
+    child->kernel_stack = (thread_t*)vmalloc(
+        kernel_space,
+        nullptr,
+        KSTACK_SIZE,
+        VMM_FLAG_STACK | VMM_FLAG_WRITE | VMM_FLAG_READ,
+        CACHE_WRITE_BACK,
+        PAGE_SIZE_SMALL
+    );
+
+    if (!child->kernel_stack) {
+        handle_free(&tid_handle_tbl, child->tid);
+        kmem_cache_free(thread_cache, child);
+        return nullptr;
+    }
+
+    child->kernel_stack_top = (uintptr_t)child->kernel_stack + KSTACK_SIZE;
+
+    arch_thread_clone(child, tf);
+
+    acquire_spinlock(&target_proc->lock);
+    process_insert_thread(target_proc, child);
+    target_proc->thread_count++;
+    release_spinlock(&target_proc->lock);
+
+    return child;
 }
 
 void thread_destroy(thread_t* t) {}

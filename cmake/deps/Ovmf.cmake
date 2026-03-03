@@ -2,7 +2,7 @@
 set(OVMF_INSTALL_DIR "${CMAKE_SOURCE_DIR}/cache/ovmf" CACHE PATH "Directory to store OVMF binaries")
 
 # Map Architecture to filename
-set(EDK2_NIGHTLY_URL "https://raw.githubusercontent.com/retrage/edk2-nightly/91b4b9e2a105be67069abdaea068c7b2cde71a0f/bin/")
+set(EDK2_NIGHTLY_URL "https://raw.githubusercontent.com/retrage/edk2-nightly/3da071e097bb52794c3e1c495a1f8fdfe19ee43a/bin/")
 
 # Select filename based on the repository's naming convention
 if(${${PROJECT_NAME}_ARCHITECTURE} STREQUAL "x86_64")

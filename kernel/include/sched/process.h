@@ -167,6 +167,7 @@ void thread_destroy(thread_t* t);
 thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf);
 
 [[noreturn, gnu::used]] void thread_exit(int exit_code);
+void thread_join(thread_t* t, int* exit_code);
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
 void arch_thread_destroy(thread_t* t);
