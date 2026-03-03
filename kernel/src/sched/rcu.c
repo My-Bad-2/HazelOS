@@ -14,6 +14,7 @@
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
+#include "sched/process.h"
 #include "sched/scheduler.h"
 
 #define RCU_FANOUT 64
@@ -143,17 +144,11 @@ void rcu_init(void) {
     init_ring_buffers(&srcu_batches, cpus);
     init_ring_buffers(&qsbr_batches, cpus);
 
-    thread_create_args_t args = {
-        .proc   = get_kernel_process(),
-        .entry  = rcu_gp_thread,
-        .arg    = nullptr,
-        .policy = SCHED_RR,
-        .rt     = {.priority = 99}
-    };
+    process_t* kernel_proc = get_kernel_process();
+    thread_t* gp_thread =
+        thread_create("rcu_gp_thread", kernel_proc, SCHED_RR, rcu_gp_thread, nullptr, 99);
 
-    thread_t* gp_thread = thread_create(&args);
     rcu_state.gp_thread = gp_thread;
-
     scheduler_add_thread(gp_thread);
 
     KLOG_INFO("RCU: Subsystem initialized (Classic + SRCU + QSBR) for %u CPUs\n", cpus);

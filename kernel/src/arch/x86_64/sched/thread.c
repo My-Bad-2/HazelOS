@@ -36,11 +36,13 @@ struct user_stack_layout {
 };
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
-[[noreturn, gnu::used]] void thread_exit(void) {
+void thread_exit(int exit_code) {
     arch_disable_interrupts();
     thread_t* curr = smp_current_core()->curr_thread;
     scheduler_remove_thread(curr);
     scheduler_yield();
+
+    curr->exit_code = exit_code;
 
     PANIC("THREAD: terminated thread called from the afterlife");
 }

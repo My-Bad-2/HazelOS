@@ -1,4 +1,3 @@
-#include "libs/handles.h"
 #ifndef KERNEL_SCHED_PROCESS_H
 #define KERNEL_SCHED_PROCESS_H 1
 
@@ -8,6 +7,7 @@
 #include "cpu/exception.h"
 #include "drivers/timer.h"
 #include "libs/dlist.h"
+#include "libs/handles.h"
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 #include "memory/pagemap.h"
@@ -22,6 +22,12 @@ typedef enum {
 } thread_state_t;
 
 typedef enum {
+    PROCESS_ALIVE = 0,
+    PROCESS_ZOMBIE,
+    PROCESS_DEAD,
+} process_state_t;
+
+typedef enum {
     SCHED_NORMAL,
     SCHED_FIFO,
     SCHED_RR,
@@ -30,7 +36,13 @@ typedef enum {
 } sched_policy_t;
 
 typedef struct process {
-    uint32_t pid;
+    char name[32];
+
+    uint16_t state;
+    bool is_kernel;
+    int exit_code;
+
+    int pid;
     uint32_t thread_count;
 
     vm_space_t space;
@@ -38,16 +50,13 @@ typedef struct process {
 
     spinlock_t lock;
     struct rb_root thread_tree;
-
     handle_table_t handle_table;
 
-    bool is_kernel;
+    struct process* parent;
+    struct dlist_head children_list;
+    struct dlist_head sibling_node;
+    struct dlist_head wait_queue;
 } process_t;
-
-process_t* process_create(bool is_kernel);
-void process_destroy(process_t* proc);
-
-process_t* get_kernel_process(void);
 
 union sched_entity {
     struct {
@@ -71,7 +80,14 @@ union sched_entity {
     } dl;
 };
 
+#define SCHED_DATA_PAYLOAD_SIZE 32
+typedef struct {
+    uint8_t payload[SCHED_DATA_PAYLOAD_SIZE];
+    void* private_data;
+} sched_entity_t;
+
 typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
+    char name[32];
     process_t* owner;
 
     uint32_t tid;
@@ -81,9 +97,10 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     uint8_t policy;
     uint8_t on_rq;
 
+    int exit_code;
     uint32_t affinity_mask;
 
-    union sched_entity sched;
+    sched_entity_t sched;
     struct sched_class* sched_class;
 
     size_t avg_load;
@@ -91,12 +108,13 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
 
     uintptr_t context_rsp;
     uintptr_t kernel_stack_top;
-
     size_t last_start_time;
 
     struct rb_node rb_node;
     struct rb_node process_node;
-    struct dlist_head wait_node;
+
+    struct dlist_head wait_node;   // When this thread is blocked on a queue
+    struct dlist_head join_queue;  // Threads waiting for this thread to exit
 
     void* kernel_stack;
     void* user_stack;
@@ -105,25 +123,10 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     void* fpu_buffer;
 } thread_t;
 
-#define CFS_VRUNTIME(t)      ((t)->sched.cfs.vruntime)
-#define CFS_TOTAL_RUNTIME(t) ((t)->sched.cfs.total_runtime)
-#define CFS_NICE(t)          ((t)->sched.cfs.nice)
-#define CFS_NICE_IDX(t)      ((t)->sched.cfs.nice_idx)
-
-#define RT_ARRIVAL(t)  ((t)->sched.rt.arrival_time)
-#define RT_SLICE(t)    ((t)->sched.rt.time_slice)
-#define RT_PRIORITY(t) ((t)->sched.rt.priority)
-
-#define DL_DEADLINE(t)  ((t)->sched.dl.deadline)
-#define DL_PERIOD(t)    ((t)->sched.dl.period)
-#define DL_RUNTIME(t)   ((t)->sched.dl.runtime)
-#define DL_REMAINING(t) ((t)->sched.dl.remaining)
-
 typedef struct {
     process_t* proc;
     void (*entry)(void*);
     void* arg;
-
     uint8_t policy;
 
     union {
@@ -142,17 +145,37 @@ typedef struct {
     };
 } thread_create_args_t;
 
-thread_t* thread_create(thread_create_args_t* args);
+process_t* process_create(const char* name, process_t* parent, bool is_kernel);
+void process_destroy(process_t* proc);
+process_t* get_kernel_process(void);
 
+[[noreturn]] void process_exit(int exit_code);
+int process_wait(process_t* proc, int* exit_code);
+
+// cfs: ... = nice
+// dl: runtime, period
+// rt: priority
+thread_t* thread_create(
+    const char* name,
+    process_t* proc,
+    uint8_t policy,
+    void (*entry)(void*),
+    void* args,
+    ...
+);
 void thread_destroy(thread_t* t);
+thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf);
+
+[[noreturn, gnu::used]] void thread_exit(int exit_code);
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
 void arch_thread_destroy(thread_t* t);
 void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf);
 
-thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf);
-
 void thread_save_fpu(thread_t* t);
 void thread_restore_fpu(thread_t* t);
+
+extern handle_table_t pid_handle_tbl;
+extern handle_table_t tid_handle_tbl;
 
 #endif

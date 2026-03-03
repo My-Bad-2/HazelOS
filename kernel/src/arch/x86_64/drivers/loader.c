@@ -114,7 +114,7 @@ thread_t* load_elf(void* address) {
         return nullptr;
     }
 
-    process_t* proc = process_create(false);
+    process_t* proc = process_create("user_init", nullptr, false);
 
     if (!proc) {
         KLOG_ERROR("Loader: Failed to create process\n");
@@ -131,14 +131,7 @@ thread_t* load_elf(void* address) {
         }
     }
 
-    thread_create_args_t args = {
-        .proc   = proc,
-        .entry  = (void*)ehdr->e_entry,
-        .arg    = nullptr,
-        .policy = SCHED_NORMAL,
-    };
-
-    thread_t* t = thread_create(&args);
+    thread_t* t = thread_create("user_init", proc, SCHED_NORMAL, (void*)ehdr->e_entry, nullptr, 0);
 
     return t;
 }

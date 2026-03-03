@@ -1,6 +1,8 @@
 #ifndef KERNEL_SCHED_CLASS_H
 #define KERNEL_SCHED_CLASS_H 1
 
+#include <stdarg.h>
+
 #include "cpu/smp.h"
 #include "sched/process.h"
 
@@ -11,7 +13,7 @@ struct sched_class {
 
     struct sched_class* next;
 
-    void (*init_task)(per_cpu_data_t* rq, thread_t* t, size_t now);
+    void (*init_task)(thread_t* t, va_list args);
     void (*renice_task)(per_cpu_data_t* rq, thread_t* t, int nice);
 
     void (*enqueue_task)(per_cpu_data_t* rq, thread_t* t);

@@ -1,12 +1,41 @@
 #include <stdatomic.h>
 
+#include "drivers/timer.h"
 #include "libs/rb_tree.h"
 #include "sched/sched_class.h"
 
 #define RR_QUANTUM_NS 10000000ul
 
-static void rt_init_task(per_cpu_data_t*, thread_t* t, size_t now) {
-    RT_ARRIVAL(t) = now;
+struct rt_config {
+    size_t arrival_time;
+    size_t time_slice;
+    int priority;
+};
+
+#define RT_DATA(t)     ((struct rt_config*)(t)->sched.payload)
+#define RT_ARRIVAL(t)  (RT_DATA(t)->arrival_time)
+#define RT_SLICE(t)    (RT_DATA(t)->time_slice)
+#define RT_PRIORITY(t) (RT_DATA(t)->priority)
+
+static void rt_init_task(thread_t* t, va_list args) {
+    RT_SLICE(t) = 0;
+
+    if (t->policy != SCHED_RR) {
+        return;
+    }
+
+    size_t now   = timer_get_time();
+    int priority = va_arg(args, int);
+    if (priority < 0) {
+        priority = 0;
+    }
+
+    if (priority > 99) {
+        priority = 99;
+    }
+
+    RT_PRIORITY(t) = priority;
+    RT_ARRIVAL(t)  = now;
 
     if (t->policy == SCHED_RR && RT_SLICE(t) == 0) {
         RT_SLICE(t) = RR_QUANTUM_NS;

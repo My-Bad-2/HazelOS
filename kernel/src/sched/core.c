@@ -350,7 +350,7 @@ void scheduler_init(void) {
     sched_class_register(&cfs_sched_class);
     sched_class_register(&idle_sched_class);
 
-    kernel_proc = process_create(true);
+    kernel_proc = process_create("kernel_proc", nullptr, true);
 
     if (!kernel_proc) {
         PANIC("SCHED: failed to create kernel process\n");
@@ -375,7 +375,8 @@ void scheduler_init(void) {
         cpu->reschedule_needed = false;
         atomic_store_explicit(&cpu->cpu_load, 0, memory_order_relaxed);
 
-        thread_t* idle = thread_create(&idle_args);
+        thread_t* idle =
+            thread_create("idle_thread", kernel_proc, SCHED_IDLE, idle_task_entry, nullptr);
         if (!idle) {
             PANIC("SCHED: failed to create idle thread for cpu=%u\n", i);
         }
@@ -419,10 +420,6 @@ void scheduler_add_thread(thread_t* t) {
     acquire_interrupt_lock(&cpu->lock);
 
     size_t now = get_time_now();
-
-    if (t->sched_class->init_task) {
-        t->sched_class->init_task(cpu, t, now);
-    }
 
     t->state = THREAD_READY;
     t->sched_class->enqueue_task(cpu, t);

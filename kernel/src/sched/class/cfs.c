@@ -1,7 +1,10 @@
 #include <stdatomic.h>
+#include <string.h>
 
 #include "compiler.h"
+#include "libs/log.h"
 #include "libs/rb_tree.h"
+#include "sched/process.h"
 #include "sched/sched_class.h"
 
 #define MIN_GRANULARITY_NS 2500000ul  // 2.5ms
@@ -32,6 +35,19 @@ static const uint32_t prio_to_wmult[40] = {
     /*  18 */ 0x0DE0B6B3, /*  19 */ 0x1158E460,
 };
 
+struct cfs_config {
+    size_t vruntime;
+    size_t total_runtime;
+    int nice;
+    int nice_idx;
+};
+
+#define CFS_DATA(t)          ((struct cfs_config*)(t)->sched.payload)
+#define CFS_VRUNTIME(t)      (CFS_DATA(t)->vruntime)
+#define CFS_TOTAL_RUNTIME(t) (CFS_DATA(t)->total_runtime)
+#define CFS_NICE(t)          (CFS_DATA(t)->nice)
+#define CFS_NICE_IDX(t)      (CFS_DATA(t)->nice_idx)
+
 static inline size_t calculate_weighted_delta(size_t delta, int nice_idx) {
     if (nice_idx < 0) {
         nice_idx = 0;
@@ -47,19 +63,24 @@ static inline size_t calculate_weighted_delta(size_t delta, int nice_idx) {
     return (size_t)(v >> 32);
 }
 
-static void cfs_init_task(per_cpu_data_t* rq, thread_t* t, size_t now) {
-    (void)now;
+static void cfs_init_task(thread_t* t, va_list args) {
+    memset(t->sched.payload, 0, SCHED_DATA_PAYLOAD_SIZE);
+    t->sched.private_data = nullptr;
 
-    if (CFS_NICE(t) < -20) {
-        CFS_NICE(t) = -20;
+    int nice = va_arg(args, int);
+    if (nice < -20) {
+        nice = -20;
     }
 
-    if (CFS_NICE(t) > 19) {
-        CFS_NICE(t) = 19;
+    if (nice > 19) {
+        nice = 19;
     }
 
+    CFS_NICE(t)     = nice;
     CFS_NICE_IDX(t) = CFS_NICE(t) + 20;
-    CFS_VRUNTIME(t) = rq->min_vruntime + INIT_VRUNTIME_NS;
+
+    per_cpu_data_t* target = smp_get_core((t->assigned_cpu == UINT32_MAX) ? 0 : t->assigned_cpu);
+    CFS_VRUNTIME(t)        = target->min_vruntime + INIT_VRUNTIME_NS;
 }
 
 static void cfs_renice_task(per_cpu_data_t* rq, thread_t* t, int nice) {

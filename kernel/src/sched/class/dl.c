@@ -1,10 +1,28 @@
 #include <stdatomic.h>
 
+#include "drivers/timer.h"
 #include "libs/log.h"
 #include "libs/rb_tree.h"
 #include "sched/sched_class.h"
 
-static void dl_init_task(per_cpu_data_t*, thread_t* t, size_t now) {
+struct dl_config {
+    size_t deadline;
+    size_t period;
+    size_t runtime;
+    size_t remaining;
+};
+
+#define DL_DATA(t)      ((struct dl_config*)(t)->sched.payload)
+#define DL_DEADLINE(t)  (DL_DATA(t)->deadline)
+#define DL_PERIOD(t)    (DL_DATA(t)->period)
+#define DL_RUNTIME(t)   (DL_DATA(t)->runtime)
+#define DL_REMAINING(t) (DL_DATA(t)->remaining)
+
+static void dl_init_task(thread_t* t, va_list args) {
+    size_t now = timer_get_time();
+
+    DL_RUNTIME(t)   = va_arg(args, size_t);
+    DL_PERIOD(t)    = va_arg(args, size_t);
     DL_DEADLINE(t)  = now + DL_PERIOD(t);
     DL_REMAINING(t) = DL_RUNTIME(t);
 }
