@@ -1,5 +1,3 @@
-#include "memory/pmm.h"
-
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
@@ -13,6 +11,7 @@
 #include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/memory.h"
+#include "memory/pmm.h"
 
 #define PAGE_SIZE     PAGE_SIZE_SMALL
 #define PMM_MAX_ORDER 11  // 2^11 pages = 8MB max contiguous block
@@ -123,11 +122,7 @@ static inline void mask_clear_if_empty(struct zone* zone, int order) {
 static inline struct page* phys_to_page(uintptr_t phys) {
     size_t sec_idx = phys >> SECTION_SHIFT;
 
-    if (unlikely(sec_idx >= section_count)) {
-        return nullptr;
-    }
-
-    if (unlikely(!mem_sections[sec_idx].map)) {
+    if (unlikely(sec_idx >= section_count || !mem_sections[sec_idx].map)) {
         return nullptr;
     }
 
@@ -197,12 +192,10 @@ static struct page* buddy_alloc_locked(struct zone* zone, int order) {
     // Split down
     while (curr_order > order) {
         curr_order--;
-
         uintptr_t buddy_phys = page->phys_addr + (1ul << (curr_order + PAGE_SHIFT));
         struct page* buddy   = phys_to_page(buddy_phys);
 
         prefetch(buddy);
-
         buddy_insert(zone, buddy, curr_order);
     }
 
@@ -259,7 +252,7 @@ static void* pmm_alloc_slow(size_t count) {
     for (int i = active_zone_count - 1; i >= 0; i--) {
         struct zone* zone = &zones[i];
 
-        if ((zone->free_mask & ~((1 << order) - 1)) == 0) {
+        if (is_aligned(zone->free_mask, 1 << order)) {
             continue;
         }
 
@@ -278,16 +271,14 @@ static void* pmm_alloc_slow(size_t count) {
 }
 
 static void pcp_refill(struct pcp_cache* cache) {
-    void** dest = &cache->pages[cache->count];
-
+    void** dest      = &cache->pages[cache->count];
     size_t allocated = pmm_alloc_bulk((size_t)(PCP_BATCH_SIZE - cache->count), 0, dest);
     cache->count += (int)allocated;
 }
 
 static void pcp_drain(struct pcp_cache* cache) {
     while (cache->count > 0) {
-        void* page = cache->pages[--cache->count];
-        pmm_free(page);
+        pmm_free(cache->pages[--cache->count]);
     }
 }
 
@@ -627,7 +618,7 @@ void pmm_init(void) {
 
         for (int order = 0; order <= PMM_MAX_ORDER; ++order) {
             dlist_init(&zones->free_areas[order]);
-            dlist_init(&zones->free_areas[order]);
+            atomic_init(&zones->free_count[order], 0);
         }
     }
 
@@ -638,35 +629,46 @@ void pmm_init(void) {
             continue;
         }
 
-        uintptr_t start = entry->base;
-        uintptr_t end   = entry->base + entry->length;
-
-        // If this entry if the one we used for bootstrapping, we must skip the memory we used for
-        // the metadata.
-        if (entry == largest_region) {
-            start = boot_ptr;
-        }
-
+        uintptr_t start = (entry == largest_region) ? boot_ptr : entry->base;
         if (start == 0) {
-            start += PAGE_SIZE;
+            start += PAGE_SIZE;  // Protect physical 0x0
         }
 
+        uintptr_t end = entry->base + entry->length;
         if (start >= end) {
             continue;
         }
 
-        for (uintptr_t p = start; p < end; p += PAGE_SIZE) {
-            struct page* page = phys_to_page(p);
+        for (uintptr_t p = start; p < end;) {
+            int max_order = 0;
+            while (max_order < PMM_MAX_ORDER) {
+                uintptr_t block_size = 1ul << ((max_order + 1) + PAGE_SHIFT);
 
+                if ((p & (block_size - 1)) != 0 || (p + block_size > end)) {
+                    break;
+                }
+
+                ++max_order;
+            }
+
+            struct page* page = phys_to_page(p);
             if (unlikely(!page)) {
+                p += PAGE_SIZE;
                 continue;
             }
 
             int z_idx         = get_page_zone_id(page);
             struct zone* zone = &zones[z_idx];
-
             set_page_zone(page, z_idx);
-            buddy_free_zone(zone, page, 0);
+
+            buddy_insert(zone, page, max_order);
+            atomic_fetch_sub_explicit(
+                &stat_used_bytes,
+                (1ul << max_order) * PAGE_SIZE,
+                memory_order_relaxed
+            );
+
+            p += (1ul << (max_order + PAGE_SHIFT));
         }
     }
 
