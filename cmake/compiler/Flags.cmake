@@ -175,7 +175,7 @@ set(QEMU_LOGFILE "${CMAKE_BINARY_DIR}/qemu-logs.txt")
 
 set(
 	QEMU_COMMON_FLAGS
-	-m 12G
+	-m 512M
 	-no-reboot
 	-no-shutdown
 	-serial stdio

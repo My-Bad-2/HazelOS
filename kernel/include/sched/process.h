@@ -26,6 +26,7 @@ typedef enum {
     SCHED_FIFO,
     SCHED_RR,
     SCHED_DEADLINE,
+    SCHED_IDLE,
 } sched_policy_t;
 
 typedef struct process {
@@ -83,6 +84,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     uint32_t affinity_mask;
 
     union sched_entity sched;
+    struct sched_class* sched_class;
 
     size_t avg_load;
     size_t last_load_update;

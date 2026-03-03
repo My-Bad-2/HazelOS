@@ -8,6 +8,9 @@
 extern "C" {
 #endif
 
+#define COST_SMT_THREAD   500
+#define MIGRATION_COST_NS 50000
+
 void scheduler_init(void);
 bool scheduler_is_initialized(void);
 
