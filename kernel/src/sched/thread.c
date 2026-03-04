@@ -2,16 +2,40 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "arch.h"
 #include "cpu/exception.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
+#include "libs/log.h"
+#include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
 #include "sched/process.h"
 #include "sched/sched_class.h"
+#include "sched/scheduler.h"
 
-static kmem_cache_t* thread_cache = nullptr;
+static kmem_cache_t* thread_cache         = nullptr;
+static struct dlist_head dead_thread_list = DLIST_INIT(dead_thread_list);
+static spinlock_t dead_thread_lock;
+
+static struct dlist_head reaper_wait_queue = DLIST_INIT(reaper_wait_queue);
+
+static void wake_up_all(struct dlist_head* queue) {
+    struct thread* curr = nullptr;
+
+    dlist_for_each_entry(curr, queue, wait_node) {
+        dlist_del(&curr->wait_node);
+
+        scheduler_unblock(curr);
+    }
+}
+
+static void sleep_on_queue(struct dlist_head* queue) {
+    thread_t* curr = smp_current_core()->curr_thread;
+    dlist_add_tail(&curr->wait_node, queue);
+    scheduler_block();
+}
 
 static void process_insert_thread(process_t* p, thread_t* t) {
     struct rb_node** link  = &p->thread_tree.rb_node;
@@ -158,4 +182,119 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
     return child;
 }
 
-void thread_destroy(thread_t* t) {}
+static void reaper_enqueue_dead_thread(thread_t* t) {
+    if (!t) {
+        return;
+    }
+
+    acquire_spinlock(&dead_thread_lock);
+
+    dlist_add_tail(&t->wait_node, &dead_thread_list);
+    wake_up_all(&reaper_wait_queue);
+
+    release_spinlock(&dead_thread_lock);
+}
+
+void thread_destroy(thread_t* t) {
+    if (!t) {
+        return;
+    }
+
+    scheduler_remove_thread(t);
+
+    wake_up_all(&t->join_queue);
+
+    if (t->owner) {
+        acquire_spinlock(&t->owner->lock);
+
+        if (!RB_EMPTY_NODE(&t->process_node)) {
+            rb_erase(&t->process_node, &t->owner->thread_tree);
+            RB_CLEAR_NODE(&t->process_node);
+            t->owner->thread_count--;
+        }
+
+        release_spinlock(&t->owner->lock);
+    }
+
+    if (t == smp_current_core()->curr_thread) {
+        t->state = THREAD_TERMINATED;
+        reaper_enqueue_dead_thread(t);
+        scheduler_yield();
+        PANIC("THREAD: execution continue after self-destruction");
+    }
+
+    arch_thread_destroy(t);
+    handle_free(&tid_handle_tbl, t->tid);
+    kmem_cache_free(thread_cache, t);
+}
+
+void thread_exit(int exit_code) {
+    arch_disable_interrupts();
+    per_cpu_data_t* cpu = smp_current_core();
+    thread_t* curr      = cpu->curr_thread;
+
+    curr->exit_code = exit_code;
+    wake_up_all(&curr->join_queue);
+
+    bool is_last_thread = false;
+    if (curr->owner) {
+        acquire_spinlock(&curr->owner->lock);
+
+        if (curr->owner->thread_count <= 1) {
+            is_last_thread = true;
+        }
+
+        release_spinlock(&curr->owner->lock);
+    }
+
+    if (is_last_thread && curr->owner->state == PROCESS_ALIVE) {
+        process_exit(exit_code);
+    }
+
+    curr->state = THREAD_TERMINATED;
+    scheduler_remove_thread(curr);
+    reaper_enqueue_dead_thread(curr);
+    scheduler_yield();
+
+    PANIC("THREAD: Escaped the afterlife");
+}
+
+void thread_join(thread_t* t, int* exit_code) {
+    if (!t) {
+        return;
+    }
+
+    while (t->state != THREAD_TERMINATED) {
+        sleep_on_queue(&t->join_queue);
+    }
+
+    if (exit_code) {
+        *exit_code = t->exit_code;
+    }
+}
+
+void reaper_task_entry(void*) {
+    KLOG_INFO("REAPER: background cleanup thread started\n");
+
+    while (true) {
+        acquire_spinlock(&dead_thread_lock);
+
+        if (dlist_empty(&dead_thread_list)) {
+            release_spinlock(&dead_thread_lock);
+            sleep_on_queue(&reaper_wait_queue);
+            continue;
+        }
+
+        struct dlist_head* node = dead_thread_list.next;
+        dlist_del(node);
+
+        release_spinlock(&dead_thread_lock);
+
+        thread_t* dead_thread = dlist_entry(node, thread_t, wait_node);
+        KLOG_DEBUG("REAPER: cleaning up dead thread tid=%u\n", dead_thread->tid);
+
+        arch_thread_destroy(dead_thread);
+        handle_free(&tid_handle_tbl, dead_thread->tid);
+        kmem_cache_free(thread_cache, dead_thread);
+    }
+}

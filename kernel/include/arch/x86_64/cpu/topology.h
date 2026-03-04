@@ -1,6 +1,7 @@
 #ifndef KERNEL_CPU_TOPOLOGY_H
 #define KERNEL_CPU_TOPOLOGY_H 1
 
+#include "cpu/gdt.h"
 #include "cpu/mask.h"
 
 struct cpu_topology {
@@ -14,6 +15,12 @@ struct cpu_topology {
     uint32_t tile_id;    // Physical Tile
     uint32_t socket_id;  // Physical Socket ID
     uint32_t l3_id;      // Last level cache id
+};
+
+struct arch_cpu_data {
+    gdt_table_t gdt;
+    tss_t tss;
+    struct cpu_topology topology;
 };
 
 #endif

@@ -57,12 +57,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     uint32_t balance_counter;
     atomic_int is_online;
 
-#ifdef __x86_64__
-    gdt_table_t gdt;
-    tss_t tss;
-
-    struct cpu_topology topology;
-#endif
+    struct arch_cpu_data arch;
 } per_cpu_data_t;
 
 void smp_init(void);

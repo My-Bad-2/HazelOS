@@ -4,10 +4,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "arch.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
-#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/vmm.h"
@@ -131,18 +129,11 @@ void process_destroy(process_t* proc) {
     }
 
     acquire_spinlock(&proc->lock);
+    proc->state = PROCESS_DEAD;
 
     while (proc->thread_tree.rb_node) {
         struct rb_node* node = rb_first(&proc->thread_tree);
-
-        thread_t* t = rb_entry(node, thread_t, process_node);
-
-        if (t == smp_current_core()->curr_thread) {
-            rb_erase(&t->process_node, &proc->thread_tree);
-            RB_CLEAR_NODE(&t->process_node);
-            proc->thread_count--;
-            continue;
-        }
+        thread_t* t          = rb_entry(node, thread_t, process_node);
 
         rb_erase(&t->process_node, &proc->thread_tree);
         RB_CLEAR_NODE(&t->process_node);
@@ -159,57 +150,14 @@ void process_destroy(process_t* proc) {
         pagemap_release(&proc->map);
     }
 
-    thread_t* curr = smp_current_core()->curr_thread;
+    acquire_spinlock(&global_process_lock);
+
+    if (!dlist_empty(&proc->sibling_node)) {
+        dlist_del(&proc->sibling_node);
+    }
+
+    release_spinlock(&global_process_lock);
+
     handle_free(&pid_handle_tbl, (uint32_t)proc->pid);
-
     kmem_cache_free(process_cache, proc);
-
-    if (curr && curr->owner == proc) {
-        curr->owner = nullptr;
-        thread_destroy(curr);
-    }
-}
-
-void thread_exit(int exit_code) {
-    arch_disable_interrupts();
-    per_cpu_data_t* cpu = smp_current_core();
-    thread_t* curr      = cpu->curr_thread;
-
-    curr->exit_code = exit_code;
-    wake_up_all(&curr->join_queue);
-
-    bool is_last_thread = false;
-    if (curr->owner) {
-        acquire_spinlock(&curr->owner->lock);
-
-        if (curr->owner->thread_count <= 1) {
-            is_last_thread = true;
-        }
-
-        release_spinlock(&curr->owner->lock);
-    }
-
-    if (is_last_thread && curr->owner->state == PROCESS_ALIVE) {
-        process_exit(exit_code);
-    }
-
-    curr->state = THREAD_TERMINATED;
-    scheduler_remove_thread(curr);
-    scheduler_yield();
-
-    PANIC("THREAD: Escaped the afterlife");
-}
-
-void thread_join(thread_t* t, int* exit_code) {
-    if (!t) {
-        return;
-    }
-
-    while (t->state != THREAD_TERMINATED) {
-        sleep_on_queue(&t->join_queue);
-    }
-
-    if (exit_code) {
-        *exit_code = t->exit_code;
-    }
 }

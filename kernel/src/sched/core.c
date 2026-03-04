@@ -174,7 +174,7 @@ static uint32_t select_best_cpu(thread_t* t) {
             return t->assigned_cpu;
         }
 
-        size_t sibs        = cpumask_get(&prev->topology.core_siblings, prev->cpu_idx);
+        size_t sibs        = cpumask_get(&prev->arch.topology.core_siblings, prev->cpu_idx);
         bool are_sibs_busy = false;
 
         while (sibs) {
@@ -206,7 +206,7 @@ static uint32_t select_best_cpu(thread_t* t) {
         curr_cost += atomic_load_explicit(&target->cpu_load, memory_order_relaxed);
         curr_cost += ((size_t)target->thread_count * 100);
 
-        size_t sibs = cpumask_get(&target->topology.core_siblings, i);
+        size_t sibs = cpumask_get(&target->arch.topology.core_siblings, i);
         while (sibs) {
             int idx                 = __builtin_ctzll(sibs);
             per_cpu_data_t* sibling = smp_get_core((uint32_t)idx);
@@ -222,7 +222,7 @@ static uint32_t select_best_cpu(thread_t* t) {
         if (t->assigned_cpu != UINT32_MAX && i != t->assigned_cpu) {
             per_cpu_data_t* last = smp_get_core(t->assigned_cpu);
 
-            if (last && cpumask_test(&target->topology.llc_siblings, t->assigned_cpu)) {
+            if (last && cpumask_test(&target->arch.topology.llc_siblings, t->assigned_cpu)) {
                 curr_cost += (MIGRATION_COST_NS / 2000);
             } else {
                 curr_cost += (MIGRATION_COST_NS / 1000);
@@ -578,7 +578,7 @@ void schedule(void) {
     process_t* curr_proc = curr ? curr->owner : nullptr;
 
 #ifdef __x86_64__
-    update_tss_rsp(&cpu->tss, next->kernel_stack_top);
+    update_tss_rsp(&cpu->arch.tss, next->kernel_stack_top);
 #endif
 
     if (next_proc && (curr_proc != next_proc)) {

@@ -15,8 +15,8 @@
 void arch_init_cpu_state(per_cpu_data_t* cpu) {
     ASSERT(cpu);
 
-    tss_init(&cpu->tss, cpu->kstack_top);
-    gdt_init(&cpu->gdt, &cpu->tss);
+    tss_init(&cpu->arch.tss, cpu->kstack_top);
+    gdt_init(&cpu->arch.gdt, &cpu->arch.tss);
     idt_init();
 
     init_isr_registry();
@@ -24,15 +24,15 @@ void arch_init_cpu_state(per_cpu_data_t* cpu) {
     KLOG_DEBUG(
         "SMP: cpu=%u arch state initialized gdt=%p tss=%p\n",
         cpu->cpu_idx,
-        &cpu->gdt,
-        &cpu->tss
+        &cpu->arch.gdt,
+        &cpu->arch.tss
     );
 }
 
 void arch_commit_cpu_state(per_cpu_data_t* cpu) {
     ASSERT(cpu);
 
-    gdt_load(&cpu->gdt);
+    gdt_load(&cpu->arch.gdt);
     idt_load();
     pic_init();
 

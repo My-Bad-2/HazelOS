@@ -72,19 +72,19 @@ void topology_detect(per_cpu_data_t* cpu) {
         die_shift = core_shift;
     }
 
-    cpu->topology.apic_id   = apic;
-    cpu->topology.smt_id    = apic & ((1 << smt_shift) - 1);
-    cpu->topology.core_id   = (apic >> smt_shift) & ((1 << (core_shift - smt_shift)) - 1);
-    cpu->topology.module_id = (apic >> core_shift) & ((1 << (module_shift - core_shift)) - 1);
-    cpu->topology.tile_id   = (apic >> module_shift) & ((1 << (tile_shift - module_shift)) - 1);
-    cpu->topology.socket_id = apic >> core_shift;
-    cpu->topology.l3_id     = apic >> die_shift;
+    cpu->arch.topology.apic_id   = apic;
+    cpu->arch.topology.smt_id    = apic & ((1 << smt_shift) - 1);
+    cpu->arch.topology.core_id   = (apic >> smt_shift) & ((1 << (core_shift - smt_shift)) - 1);
+    cpu->arch.topology.module_id = (apic >> core_shift) & ((1 << (module_shift - core_shift)) - 1);
+    cpu->arch.topology.tile_id = (apic >> module_shift) & ((1 << (tile_shift - module_shift)) - 1);
+    cpu->arch.topology.socket_id = apic >> core_shift;
+    cpu->arch.topology.l3_id     = apic >> die_shift;
 }
 
 void topology_init_masks(per_cpu_data_t** all_cpus, size_t count) {
     for (size_t i = 0; i < count; ++i) {
-        cpumask_alloc(&all_cpus[i]->topology.core_siblings);
-        cpumask_alloc(&all_cpus[i]->topology.llc_siblings);
+        cpumask_alloc(&all_cpus[i]->arch.topology.core_siblings);
+        cpumask_alloc(&all_cpus[i]->arch.topology.llc_siblings);
     }
 }
 
@@ -92,19 +92,19 @@ void topology_map_siblings(per_cpu_data_t** all_cpus, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         per_cpu_data_t* cpu_a = all_cpus[i];
 
-        cpumask_clear(&cpu_a->topology.core_siblings);
-        cpumask_clear(&cpu_a->topology.llc_siblings);
+        cpumask_clear(&cpu_a->arch.topology.core_siblings);
+        cpumask_clear(&cpu_a->arch.topology.llc_siblings);
 
         for (size_t j = 0; j < count; ++j) {
             struct per_cpu_data* cpu_b = all_cpus[j];
 
-            if ((cpu_a->topology.socket_id == cpu_b->topology.socket_id) &&
-                (cpu_a->topology.core_id == cpu_b->topology.core_id)) {
-                cpumask_set(&cpu_a->topology.core_siblings, j);
+            if ((cpu_a->arch.topology.socket_id == cpu_b->arch.topology.socket_id) &&
+                (cpu_a->arch.topology.core_id == cpu_b->arch.topology.core_id)) {
+                cpumask_set(&cpu_a->arch.topology.core_siblings, j);
             }
 
-            if (cpu_a->topology.l3_id == cpu_b->topology.l3_id) {
-                cpumask_set(&cpu_a->topology.llc_siblings, j);
+            if (cpu_a->arch.topology.l3_id == cpu_b->arch.topology.l3_id) {
+                cpumask_set(&cpu_a->arch.topology.llc_siblings, j);
             }
         }
     }
