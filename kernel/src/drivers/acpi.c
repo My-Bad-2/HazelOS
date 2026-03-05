@@ -30,7 +30,7 @@ void acpi_early_init(void) {
 
     acpi_parse_tables();
 
-    kfree(buf, scratch_len);
+    kfree(buf);
 
     KLOG_INFO("ACPI: early init complete\n");
 }

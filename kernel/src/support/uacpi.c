@@ -121,7 +121,7 @@ void* uacpi_kernel_alloc(uacpi_size size) {
 }
 
 void uacpi_kernel_free(void* mem, uacpi_size len) {
-    kfree(mem, len);
+    kfree(mem);
 }
 
 uacpi_handle uacpi_kernel_create_mutex() {
@@ -131,7 +131,7 @@ uacpi_handle uacpi_kernel_create_mutex() {
 }
 
 void uacpi_kernel_free_mutex(uacpi_handle lock) {
-    kfree(lock, sizeof(interrupt_lock_t));
+    kfree(lock);
 }
 
 uacpi_handle uacpi_kernel_create_spinlock() {
@@ -141,7 +141,7 @@ uacpi_handle uacpi_kernel_create_spinlock() {
 }
 
 void uacpi_kernel_free_spinlock(uacpi_handle lock) {
-    kfree(lock, sizeof(spinlock_t));
+    kfree(lock);
 }
 
 uacpi_status uacpi_kernel_acquire_mutex(uacpi_handle lock, uacpi_u16) {

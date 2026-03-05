@@ -14,16 +14,17 @@ extern "C" {
 
 typedef struct kmem_cache kmem_cache_t;
 
+void kheap_init(void);
+
 kmem_cache_t*
 kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, void (*ctor)(void*));
 void* kmem_cache_alloc(kmem_cache_t* cache);
+
 void kmem_cache_free(kmem_cache_t* cache, void* ptr);
 void kmem_cache_destroy(kmem_cache_t* cache);
 
 void* kmalloc(size_t size);
-void kfree(void* ptr, size_t size);
-
-void kheap_init(void);
+void kfree(void* ptr);
 
 #ifdef __cplusplus
 }

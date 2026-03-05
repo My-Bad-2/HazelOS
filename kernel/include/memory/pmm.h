@@ -9,11 +9,22 @@
 extern "C" {
 #endif
 
-struct [[gnu::aligned(8)]] page {
-    atomic_uint_fast16_t ref_count;
+#define PAGE_FLAG_SLAB (1 << 4)
+
+struct [[gnu::aligned(16)]] page {
     uint8_t order;  // Order of the block
     uint8_t flags;  // Zone ID, Used, etc.
-    uint32_t section_idx;
+
+    union {
+        struct {
+            _Atomic(uint16_t) ref_count;
+            uint32_t section_idx;
+        } buddy;
+
+        struct {
+            struct slab* slab_data;
+        } slab;
+    };
 };
 
 typedef struct pmm_stats {
@@ -21,6 +32,8 @@ typedef struct pmm_stats {
     size_t used_memory;
     size_t free_memory;
 } pmm_stats_t;
+
+struct page* phys_to_page(uintptr_t phys);
 
 void* pmm_alloc(size_t count);
 void* pmm_alloc_aligned(size_t alignment, size_t count);

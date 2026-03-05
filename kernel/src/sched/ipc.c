@@ -115,10 +115,8 @@ void sys_ipc_close(int32_t handle) {
             } else if (obj->type == OBJ_TIMER) {
                 timer_cancel(&((struct ipc_timer*)obj)->hw_timer);
                 kmem_cache_free(timer_cache, obj);
-            } else if (obj->type == OBJ_SHARED_MEM) {
-                kfree(obj, sizeof(struct ipc_shared_mem));
             } else {
-                kfree(obj, sizeof(ipc_object_t));
+                kfree(obj);
             }
         }
     }
@@ -229,7 +227,7 @@ int sys_ipc_create_port_set(int32_t* handle_out) {
     int32_t handle = alloc_handle(me, &set->header, IPC_RIGHTS_ALL);
 
     if (handle == 0) {
-        kfree(set, sizeof(ipc_object_t));
+        kfree(set);
         return handle;
     }
 
@@ -580,8 +578,8 @@ static void ipc_shm_free(process_t* proc, struct ipc_shared_mem* shm) {
         }
     }
 
-    kfree(shm->pages, sizeof(uintptr_t) * shm->page_count);
-    kfree(shm, sizeof(struct ipc_shared_mem));
+    kfree(shm->pages);
+    kfree(shm);
 }
 
 int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* vaddr_out) {
@@ -607,7 +605,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
     shm->pages      = kmalloc(sizeof(uintptr_t) * page_count);
 
     if (!shm->pages) {
-        kfree(shm, sizeof(struct ipc_shared_mem));
+        kfree(shm);
         return -ENOMEM;
     }
 

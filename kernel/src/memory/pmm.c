@@ -120,7 +120,7 @@ static inline void mask_clear_if_empty(struct zone* zone, int order) {
     }
 }
 
-static inline struct page* phys_to_page(uintptr_t phys) {
+struct page* phys_to_page(uintptr_t phys) {
     size_t sec_idx = phys >> SECTION_SHIFT;
 
     if (unlikely(sec_idx >= section_count || !mem_sections[sec_idx].map)) {
@@ -135,7 +135,7 @@ static int zone_to_id(struct zone* zone) {
 }
 
 static inline uintptr_t page_to_phys(struct page* page) {
-    uint32_t sec_idx      = page->section_idx;
+    uint32_t sec_idx      = page->buddy.section_idx;
     struct page* map_base = mem_sections[sec_idx].map;
 
     size_t page_idx = (size_t)(page - map_base);
@@ -268,7 +268,7 @@ static void* pmm_alloc_slow(size_t count) {
 
         if (likely(page)) {
             uintptr_t page_phys = page_to_phys(page);
-            atomic_store_explicit(&page->ref_count, 1, memory_order_release);
+            atomic_store_explicit(&page->buddy.ref_count, 1, memory_order_release);
             return (void*)page_phys;
         }
     }
@@ -345,7 +345,7 @@ void* pmm_alloc_aligned(size_t alignment, size_t count) {
 
         if (likely(page)) {
             uintptr_t page_phys = page_to_phys(page);
-            atomic_store_explicit(&page->ref_count, 1, memory_order_release);
+            atomic_store_explicit(&page->buddy.ref_count, 1, memory_order_release);
             return (void*)page_phys;
         }
     }
@@ -381,7 +381,7 @@ size_t pmm_alloc_bulk(size_t count, int order, void** pages) {
             }
 
             uintptr_t page_phys = page_to_phys(page);
-            atomic_store_explicit(&page->ref_count, 1, memory_order_release);
+            atomic_store_explicit(&page->buddy.ref_count, 1, memory_order_release);
             pages[allocated++] = (void*)page_phys;
         }
 
@@ -406,7 +406,7 @@ void pmm_inc_ref(void* ptr) {
 
     struct page* page = phys_to_page((uintptr_t)ptr);
 
-    uint16_t old     = atomic_load_explicit(&page->ref_count, memory_order_relaxed);
+    uint16_t old     = atomic_load_explicit(&page->buddy.ref_count, memory_order_relaxed);
     uint16_t new_val = 0;
 
     do {
@@ -417,7 +417,7 @@ void pmm_inc_ref(void* ptr) {
 
         new_val = old + 1;
     } while (!atomic_compare_exchange_strong_explicit(
-        &page->ref_count,
+        &page->buddy.ref_count,
         &old,
         new_val,
         memory_order_relaxed,
@@ -432,7 +432,7 @@ void pmm_dec_ref(void* ptr) {
 
     struct page* page = phys_to_page((uintptr_t)ptr);
 
-    uint16_t old     = atomic_load_explicit(&page->ref_count, memory_order_acquire);
+    uint16_t old     = atomic_load_explicit(&page->buddy.ref_count, memory_order_acquire);
     uint16_t new_val = 0;
 
     do {
@@ -447,7 +447,7 @@ void pmm_dec_ref(void* ptr) {
 
         new_val = old - 1;
     } while (!atomic_compare_exchange_strong_explicit(
-        &page->ref_count,
+        &page->buddy.ref_count,
         &old,
         new_val,
         memory_order_acq_rel,
@@ -491,7 +491,7 @@ uint16_t pmm_get_ref(void* ptr) {
     }
 
     struct page* page = phys_to_page((uintptr_t)ptr);
-    return atomic_load_explicit(&page->ref_count, memory_order_relaxed);
+    return atomic_load_explicit(&page->buddy.ref_count, memory_order_relaxed);
 }
 
 void pmm_init(void) {
@@ -603,8 +603,10 @@ void pmm_init(void) {
             mem_sections[idx].map = (void*)to_higher_half(boot_ptr);
             boot_ptr += map_size;
 
-            uint64_t page_template = ((uint64_t)idx << 32) | ((uint64_t)PAGE_FLAG_USED << 24);
-            uint64_t* map_page     = (uint64_t*)mem_sections[idx].map;
+            uint64_t template_low = ((uint64_t)idx << 32) | ((uint64_t)PAGE_FLAG_USED << 8);
+
+            uint128_t page_template = (uint128_t)template_low;
+            uint128_t* map_page     = (uint128_t*)mem_sections[idx].map;
             for (size_t p = 0; p < PAGES_PER_SECTION; ++p) {
                 map_page[p] = page_template;
             }
