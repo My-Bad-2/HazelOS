@@ -145,7 +145,7 @@ static void update_cpu_load(per_cpu_data_t* cpu, size_t now) {
 
 static void idle_task_entry(void*) {
     while (true) {
-        rcu_barrier_all();
+        // rcu_barrier_all();
         arch_disable_interrupts();
 
         if (!smp_current_core()->reschedule_needed) {
@@ -341,6 +341,45 @@ static bool sched_should_preempt(thread_t* new_task, thread_t* curr_task) {
     return true;
 }
 
+void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
+    if (cpu->is_bsp) {
+        kernel_proc = process_create("kernel_proc", nullptr, true);
+
+        if (!kernel_proc) {
+            PANIC("SCHED: failed to create kernel process\n");
+        }
+    }
+
+    cpu->cfs_tree = RB_ROOT_CACHED;
+    cpu->dl_tree  = RB_ROOT_CACHED;
+    cpu->rt_tree  = RB_ROOT_CACHED;
+
+    cpu->min_vruntime      = 0;
+    cpu->balance_counter   = 0;
+    cpu->reschedule_needed = false;
+    atomic_store_explicit(&cpu->cpu_load, 0, memory_order_relaxed);
+
+    thread_t* idle =
+        thread_create("idle_thread", kernel_proc, SCHED_IDLE, idle_task_entry, nullptr);
+    if (!idle) {
+        PANIC("SCHED: failed to create idle thread for cpu=%u\n", cpu->cpu_idx);
+    }
+
+    idle->sched_class   = &idle_sched_class;
+    idle->state         = THREAD_READY;
+    idle->assigned_cpu  = cpu->cpu_idx;
+    idle->affinity_mask = (1ul << cpu->cpu_idx);
+    idle->on_rq         = false;
+
+    cpu->idle_thread  = idle;
+    cpu->curr_thread  = idle;
+    cpu->thread_count = 0;
+
+    timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
+
+    KLOG_DEBUG("SCHED: initialzied scheduler on CPU %u\n", cpu->cpu_idx);
+}
+
 void scheduler_init(void) {
     sched_class_init();
 
@@ -350,53 +389,8 @@ void scheduler_init(void) {
     sched_class_register(&cfs_sched_class);
     sched_class_register(&idle_sched_class);
 
-    kernel_proc = process_create("kernel_proc", nullptr, true);
-
-    if (!kernel_proc) {
-        PANIC("SCHED: failed to create kernel process\n");
-    }
-
-    thread_create_args_t idle_args = {
-        .proc   = kernel_proc,
-        .entry  = idle_task_entry,
-        .arg    = nullptr,
-        .policy = SCHED_IDLE,
-    };
-
-    for (uint32_t i = 0; i < mp_request.response->cpu_count; ++i) {
-        per_cpu_data_t* cpu = smp_get_core(i);
-
-        cpu->cfs_tree = RB_ROOT_CACHED;
-        cpu->dl_tree  = RB_ROOT_CACHED;
-        cpu->rt_tree  = RB_ROOT_CACHED;
-
-        cpu->min_vruntime      = 0;
-        cpu->balance_counter   = 0;
-        cpu->reschedule_needed = false;
-        atomic_store_explicit(&cpu->cpu_load, 0, memory_order_relaxed);
-
-        thread_t* idle =
-            thread_create("idle_thread", kernel_proc, SCHED_IDLE, idle_task_entry, nullptr);
-        if (!idle) {
-            PANIC("SCHED: failed to create idle thread for cpu=%u\n", i);
-        }
-
-        idle->sched_class   = &idle_sched_class;
-        idle->state         = THREAD_READY;
-        idle->assigned_cpu  = i;
-        idle->affinity_mask = (1ul << i);
-        idle->on_rq         = false;
-
-        cpu->idle_thread  = idle;
-        cpu->curr_thread  = idle;
-        cpu->thread_count = 0;
-    }
-
-    rcu_init();
-    timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
-
+    // rcu_init();
     initialized = true;
-    KLOG_DEBUG("SCHED: initialzied scheduler on %u CPUs\n", mp_request.response->cpu_count);
 }
 
 void scheduler_add_thread(thread_t* t) {
@@ -523,7 +517,7 @@ void schedule(void) {
         balance_load();
     }
 
-    rcu_check_callbacks();
+    // rcu_check_callbacks();
 
     thread_t* curr = cpu->curr_thread;
     size_t now     = get_time_now();
@@ -533,7 +527,7 @@ void schedule(void) {
     }
 
     acquire_interrupt_lock(&cpu->lock);
-    qsbr_checkpoint(&g_qsbr);
+    // qsbr_checkpoint(&g_qsbr);
 
     update_cpu_load(cpu, now);
 

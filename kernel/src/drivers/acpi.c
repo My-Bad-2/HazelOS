@@ -12,7 +12,7 @@
 void acpi_early_init(void) {
     KLOG_INFO("ACPI: early init start\n");
 
-    const size_t scratch_len = 1024 * sizeof(uint8_t);
+    const size_t scratch_len = 4096 * sizeof(uint8_t);
     uint8_t* buf             = kmalloc(scratch_len);
 
     if (!buf) {

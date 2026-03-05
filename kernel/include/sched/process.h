@@ -173,6 +173,8 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
 void arch_thread_destroy(thread_t* t);
 void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf);
 
+void reaper_task_entry(void* args);
+
 void thread_save_fpu(thread_t* t);
 void thread_restore_fpu(thread_t* t);
 

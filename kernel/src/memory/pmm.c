@@ -260,7 +260,7 @@ static void* pmm_alloc_slow(size_t count) {
     for (int i = active_zone_count - 1; i >= 0; i--) {
         struct zone* zone = &zones[i];
 
-        if (is_aligned(zone->free_mask, 1 << order)) {
+        if ((zone->free_mask >> order) == 0) {
             continue;
         }
 
@@ -615,14 +615,14 @@ void pmm_init(void) {
 
     for (int i = 0; i < active_zone_count; ++i) {
         struct zone* zone = &zones[i];
-        zones->limit      = zone_config[i].limit;
-        zones->free_mask  = 0;
+        zone->limit       = zone_config[i].limit;
+        zone->free_mask   = 0;
 
-        create_spinlock(&zones->lock);
+        create_spinlock(&zone->lock);
 
         for (int order = 0; order <= PMM_MAX_ORDER; ++order) {
-            dlist_init(&zones->free_areas[order]);
-            atomic_init(&zones->free_count[order], 0);
+            dlist_init(&zone->free_areas[order]);
+            atomic_init(&zone->free_count[order], 0);
         }
     }
 

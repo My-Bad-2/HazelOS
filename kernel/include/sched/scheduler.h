@@ -1,3 +1,4 @@
+#include "sched/sched_class.h"
 #ifndef KERNEL_SCHED_SCHEDULER_H
 #define KERNEL_SCHED_SCHEDULER_H 1
 
@@ -11,7 +12,10 @@ extern "C" {
 #define COST_SMT_THREAD   500
 #define MIGRATION_COST_NS 50000
 
+struct per_cpu_data;
+
 void scheduler_init(void);
+void scheduler_init_per_cpu(struct per_cpu_data* cpu);
 bool scheduler_is_initialized(void);
 
 void scheduler_add_thread(thread_t* t);

@@ -10,6 +10,7 @@
 #include "cpu/registers.h"
 #include "cpu/simd.h"
 #include "cpu/syscalls.h"
+#include "drivers/timer.h"
 #include "libs/log.h"
 
 void arch_init_cpu_state(per_cpu_data_t* cpu) {
@@ -17,16 +18,11 @@ void arch_init_cpu_state(per_cpu_data_t* cpu) {
 
     tss_init(&cpu->arch.tss, cpu->kstack_top);
     gdt_init(&cpu->arch.gdt, &cpu->arch.tss);
-    idt_init();
 
-    init_isr_registry();
-
-    KLOG_DEBUG(
-        "SMP: cpu=%u arch state initialized gdt=%p tss=%p\n",
-        cpu->cpu_idx,
-        &cpu->arch.gdt,
-        &cpu->arch.tss
-    );
+    if (cpu->is_bsp) {
+        idt_init();
+        init_isr_registry();
+    }
 }
 
 void arch_commit_cpu_state(per_cpu_data_t* cpu) {
@@ -34,19 +30,19 @@ void arch_commit_cpu_state(per_cpu_data_t* cpu) {
 
     gdt_load(&cpu->arch.gdt);
     idt_load();
-    pic_init();
 
     lapic_init();
-    ioapic_init();
     simd_init();
     syscall_init();
 
+    if (cpu->is_bsp) {
+        pic_init();
+        ioapic_init();
+        timer_init();
+    }
+
     topology_detect(cpu);
-
-    uint64_t gs_val = (uint64_t)cpu;
-    write_msr(X86_MSR_IA32_GS_BASE, gs_val);
-
-    KLOG_DEBUG("SMP: cpu=%u GDT loaded gs_base=0x%lx\n", cpu->cpu_idx, gs_val);
+    write_msr(X86_MSR_IA32_GS_BASE, (uint64_t)cpu);
 
     arch_enable_interrupts();
 }

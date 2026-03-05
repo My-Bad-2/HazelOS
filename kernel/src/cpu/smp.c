@@ -11,16 +11,31 @@
 #include "drivers/timer.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
+#include "memory/arch_mmu.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 #include "sched/rcu.h"
+#include "sched/scheduler.h"
 
 extern uint8_t bootstrap_stack[];
 
 static per_cpu_data_t* cpu_datas = nullptr;
 static bool initialized          = false;
+
+static void ap_entry_point(struct limine_mp_info* info) {
+    per_cpu_data_t* cpu = (per_cpu_data_t*)info->extra_argument;
+
+    arch_mmu_init();
+    pagemap_load(kernel_space->map);
+
+    arch_commit_cpu_state(cpu);
+    scheduler_init_per_cpu(cpu);
+    atomic_store_explicit(&cpu->is_online, 1, memory_order_release);
+
+    arch_halt(true);
+}
 
 static void init_cpu_state(per_cpu_data_t* cpu) {
     ASSERT(cpu);
@@ -68,81 +83,56 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
     );
 }
 
-static void commit_cpu_state(per_cpu_data_t* cpu) {
-    ASSERT(cpu);
-
-    arch_commit_cpu_state(cpu);
-
-    KLOG_DEBUG("SMP: cpu=%u committed arch state\n", cpu->cpu_idx);
-}
-
 void smp_init(void) {
     if (!mp_request.response) {
-        errno = EIO;
-        PANIC("SMP: missing Limine MP response errno=%d\n", errno);
+        PANIC("SMP: missing Limine MP response!\n");
     }
 
     size_t num_cpus = mp_request.response->cpu_count;
 
     if (num_cpus == 0) {
-        KLOG_WARN("SMP: firmware reported zero CPUs, defaulting to 1\n");
         num_cpus = 1;
     }
 
-    KLOG_INFO("SMP: initializing %zu CPU(s)\n", num_cpus);
-
     cpu_datas = kmalloc(sizeof(per_cpu_data_t) * num_cpus);
-
-    if (!cpu_datas) {
-        errno = ENOMEM;
-        PANIC("SMP: failed to allocate per-cpu array count=%zu errno=%d\n", num_cpus, errno);
-    }
-
     memset(cpu_datas, 0, num_cpus * sizeof(per_cpu_data_t));
 
     acpi_early_init();
-    topology_detect(cpu_datas);
 
     for (uint32_t i = 0; i < num_cpus; ++i) {
         struct limine_mp_info* info = mp_request.response->cpus[i];
-        per_cpu_data_t* data        = &cpu_datas[i];
+        per_cpu_data_t* cpu         = &cpu_datas[i];
 
-        info->extra_argument = (uintptr_t)data;
+        info->extra_argument = (uintptr_t)cpu;
 
-        data->lapic_id = info->lapic_id;
-        data->cpu_idx  = i;
-        data->self     = data;
+        cpu->lapic_id = info->lapic_id;
+        cpu->cpu_idx  = i;
+        cpu->self     = cpu;
+        cpu->is_bsp   = (mp_request.response->bsp_lapic_id == info->lapic_id);
 
-        data->is_bsp = (mp_request.response->bsp_lapic_id == info->lapic_id);
-        atomic_store_explicit(&data->is_online, data->is_bsp, memory_order_seq_cst);
+        init_cpu_state(cpu);
 
-        KLOG_DEBUG(
-            "SMP: cpu=%u lapic=0x%x bsp=%d online=%d (pre-init)\n",
-            data->cpu_idx,
-            data->lapic_id,
-            data->is_bsp,
-            atomic_load_explicit(&data->is_online, memory_order_relaxed)
-        );
-
-        init_cpu_state(data);
-
-        if (data->is_bsp) {
-            commit_cpu_state(data);
-        }
-
-        if (!atomic_load_explicit(&data->is_online, memory_order_acquire)) {
-            KLOG_WARN("SMP: cpu=%u offline after init\n", data->cpu_idx);
-            arch_pause();
-        } else if (data->is_bsp) {
-            KLOG_INFO("SMP: BSP cpu=%u online\n", data->cpu_idx);
+        if (cpu->is_bsp) {
+            arch_commit_cpu_state(cpu);
+            scheduler_init();
+            scheduler_init_per_cpu(cpu);
+            atomic_store_explicit(&cpu->is_online, cpu->is_bsp, memory_order_seq_cst);
+            KLOG_INFO("SMP: BSP cpu=%u online\n", cpu->cpu_idx);
         } else {
-            KLOG_DEBUG("SMP: cpu=%u online\n", data->cpu_idx);
+            atomic_store_explicit(&cpu->is_online, 0, memory_order_relaxed);
+            info->goto_address = ap_entry_point;
         }
     }
 
-    topology_map_siblings(&cpu_datas, num_cpus);
+    for (uint32_t i = 0; i < num_cpus; ++i) {
+        while (!atomic_load_explicit(&cpu_datas[i].is_online, memory_order_acquire)) {
+            arch_pause();
+        }
+    }
 
     initialized = true;
+
+    topology_map_siblings(cpu_datas, num_cpus);
 
     KLOG_INFO("SMP: initialization complete (%zu CPU(s))\n", num_cpus);
 }

@@ -503,7 +503,6 @@ void kmem_cache_destroy(kmem_cache_t* cache) {
     }
 
     pmm_free((void*)from_higher_half((uintptr_t)cache->slab_hash));
-
     kmem_cache_free(&cache_boot, cache);
 }
 
@@ -520,6 +519,7 @@ void* kmalloc(size_t size) {
             errno = ENOMEM;
             return nullptr;
         }
+
         return (void*)to_higher_half((uintptr_t)phys);
     }
 

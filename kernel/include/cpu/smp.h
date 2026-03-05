@@ -71,7 +71,7 @@ uint32_t smp_current_core_idx(void);
 
 void topology_detect(per_cpu_data_t* cpu);
 void topology_init_masks(per_cpu_data_t** all_cpus, size_t count);
-void topology_map_siblings(per_cpu_data_t** all_cpus, size_t count);
+void topology_map_siblings(per_cpu_data_t* all_cpus, size_t count);
 
 void smp_send_reschedule_ipi(per_cpu_data_t* cpu);
 

@@ -10,6 +10,6 @@ void drivers_early_init(void) {
 }
 
 void drivers_init(void) {
-    timer_init();
+    // timer_init();
     term_init(&term_font);
 }

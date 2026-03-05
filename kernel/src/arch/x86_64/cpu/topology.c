@@ -2,6 +2,7 @@
 #include "cpu/mask.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
+#include "libs/log.h"
 
 void topology_detect(per_cpu_data_t* cpu) {
     uint32_t leaf = CPUID_EXTENDED_TOPOLOGY;
@@ -88,15 +89,15 @@ void topology_init_masks(per_cpu_data_t** all_cpus, size_t count) {
     }
 }
 
-void topology_map_siblings(per_cpu_data_t** all_cpus, size_t count) {
+void topology_map_siblings(per_cpu_data_t* all_cpus, size_t count) {
     for (size_t i = 0; i < count; ++i) {
-        per_cpu_data_t* cpu_a = all_cpus[i];
+        per_cpu_data_t* cpu_a = &all_cpus[i];
 
         cpumask_clear(&cpu_a->arch.topology.core_siblings);
         cpumask_clear(&cpu_a->arch.topology.llc_siblings);
 
         for (size_t j = 0; j < count; ++j) {
-            struct per_cpu_data* cpu_b = all_cpus[j];
+            struct per_cpu_data* cpu_b = &all_cpus[j];
 
             if ((cpu_a->arch.topology.socket_id == cpu_b->arch.topology.socket_id) &&
                 (cpu_a->arch.topology.core_id == cpu_b->arch.topology.core_id)) {

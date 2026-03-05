@@ -175,12 +175,13 @@ set(QEMU_LOGFILE "${CMAKE_BINARY_DIR}/qemu-logs.txt")
 
 set(
 	QEMU_COMMON_FLAGS
-	-m 512M
+	-m 2G
 	-no-reboot
 	-no-shutdown
 	-serial stdio
 	-rtc base=localtime
 	-boot order=d,menu=on,splash-time=0
+	-smp 4
 )
 
 if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
