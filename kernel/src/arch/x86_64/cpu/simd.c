@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "cpu/cpu.h"
 #include "cpu/registers.h"
@@ -140,6 +141,7 @@ cleanup:
             PANIC("SIMD: Cannot allocate clean state buffer!\n");
         }
 
+        memset(clean_state, 0, size);
         simd_save(clean_state);
     }
 

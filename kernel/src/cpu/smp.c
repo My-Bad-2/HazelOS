@@ -60,14 +60,7 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
     }
 
     cpu->kstack_top = (uintptr_t)stack + KSTACK_SIZE;
-    cpu->rcu        = vmalloc(
-        kernel_space,
-        nullptr,
-        sizeof(struct rcu_data),
-        VMM_FLAG_READ | VMM_FLAG_WRITE,
-        CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
-    );
+    cpu->rcu        = kmalloc(sizeof(struct rcu_data));
 
     create_interrupt_lock(&cpu->lock);
 
@@ -111,6 +104,11 @@ void smp_init(void) {
         cpu->is_bsp   = (mp_request.response->bsp_lapic_id == info->lapic_id);
 
         init_cpu_state(cpu);
+    }
+
+    for (uint32_t i = 0; i < num_cpus; ++i) {
+        struct limine_mp_info* info = mp_request.response->cpus[i];
+        per_cpu_data_t* cpu         = &cpu_datas[i];
 
         if (cpu->is_bsp) {
             arch_commit_cpu_state(cpu);

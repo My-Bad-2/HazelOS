@@ -105,6 +105,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
 
     size_t avg_load;
     size_t last_load_update;
+    size_t preempt_count;
 
     uintptr_t context_rsp;
     uintptr_t kernel_stack_top;
@@ -122,28 +123,6 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     timer_event_t sleep_timer;
     void* fpu_buffer;
 } thread_t;
-
-typedef struct {
-    process_t* proc;
-    void (*entry)(void*);
-    void* arg;
-    uint8_t policy;
-
-    union {
-        struct {
-            int nice;
-        } normal;
-
-        struct {
-            int priority;
-        } rt;
-
-        struct {
-            size_t runtime;  // Execution budget
-            size_t period;   // Period window
-        } dl;
-    };
-} thread_create_args_t;
 
 process_t* process_create(const char* name, process_t* parent, bool is_kernel);
 void process_destroy(process_t* proc);

@@ -68,6 +68,5 @@ void user_start() {
 
     write(1, str, len);
 
-halt:
     while (true);
 }

@@ -10,9 +10,11 @@ void scheduler_check_reschedule(interrupt_trapframe_t* tf) {
         return;
     }
 
-    // If the code we interrupted has disabled interrupts, it is strictly atomic. We must not
-    // preempt it.
     if (!(tf->rflags & X86_FLAGS_IF)) {
+        return;
+    }
+
+    if (cpu->curr_thread && cpu->curr_thread->preempt_count > 0) {
         return;
     }
 

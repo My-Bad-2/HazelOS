@@ -16,7 +16,6 @@ void kmain(void) {
     smp_init();
 
     drivers_init();
-    scheduler_init();
 
     KLOG_INFO("Hello, World!\n");
     launch_user_init();

@@ -1,4 +1,4 @@
-#include "libs/dlist.h"
+#include "sched/process.h"
 #ifndef KERNEL_SCHED_RCU_H
 #define KERNEL_SCHED_RCU_H 1
 
@@ -6,93 +6,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "libs/dlist.h"
+#include "libs/slist.h"
 #include "libs/spinlock.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define RCU_CALLBACK_RING_SIZE 4096
-#define RCU_CALLBACK_RING_MASK (RCU_CALLBACK_RING_SIZE - 1)
-#define RCU_QSBR_OFFLINE_EPOCH 0
-
-_Static_assert(
-    (RCU_CALLBACK_RING_SIZE & RCU_CALLBACK_RING_MASK) == 0,
-    "RCU_CALLBACK_RING_SIZE must be a power of 2"
-);
-
-struct rcu_head {
-    void (*func)(struct rcu_head*);
-};
-
-struct rcu_batch {
-    struct rcu_head* buffer[RCU_CALLBACK_RING_SIZE];
-    atomic_size_t head;
-    atomic_size_t tail;
-
-    atomic_size_t snapshot;    // Captured 'head' at start of GP
-    atomic_size_t safe_limit;  // Safe 'head' at the end of GP
-
-    spinlock_t lock;
-};
-
-struct rcu_node {
-    spinlock_t lock;
-    uint64_t qs_mask;           // Bitmask of CPUs pending QS
-    uint64_t qs_mask_init;      // Bitmask of CPUs online for this node
-    uint64_t grace_period_seq;  // Current GP sequence number
-
-    struct rcu_node* parent;
-    uint8_t group_num;  // bit index in the parent's qsmask
-    uint8_t level;      // 0 = Leaf, N = Root
-};
-
-struct rcu_data {
-    struct rcu_batch batch;
-    struct rcu_node* node;  // The leaf node this CPU belongs too
-
-    uint64_t mask;  // Bitmask for this CPU in the leaf node
-
-    bool qs_pending;   // Does the core need to report a QS?
-    uint64_t nesting;  // Depth of read-side CS
-    uint64_t gq_sq;    // Last GP sequence seen
-};
-
-struct rcu_state {
-    struct rcu_node* node;
-    struct rcu_node* root;
-
-    uint32_t num_nodes;
-
-    atomic_size_t gp_seq;
-    atomic_bool gp_request;
-    struct thread* gp_thread;
-    spinlock_t gp_lock;
-};
-
-struct srcu_domain {
-    atomic_size_t idx;
-    atomic_size_t gp_seq;
-    spinlock_t gp_lock;
-
-    struct [[gnu::aligned(CACHE_LINE_SIZE)]] srcu_cpu_data {
-        atomic_uint_fast64_t lock_count[2];
-        atomic_uint_fast64_t unlock_count[2];
-    }* per_cpu;
-
-    uint32_t cpu_count;
-};
-
-struct qsbr_domain {
-    atomic_size_t global_epoch;
-    spinlock_t gp_lock;
-
-    struct [[gnu::aligned(CACHE_LINE_SIZE)]] qsbr_cpu_data {
-        atomic_size_t local_epoch;
-    }* per_cpu;
-
-    uint32_t cpu_count;
-};
 
 struct completion {
     uint32_t done;
@@ -105,33 +25,102 @@ struct completion_waiter {
     struct thread* task;
 };
 
-extern struct srcu_domain g_srcu;
-extern struct qsbr_domain g_qsbr;
-
-void rcu_init(void);
-
-void call_rcu(struct rcu_head* head, void (*func)(struct rcu_head*));
-void rcu_check_callbacks(void);
-void rcu_read_lock(void);
-void rcu_read_unlock(void);
-void synchronize_rcu(void);
-
-int srcu_read_lock(struct srcu_domain* ssp);
-void srcu_read_unlock(struct srcu_domain* ssp, int idx);
-void synchronize_srcu(struct srcu_domain* ssp);
-void call_srcu(struct rcu_head* head, void (*func)(struct rcu_head*));
-
-void qsbr_enter(struct qsbr_domain* qsd);
-void qsbr_exit(struct qsbr_domain* qsd);
-void qsbr_checkpoint(struct qsbr_domain* qsd);
-void synchronize_qsbr(struct qsbr_domain* qsd);
-void call_qsbr(struct rcu_head* head, void (*func)(struct rcu_head*));
-
-void rcu_barrier_all(void);
-
 void init_completion(struct completion* x);
 void wait_for_completion(struct completion* x);
 void complete(struct completion* x);
+
+struct rcu_head {
+    struct slist_node node;
+    void (*func)(struct rcu_head*);
+};
+
+struct rcu_node {
+    spinlock_t lock;
+    uint64_t qs_mask;       // Bitmask of CPUs pending QS
+    uint64_t qs_mask_init;  // Bitmask of CPUs online for this node
+    uint64_t gp_seq;        // Current GP sequence number
+
+    struct rcu_node* parent;
+    uint8_t group_num;  // bit index in the parent's qsmask
+    uint8_t level;      // 0 = Leaf, N = Root
+};
+
+struct rcu_data {
+    struct rcu_node* node;  // The leaf node this CPU belongs too
+    uint64_t mask;          // Bitmask for this CPU in the leaf node
+
+    struct slist_head pending;       // Pushed by call_rcu()
+    struct slist_head waiting;       // waiting for current GP
+    struct slist_head next_waiting;  // overflow waiting for the next GP
+    struct slist_head done;          // Safe to execute
+
+    uint64_t waiting_gp_seq;  // The GP sequence 'waiting' list is tied to
+    uint64_t last_qs_seq;     // Last global GP sequence we acknowledged
+    uint64_t nesting;         // Depth of read-side critical sections
+    bool qs_pending;          // Does this cpu need to repose a QS?
+};
+
+void rcu_init(void);
+void rcu_read_lock(void);
+void rcu_read_unlock(void);
+void call_rcu(struct rcu_head* head, void (*func)(struct rcu_head*));
+void rcu_check_callbacks(void);
+void synchronize_rcu(void);
+
+struct [[gnu::aligned(CACHE_LINE_SIZE)]] srcu_cpu_data {
+    _Atomic(uint64_t) lock_count[2];
+    _Atomic(uint64_t) unlock_count[2];
+
+    struct slist_head pending;
+};
+
+struct srcu_domain {
+    atomic_size_t idx;
+    uint32_t cpu_count;
+
+    struct srcu_cpu_data* per_cpu;
+
+    spinlock_t gp_lock;
+    atomic_bool gp_active;
+    atomic_bool gp_request;
+    struct thread* gp_thread;
+};
+
+extern struct srcu_domain g_srcu;
+
+void init_srcu_domain(struct srcu_domain* ssp);
+int srcu_read_lock(struct srcu_domain* ssp);
+void srcu_read_unlock(struct srcu_domain* ssp, int idx);
+void synchronize_srcu(struct srcu_domain* ssp);
+void call_srcu(struct srcu_domain* ssp, struct rcu_head* head, void (*func)(struct rcu_head*));
+
+struct [[gnu::aligned(CACHE_LINE_SIZE)]] qsbr_cpu_data {
+    atomic_size_t local_epoch;
+    struct slist_head pending;
+};
+
+struct qsbr_domain {
+    atomic_size_t global_epoch;
+    uint32_t cpu_count;
+
+    struct qsbr_cpu_data* per_cpu;
+
+    spinlock_t gp_lock;
+    atomic_bool gp_active;
+    atomic_bool gp_request;
+    struct thread* gp_thread;
+};
+
+extern struct qsbr_domain g_qsbr;
+
+void init_qsbr_domain(struct qsbr_domain* qsd);
+
+void qsbr_online(struct qsbr_domain* qsd);
+void qsbr_offline(struct qsbr_domain* qsd);
+void qsbr_checkpoint(struct qsbr_domain* qsd);
+
+void synchronize_qsbr(struct qsbr_domain* qsd);
+void call_qsbr(struct qsbr_domain* qsd, struct rcu_head* head, void (*func)(struct rcu_head*));
 
 #ifdef __cplusplus
 }

@@ -1,3 +1,5 @@
+#include <stdatomic.h>
+
 #include "arch.h"
 #include "boot/boot.h"
 #include "compiler.h"
@@ -145,18 +147,16 @@ static void update_cpu_load(per_cpu_data_t* cpu, size_t now) {
 
 static void idle_task_entry(void*) {
     while (true) {
-        // rcu_barrier_all();
         arch_disable_interrupts();
 
-        if (!smp_current_core()->reschedule_needed) {
-            qsbr_exit(&g_qsbr);
-            arch_halt(true);
-            qsbr_enter(&g_qsbr);
-        } else {
+        if (smp_current_core()->reschedule_needed) {
             arch_enable_interrupts();
+            schedule();
+        } else {
+            qsbr_offline(&g_qsbr);
+            arch_halt(true);
+            qsbr_online(&g_qsbr);
         }
-
-        schedule();
     }
 }
 
@@ -389,7 +389,10 @@ void scheduler_init(void) {
     sched_class_register(&cfs_sched_class);
     sched_class_register(&idle_sched_class);
 
-    // rcu_init();
+    rcu_init();
+    init_srcu_domain(&g_srcu);
+    init_qsbr_domain(&g_qsbr);
+
     initialized = true;
 }
 
@@ -517,17 +520,20 @@ void schedule(void) {
         balance_load();
     }
 
-    // rcu_check_callbacks();
-
     thread_t* curr = cpu->curr_thread;
     size_t now     = get_time_now();
+
+    if (curr->preempt_count > 0) {
+        // Thread wants to keep running, we'll defer preemption until preempt_enable() is called.
+        cpu->reschedule_needed = true;
+        return;
+    }
 
     if (curr && curr->state != THREAD_TERMINATED) {
         thread_save_fpu(curr);
     }
 
     acquire_interrupt_lock(&cpu->lock);
-    // qsbr_checkpoint(&g_qsbr);
 
     update_cpu_load(cpu, now);
 
@@ -765,4 +771,35 @@ bool scheduler_is_initialized(void) {
 
 process_t* get_kernel_process(void) {
     return kernel_proc;
+}
+
+void preempt_disable(void) {
+    per_cpu_data_t* cpu = smp_current_core();
+
+    if (cpu && cpu->curr_thread) {
+        cpu->curr_thread->preempt_count++;
+    }
+
+    atomic_signal_fence(memory_order_seq_cst);
+}
+
+void preempt_enable(void) {
+    atomic_signal_fence(memory_order_seq_cst);
+
+    per_cpu_data_t* cpu = smp_current_core();
+    if (cpu && cpu->curr_thread) {
+        if (cpu->curr_thread->preempt_count > 0) {
+            cpu->curr_thread->preempt_count--;
+        }
+
+        if (cpu->curr_thread->preempt_count == 0 && cpu->reschedule_needed) {
+            cpu->reschedule_needed = false;
+            schedule();
+        }
+    }
+}
+
+uint32_t preempt_count(void) {
+    per_cpu_data_t* cpu = smp_current_core();
+    return (cpu && cpu->curr_thread) ? cpu->curr_thread->preempt_count : 0;
 }

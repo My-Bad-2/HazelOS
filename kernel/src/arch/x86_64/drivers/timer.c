@@ -11,6 +11,8 @@
 #include "drivers/pit.h"
 #include "drivers/tsc.h"
 #include "libs/log.h"
+#include "sched/process.h"
+#include "sched/rcu.h"
 #include "sched/scheduler.h"
 
 static clock_source_t source = CLOCK_PIT;
@@ -38,6 +40,9 @@ static void timer_handler(interrupt_trapframe_t*, void*) {
     timer_manager_tick(&cpu->timer_manager);
 
     if (scheduler_is_initialized()) {
+        thread_t* curr = cpu->curr_thread;
+
+        rcu_check_callbacks();
         schedule();
     }
 }

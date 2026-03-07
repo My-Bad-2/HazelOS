@@ -30,6 +30,10 @@ void schedule(void);
 void scheduler_yield(void);
 void scheduler_check_reschedule(interrupt_trapframe_t* tf);
 
+void preempt_disable();
+void preempt_enable();
+uint32_t preempt_count(void);
+
 #ifdef __cplusplus
 }
 #endif
