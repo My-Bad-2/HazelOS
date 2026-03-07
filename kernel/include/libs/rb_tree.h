@@ -69,7 +69,11 @@ rb_link_node(struct rb_node* node, struct rb_node* parent, struct rb_node** rb_l
 struct rb_node* rb_first(const struct rb_root* root);
 
 static inline struct rb_node* rb_first_cached(const struct rb_root_cached* root) {
-    return root->rb_leftmost;
+    if (root->rb_leftmost) {
+        return root->rb_leftmost;
+    }
+
+    return rb_first(&root->rb_root);
 }
 
 struct rb_node* rb_next(const struct rb_node* node);

@@ -2,7 +2,6 @@
 #include <string.h>
 
 #include "compiler.h"
-#include "libs/log.h"
 #include "libs/rb_tree.h"
 #include "sched/process.h"
 #include "sched/sched_class.h"

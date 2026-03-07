@@ -66,6 +66,7 @@ void rcu_read_unlock(void);
 void call_rcu(struct rcu_head* head, void (*func)(struct rcu_head*));
 void rcu_check_callbacks(void);
 void synchronize_rcu(void);
+void rcu_idle_enter(void);
 
 struct [[gnu::aligned(CACHE_LINE_SIZE)]] srcu_cpu_data {
     _Atomic(uint64_t) lock_count[2];

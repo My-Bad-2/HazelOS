@@ -101,8 +101,13 @@ void rcu_init(void) {
 
     process_t* kernel_proc = get_kernel_process();
     rcu_state.gp_thread =
-        thread_create("rcu_gp_thread", kernel_proc, SCHED_RR, rcu_gp_thread, nullptr, 99);
+        thread_create("rcu_gp_thread", kernel_proc, SCHED_RR, rcu_gp_thread, nullptr, 0);
     scheduler_add_thread(rcu_state.gp_thread);
+
+    rcu_state.gp_thread->assigned_cpu  = 0;
+    rcu_state.gp_thread->affinity_mask = (1 << 0);
+
+    KLOG_DEBUG("thread = %p\n", rcu_state.gp_thread);
 
     KLOG_INFO("RCU: Subsystem initialized for %u CPUs\n", cpus);
 }
@@ -125,36 +130,44 @@ void rcu_read_unlock(void) {
     preempt_enable();
 }
 
-void call_rcu(struct rcu_head* head, void (*func)(struct rcu_head*)) {
-    head->func           = func;
-    struct rcu_data* rdp = smp_current_core()->rcu;
-
-    slist_push_atomic(&head->node, &rdp->pending);
-}
-
 static void rcu_request_gp(void) {
-    if (!atomic_load_explicit(&rcu_state.gp_active, memory_order_relaxed)) {
-        atomic_store_explicit(&rcu_state.gp_request, true, memory_order_relaxed);
+    atomic_store_explicit(&rcu_state.gp_request, true, memory_order_release);
+
+    if (!atomic_load_explicit(&rcu_state.gp_active, memory_order_acquire)) {
         acquire_spinlock(&rcu_state.gp_lock);
         scheduler_unblock(rcu_state.gp_thread);
         release_spinlock(&rcu_state.gp_lock);
     }
 }
 
-static void rcu_report_qs_rnp(uint64_t mask, struct rcu_node* rnp, uint64_t gp_seq) {
+void call_rcu(struct rcu_head* head, void (*func)(struct rcu_head*)) {
+    head->func           = func;
+    struct rcu_data* rdp = smp_current_core()->rcu;
+
+    slist_push_atomic(&head->node, &rdp->pending);
+
+    if (!atomic_load_explicit(&rcu_state.gp_active, memory_order_relaxed)) {
+        rcu_request_gp();
+    }
+}
+
+static bool rcu_report_qs_rnp(uint64_t mask, struct rcu_node* rnp, uint64_t gp_seq) {
+    bool accepted = false;
+
     while (rnp != nullptr) {
         acquire_spinlock(&rnp->lock);
 
         if (rnp->gp_seq != gp_seq || !(rnp->qs_mask & mask)) {
             release_spinlock(&rnp->lock);
-            return;
+            return accepted;
         }
 
         rnp->qs_mask &= ~mask;
+        accepted = true;
 
         if (rnp->qs_mask != 0) {
             release_spinlock(&rnp->lock);
-            return;
+            return true;
         }
 
         mask                    = 1ul << rnp->group_num;
@@ -167,6 +180,8 @@ static void rcu_report_qs_rnp(uint64_t mask, struct rcu_node* rnp, uint64_t gp_s
         release_spinlock(&rnp->lock);
         rnp = parent;
     }
+
+    return true;
 }
 
 void rcu_check_callbacks(void) {
@@ -204,11 +219,11 @@ void rcu_check_callbacks(void) {
     }
 
     if (rdp->qs_pending && rdp->nesting == 0) {
-        rdp->qs_pending = false;
-        rcu_report_qs_rnp(rdp->mask, rdp->node, active);
+        if (rcu_report_qs_rnp(rdp->mask, rdp->node, active)) {
+            rdp->qs_pending = false;
+        }
     }
 
-    // 5. Execute safe callbacks
     struct slist_node* node;
     while ((node = slist_pop(&rdp->done)) != nullptr) {
         struct rcu_head* cb = slist_entry(node, struct rcu_head, node);
@@ -238,11 +253,18 @@ void synchronize_rcu(void) {
 }
 
 static void rcu_gp_thread(void*) {
+    thread_t* self = smp_current_core()->curr_thread;
+
+    KLOG_DEBUG("rcu_gp_thread_called!\n");
+
     while (true) {
         acquire_spinlock(&rcu_state.gp_lock);
+
         while (!atomic_load_explicit(&rcu_state.gp_request, memory_order_relaxed)) {
+            self->state = THREAD_BLOCKED;
             release_spinlock(&rcu_state.gp_lock);
-            scheduler_block();
+            schedule();
+            KLOG_DEBUG("rcu_gp_thread_called!\n");
             acquire_spinlock(&rcu_state.gp_lock);
         }
 
@@ -264,18 +286,29 @@ static void rcu_gp_thread(void*) {
         struct rcu_node* root = rcu_state.root;
         while (true) {
             acquire_spinlock(&root->lock);
-            uint64_t mask = root->qs_mask;
-            release_spinlock(&root->lock);
 
-            if (mask == 0) {
+            if (root->qs_mask == 0) {
+                release_spinlock(&root->lock);
                 break;
             }
 
-            scheduler_block();
+            self->state = THREAD_BLOCKED;
+            release_spinlock(&root->lock);
+            schedule();
+            KLOG_DEBUG("rcu_gp_thread_called!\n");
         }
 
-        // Mark GP as finished
         atomic_store_explicit(&rcu_state.completed_gp_seq, seq, memory_order_release);
         atomic_store_explicit(&rcu_state.gp_active, false, memory_order_release);
+    }
+}
+
+void rcu_idle_enter(void) {
+    struct rcu_data* rdp = smp_current_core()->rcu;
+
+    if (rdp->qs_pending) {
+        rdp->qs_pending = false;
+        uint64_t active = atomic_load_explicit(&rcu_state.gp_seq, memory_order_acquire);
+        rcu_report_qs_rnp(rdp->mask, rdp->node, active);
     }
 }

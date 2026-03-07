@@ -148,6 +148,7 @@ static void update_cpu_load(per_cpu_data_t* cpu, size_t now) {
 static void idle_task_entry(void*) {
     while (true) {
         arch_disable_interrupts();
+        rcu_idle_enter();
 
         if (smp_current_core()->reschedule_needed) {
             arch_enable_interrupts();
@@ -348,6 +349,10 @@ void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
         if (!kernel_proc) {
             PANIC("SCHED: failed to create kernel process\n");
         }
+
+        rcu_init();
+        init_srcu_domain(&g_srcu);
+        init_qsbr_domain(&g_qsbr);
     }
 
     cpu->cfs_tree = RB_ROOT_CACHED;
@@ -389,15 +394,12 @@ void scheduler_init(void) {
     sched_class_register(&cfs_sched_class);
     sched_class_register(&idle_sched_class);
 
-    rcu_init();
-    init_srcu_domain(&g_srcu);
-    init_qsbr_domain(&g_qsbr);
-
     initialized = true;
 }
 
 void scheduler_add_thread(thread_t* t) {
     if (!t) {
+        KLOG_DEBUG("Here?");
         return;
     }
 
@@ -434,7 +436,9 @@ void scheduler_add_thread(thread_t* t) {
 }
 
 void scheduler_remove_thread(thread_t* t) {
-    if (!t) return;
+    if (!t) {
+        return;
+    }
 
     per_cpu_data_t* cpu = nullptr;
 
@@ -610,7 +614,9 @@ void scheduler_block(void) {
 }
 
 void scheduler_unblock(thread_t* t) {
-    if (!t) return;
+    if (!t) {
+        return;
+    }
 
     if (t->assigned_cpu == UINT32_MAX) {
         t->assigned_cpu = select_best_cpu(t);
