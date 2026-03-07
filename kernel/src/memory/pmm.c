@@ -562,91 +562,99 @@ void pmm_init(void) {
             continue;
         }
 
-        uintptr_t p = (entry == largest_region) ? boot_ptr : entry->base;
-        if (p == 0) {
-            p += PAGE_SIZE;
+        uintptr_t base_start = (entry == largest_region) ? boot_ptr : entry->base;
+        if (base_start == 0) {
+            base_start += PAGE_SIZE;
         }
 
-        uintptr_t end = entry->base + entry->length;
-        if (p >= end) {
-            continue;
-        }
+        uintptr_t base_end = entry->base + entry->length;
 
-        uintptr_t max_block_size = 1ul << (PMM_MAX_ORDER + PAGE_SHIFT);
+        for (int z = 0; z < active_zone_count; ++z) {
+            struct zone* zone = &zones[z];
 
-        // Walk forward until we hit a perfectly aligned max-order boundary
-        while (p < end && !is_aligned(p, max_block_size)) {
-            size_t pages_left = (end - p) >> PAGE_SHIFT;
-            if (pages_left == 0) {
-                break;
+            uintptr_t z_start_limit = (z == 0) ? 0 : zones[z - 1].limit;
+            uintptr_t z_end_limit   = zone->limit;
+
+            uintptr_t p   = (base_start > z_start_limit) ? base_start : z_start_limit;
+            uintptr_t end = (base_end < z_end_limit) ? base_end : z_end_limit;
+
+            if (p >= end) {
+                continue;
             }
 
-            int max_order   = PMM_MAX_ORDER;
-            int align_order = ctz(p >> PAGE_SHIFT);
-            if (align_order < max_order) {
-                max_order = align_order;
+            uintptr_t max_block_size = 1ul << (PMM_MAX_ORDER + PAGE_SHIFT);
+
+            // Walk forward until we hit a perfectly aligned max-order boundary
+            while (p < end && !is_aligned(p, max_block_size)) {
+                size_t pages_left = (end - p) >> PAGE_SHIFT;
+                if (pages_left == 0) {
+                    break;
+                }
+
+                int max_order   = PMM_MAX_ORDER;
+                int align_order = ctz(p >> PAGE_SHIFT);
+                if (align_order < max_order) {
+                    max_order = align_order;
+                }
+
+                int size_order = 63 - clz(pages_left);
+                if (size_order < max_order) {
+                    max_order = size_order;
+                }
+
+                struct page* page = phys_to_page(p);
+                if (likely(page)) {
+                    set_page_zone(page, z);
+                    buddy_insert(zone, page, max_order);
+
+                    used_bytes -= 1ul << (max_order + PAGE_SHIFT);
+                }
+
+                p += (1ul << (max_order + PAGE_SHIFT));
             }
 
-            int size_order = 63 - clz(pages_left);
-            if (size_order < max_order) {
-                max_order = size_order;
+            // Perfectly aligned, max-size chunks. No need need for bit math
+            while (p + max_block_size <= end) {
+                struct page* page = phys_to_page(p);
+
+                if (likely(page)) {
+                    set_page_zone(page, z);
+                    buddy_insert(zone, page, PMM_MAX_ORDER);
+
+                    used_bytes -= max_block_size;
+                }
+
+                p += max_block_size;
             }
 
-            struct page* page = phys_to_page(p);
-            if (likely(page)) {
-                int z_idx = get_zone_id_from_phys(p);
-                set_page_zone(page, z_idx);
-                buddy_insert(&zones[z_idx], page, max_order);
+            // Clean up whatever small pieces are left at the end
+            while (p < end) {
+                size_t pages_left = (end - p) >> PAGE_SHIFT;
+                if (pages_left == 0) {
+                    break;
+                }
 
-                used_bytes -= (1ul << max_order) * PAGE_SIZE;
+                int max_order   = PMM_MAX_ORDER;
+                int align_order = ctz(p >> PAGE_SHIFT);
+                if (align_order < max_order) {
+                    max_order = align_order;
+                }
+
+                int size_order = 63 - clz(pages_left);
+                if (size_order < max_order) {
+                    max_order = size_order;
+                }
+
+                struct page* page = phys_to_page(p);
+                if (likely(page)) {
+                    set_page_zone(page, z);
+                    buddy_insert(zone, page, max_order);
+
+                    used_bytes -= 1ul << (max_order + PAGE_SHIFT);
+                }
+
+                p += (1ul << (max_order + PAGE_SHIFT));
             }
-
-            p += (1ul << (max_order + PAGE_SHIFT));
-        }
-
-        // Perfectly aligned, max-size chunks. No need need for bit math
-        while (p + max_block_size <= end) {
-            struct page* page = phys_to_page(p);
-
-            if (likely(page)) {
-                int z_idx = get_zone_id_from_phys(p);
-                set_page_zone(page, z_idx);
-                buddy_insert(&zones[z_idx], page, PMM_MAX_ORDER);
-
-                used_bytes -= max_block_size;
-            }
-
-            p += max_block_size;
-        }
-
-        // Clean up whatever small pieces are left at the end
-        while (p < end) {
-            size_t pages_left = (end - p) >> PAGE_SHIFT;
-            if (pages_left == 0) {
-                break;
-            }
-
-            int max_order   = PMM_MAX_ORDER;
-            int align_order = ctz(p >> PAGE_SHIFT);
-            if (align_order < max_order) {
-                max_order = align_order;
-            }
-
-            int size_order = 63 - clz(pages_left);
-            if (size_order < max_order) {
-                max_order = size_order;
-            }
-
-            struct page* page = phys_to_page(p);
-            if (likely(page)) {
-                int z_idx = get_zone_id_from_phys(p);
-                set_page_zone(page, z_idx);
-                buddy_insert(&zones[z_idx], page, max_order);
-
-                used_bytes -= (1ul << max_order) * PAGE_SIZE;
-            }
-
-            p += (1ul << (max_order + PAGE_SHIFT));
         }
     }
 
