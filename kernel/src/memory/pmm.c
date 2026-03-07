@@ -58,14 +58,7 @@ struct zone {
     atomic_size_t free_count[PMM_MAX_ORDER + 1];
 };
 
-struct [[gnu::aligned(CACHE_LINE_SIZE)]] pcp_cache {
-    void* pages[PCP_BATCH_SIZE];
-    int count;
-    irq_lock_t lock;
-};
-
 static struct mem_section* mem_sections = nullptr;
-static struct pcp_cache* pcp_caches     = nullptr;
 static struct zone zones[MAX_ZONES]     = {0};
 static int active_zone_count            = 0;
 
@@ -250,7 +243,7 @@ static void buddy_free_zone(struct zone* zone, struct page* page, int order) {
     release_spinlock(&zone->lock);
 }
 
-static void* pmm_alloc_slow(size_t count) {
+void* pmm_alloc(size_t count) {
     if (unlikely(count == 0)) {
         return nullptr;
     }
@@ -275,46 +268,6 @@ static void* pmm_alloc_slow(size_t count) {
 
     PANIC("Failed to allocate page of count %lu order=%d\n", count, order);
     return nullptr;
-}
-
-static void pcp_refill(struct pcp_cache* cache) {
-    void** dest      = &cache->pages[cache->count];
-    size_t allocated = pmm_alloc_bulk((size_t)(PCP_BATCH_SIZE - cache->count), 0, dest);
-    cache->count += (int)allocated;
-}
-
-static void pcp_drain(struct pcp_cache* cache) {
-    while (cache->count > 0) {
-        pmm_free(cache->pages[--cache->count]);
-    }
-}
-
-void* pmm_alloc(size_t count) {
-    if (count == 1 && pcp_caches) {
-        uint32_t cpu            = arch_get_core_idx();
-        struct pcp_cache* cache = &pcp_caches[cpu];
-
-        acquire_irq_lock(&cache->lock);
-
-        if (likely(cache->count > 0)) {
-            void* ptr = cache->pages[--cache->count];
-            release_irq_lock(&cache->lock);
-            return ptr;
-        }
-
-        pcp_refill(cache);
-
-        if (likely(cache->count > 0)) {
-            void* ptr = cache->pages[--cache->count];
-            release_irq_lock(&cache->lock);
-            return ptr;
-        }
-
-        release_irq_lock(&cache->lock);
-        return nullptr;
-    }
-
-    return pmm_alloc_slow(count);
 }
 
 void* pmm_alloc_aligned(size_t alignment, size_t count) {
@@ -456,32 +409,9 @@ void pmm_dec_ref(void* ptr) {
 
     if (new_val == 0) {
         int order = page->order;
-        // KLOG_TRACE("PMM: Freeing %p (Order %d)\n", ptr, order);
+        int z_idx = get_page_zone_id(page);
 
-        if (order == 0 && pcp_caches) {
-            uint32_t cpu            = arch_get_core_idx();
-            struct pcp_cache* cache = &pcp_caches[cpu];
-
-            acquire_irq_lock(&cache->lock);
-
-            if (likely(cache->count < PCP_BATCH_SIZE)) {
-                cache->pages[cache->count++] = ptr;
-                release_irq_lock(&cache->lock);
-                return;
-            }
-
-            pcp_drain(cache);
-
-            cache->pages[cache->count++] = ptr;
-
-            release_irq_lock(&cache->lock);
-            return;
-        }
-
-        int z_idx         = get_page_zone_id(page);
-        struct zone* zone = &zones[z_idx];
-
-        buddy_free_zone(zone, page, order);
+        buddy_free_zone(&zones[z_idx], page, order);
     }
 }
 
@@ -540,7 +470,9 @@ void pmm_init(void) {
 
     atomic_store_explicit(&stat_total_bytes, total_ram_accum, memory_order_relaxed);
     atomic_store_explicit(&stat_used_bytes, total_ram_accum, memory_order_relaxed);
-    section_count = (highest_usable_addr + SECTION_SIZE - 1) >> SECTION_SHIFT;
+
+    size_t used_bytes = total_ram_accum;
+    section_count     = (highest_usable_addr + SECTION_SIZE - 1) >> SECTION_SHIFT;
 
     KLOG_INFO("PMM: Section count: %lu\n", section_count);
 
@@ -550,26 +482,17 @@ void pmm_init(void) {
         active_zone_count = MAX_ZONES;
     }
 
-    size_t cpu_count  = mp_request.response->cpu_count;
     size_t table_size = section_count * sizeof(struct mem_section);
-    size_t pcp_size   = cpu_count * sizeof(struct pcp_cache);
 
-    if ((table_size + pcp_size) > largest_region->length) {
+    if (table_size > largest_region->length) {
         PANIC("Not enough metadata memory!\n");
     }
 
     uintptr_t boot_ptr = largest_region->base;
-
-    mem_sections = (void*)to_higher_half(boot_ptr);
+    mem_sections       = (void*)to_higher_half(boot_ptr);
     memset(mem_sections, 0, table_size);
+
     boot_ptr += table_size;
-
-    pcp_caches = (void*)to_higher_half(boot_ptr);
-    memset(pcp_caches, 0, pcp_size);
-    boot_ptr += pcp_size;
-
-    KLOG_INFO("PMM: Allocated %lu PCP cache(s) at %p\n", cpu_count, pcp_caches);
-
     boot_ptr = align_up(boot_ptr, PAGE_SIZE);
 
     for (size_t i = 0; i < count; ++i) {
@@ -603,10 +526,15 @@ void pmm_init(void) {
             mem_sections[idx].map = (void*)to_higher_half(boot_ptr);
             boot_ptr += map_size;
 
-            uint64_t template_low = ((uint64_t)idx << 32) | ((uint64_t)PAGE_FLAG_USED << 8);
+            struct page init_page;
+            memset(&init_page, 0, sizeof(init_page));
+            init_page.flags             = PAGE_FLAG_USED;
+            init_page.buddy.section_idx = (uint32_t)idx;
 
-            uint128_t page_template = (uint128_t)template_low;
-            uint128_t* map_page     = (uint128_t*)mem_sections[idx].map;
+            uint128_t page_template;
+            memcpy(&page_template, &init_page, sizeof(page_template));
+
+            uint128_t* map_page = (uint128_t*)mem_sections[idx].map;
             for (size_t p = 0; p < PAGES_PER_SECTION; ++p) {
                 map_page[p] = page_template;
             }
@@ -636,7 +564,7 @@ void pmm_init(void) {
 
         uintptr_t p = (entry == largest_region) ? boot_ptr : entry->base;
         if (p == 0) {
-            p += PAGE_SIZE;  // Protect physical 0x0
+            p += PAGE_SIZE;
         }
 
         uintptr_t end = entry->base + entry->length;
@@ -668,13 +596,9 @@ void pmm_init(void) {
             if (likely(page)) {
                 int z_idx = get_zone_id_from_phys(p);
                 set_page_zone(page, z_idx);
-
                 buddy_insert(&zones[z_idx], page, max_order);
-                atomic_fetch_sub_explicit(
-                    &stat_used_bytes,
-                    (1ul << max_order) * PAGE_SIZE,
-                    memory_order_relaxed
-                );
+
+                used_bytes -= (1ul << max_order) * PAGE_SIZE;
             }
 
             p += (1ul << (max_order + PAGE_SHIFT));
@@ -687,9 +611,9 @@ void pmm_init(void) {
             if (likely(page)) {
                 int z_idx = get_zone_id_from_phys(p);
                 set_page_zone(page, z_idx);
-
                 buddy_insert(&zones[z_idx], page, PMM_MAX_ORDER);
-                atomic_fetch_sub_explicit(&stat_used_bytes, max_block_size, memory_order_relaxed);
+
+                used_bytes -= max_block_size;
             }
 
             p += max_block_size;
@@ -708,22 +632,26 @@ void pmm_init(void) {
                 max_order = align_order;
             }
 
+            int size_order = 63 - clz(pages_left);
+            if (size_order < max_order) {
+                max_order = size_order;
+            }
+
             struct page* page = phys_to_page(p);
             if (likely(page)) {
                 int z_idx = get_zone_id_from_phys(p);
                 set_page_zone(page, z_idx);
-
                 buddy_insert(&zones[z_idx], page, max_order);
-                atomic_fetch_sub_explicit(
-                    &stat_used_bytes,
-                    (1ul << max_order) * PAGE_SIZE,
-                    memory_order_relaxed
-                );
+
+                used_bytes -= (1ul << max_order) * PAGE_SIZE;
             }
 
             p += (1ul << (max_order + PAGE_SHIFT));
         }
     }
+
+    atomic_store_explicit(&stat_total_bytes, total_ram_accum, memory_order_relaxed);
+    atomic_store_explicit(&stat_used_bytes, used_bytes, memory_order_relaxed);
 
     pmm_stats_t stats;
     pmm_get_stats(&stats);
