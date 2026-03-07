@@ -37,6 +37,8 @@ struct slab {
     void* base;
     void* freelist;
 
+    _Atomic(void*) remote_freelist;
+
     _Atomic(uint32_t) in_use;
     uint32_t total;
 };
@@ -54,6 +56,8 @@ struct kmem_cache {
     size_t size;      // Aligned/Padded size
     size_t align;
     size_t flags;
+
+    size_t alloc_order;  // The power-of-two page multiplier
 
     size_t color_off;
     size_t color_max;
@@ -138,7 +142,10 @@ static void format_slab(
 }
 
 static struct slab* slab_grow(kmem_cache_t* cache) {
-    void* phys = pmm_alloc(1);
+    size_t num_pages   = 1ul << cache->alloc_order;
+    size_t alloc_bytes = PAGE_SIZE * num_pages;
+
+    void* phys = pmm_alloc(num_pages);
     if (!phys) {
         if (cache->flags & SLAB_PANIC) {
             PANIC("OOM in slab_grow");
@@ -149,7 +156,7 @@ static struct slab* slab_grow(kmem_cache_t* cache) {
 
     void* page        = (void*)to_higher_half((uintptr_t)phys);
     struct slab* slab = nullptr;
-    size_t available  = PAGE_SIZE;
+    size_t available  = alloc_bytes;
 
     if (likely(!(cache->flags & SLAB_NO_OFFSLAB))) {
         slab = kmem_cache_alloc(&cache_metadata);
@@ -159,9 +166,11 @@ static struct slab* slab_grow(kmem_cache_t* cache) {
             return nullptr;
         }
     } else {
-        slab = (struct slab*)((char*)page + PAGE_SIZE - sizeof(struct slab));
+        slab = (struct slab*)((char*)page + alloc_bytes - sizeof(struct slab));
         available -= sizeof(struct slab);
     }
+
+    atomic_init(&slab->remote_freelist, nullptr);
 
     size_t total_objs = available / cache->size;
 
@@ -209,6 +218,20 @@ static void deactivate_slab(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
 }
 
 static void* slab_alloc_slow(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
+    if (cc && cc->active) {
+        void* remote =
+            atomic_exchange_explicit(&cc->active->remote_freelist, nullptr, memory_order_acq_rel);
+
+        if (remote) {
+            atomic_store(&cc->freelist, remote);
+
+            void* obj = remote;
+            atomic_store(&cc->freelist, *(void**)obj);
+            atomic_fetch_add(&cc->active->in_use, 1);
+            return obj;
+        }
+    }
+
     acquire_spinlock(&cache->lock);
 
     if (cc) {
@@ -285,6 +308,36 @@ kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, voi
 
     dlist_init(&cache->partial);
     create_spinlock(&cache->lock);
+
+    size_t best_order = 0;
+    size_t max_order  = 3;  // Cap at order 3 (8 contiguous pages) to avoid stressing the PMM
+
+    for (size_t order = 0; order <= max_order; ++order) {
+        size_t page_bytes = PAGE_SIZE << order;
+        size_t available  = page_bytes;
+
+        if (flags & SLAB_NO_OFFSLAB) {
+            available -= sizeof(struct slab);
+        }
+
+        size_t objs = available / cache->size;
+        if (objs == 0) {
+            continue;
+        }
+
+        size_t waste = available - (objs * cache->size);
+
+        // If wasted space is less than 12.5% of the allocated block, this order is highly
+        // efficient.
+        if (waste <= (page_bytes / 8)) {
+            best_order = order;
+            break;
+        }
+
+        best_order = order;
+    }
+
+    cache->alloc_order = best_order;
 
     size_t struct_size = sizeof(struct kmem_cache_cpu) * mp_request.response->cpu_count;
     void* cpu_phys     = pmm_alloc(div_roundup(struct_size, PAGE_SIZE));
@@ -386,38 +439,56 @@ void kmem_cache_free(kmem_cache_t* cache, void* obj) {
         return;
     }
 
-    acquire_spinlock(&cache->lock);
+    void* curr_remote = nullptr;
 
-    *(void**)obj          = slab->freelist;
-    slab->freelist        = obj;
+    do {
+        curr_remote  = atomic_load_explicit(&slab->remote_freelist, memory_order_acquire);
+        *(void**)obj = curr_remote;
+    } while (!atomic_compare_exchange_weak_explicit(
+        &slab->remote_freelist,
+        &curr_remote,
+        obj,
+        memory_order_release,
+        memory_order_relaxed
+    ));
+
     uint32_t prior_in_use = atomic_fetch_sub(&slab->in_use, 1);
 
     if (prior_in_use == slab->total) {
         if (slab->total == 1) {
-            struct page* p_desc = virt_to_page((void*)((uintptr_t)slab->base & ~(PAGE_SIZE - 1)));
-            p_desc->flags &= ~PAGE_FLAG_SLAB;
-
-            pmm_free((void*)from_higher_half((uintptr_t)p_desc));
-
-            if (!(cache->flags & SLAB_NO_OFFSLAB)) {
-                kmem_cache_free(&cache_metadata, slab);
-            }
+            goto teardown_slab;
         } else {
+            acquire_spinlock(&cache->lock);
             add_partial_sorted(cache, slab);
+            release_spinlock(&cache->lock);
         }
     } else if (prior_in_use == 1) {
-        dlist_del(&slab->list);
+        acquire_spinlock(&cache->lock);
 
-        struct page* p_desc = virt_to_page((void*)((uintptr_t)slab->base & ~(PAGE_SIZE - 1)));
-        p_desc->flags &= ~PAGE_FLAG_SLAB;
-        pmm_free((void*)from_higher_half((uintptr_t)p_desc));
-
-        if (!(cache->flags & SLAB_NO_OFFSLAB)) {
-            kmem_cache_free(&cache_metadata, slab);
+        if (likely(atomic_load(&slab->in_use) == 0)) {
+            dlist_del(&slab->list);
+            release_spinlock(&cache->lock);
+            goto teardown_slab;
         }
+
+        release_spinlock(&cache->lock);
     }
 
-    release_spinlock(&cache->lock);
+    return;
+teardown_slab: {
+    void* base_page  = (void*)((uintptr_t)slab->base & ~(PAGE_SIZE - 1));
+    size_t num_pages = (cache->alloc_order > 0) ? (1ul << cache->alloc_order) : 1;
+
+    struct page* p_desc = virt_to_page(base_page);
+    p_desc->flags &= ~PAGE_FLAG_SLAB;
+    p_desc->buddy.ref_count = 1;
+
+    pmm_free((void*)from_higher_half((uintptr_t)base_page));
+
+    if (!(cache->flags & SLAB_NO_OFFSLAB)) {
+        kmem_cache_free(&cache_metadata, slab);
+    }
+}
 }
 
 static void init_internal_cache(kmem_cache_t* cache, const char* name, size_t size) {

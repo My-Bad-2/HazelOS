@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "arch.h"
 #include "boot/boot.h"
 #include "boot/limine.h"
 #include "compiler.h"
@@ -467,9 +466,6 @@ void pmm_init(void) {
     }
 
     KLOG_INFO("PMM: Total detected memory: %lu KB\n", total_ram_accum / 1024);
-
-    atomic_store_explicit(&stat_total_bytes, total_ram_accum, memory_order_relaxed);
-    atomic_store_explicit(&stat_used_bytes, total_ram_accum, memory_order_relaxed);
 
     size_t used_bytes = total_ram_accum;
     section_count     = (highest_usable_addr + SECTION_SIZE - 1) >> SECTION_SHIFT;

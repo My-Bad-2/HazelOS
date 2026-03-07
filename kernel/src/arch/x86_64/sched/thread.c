@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "arch.h"
 #include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
@@ -45,7 +44,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     size_t fpu_size = simd_get_save_size();
 
     if (!fpu_cache) {
-        fpu_cache = kmem_cache_create("fpu_cache", fpu_size, 64, SLAB_PANIC, nullptr);
+        fpu_cache = kmem_cache_create("fpu_cache", fpu_size, 64, 0, nullptr);
     }
 
     process_t* proc = t->owner;
