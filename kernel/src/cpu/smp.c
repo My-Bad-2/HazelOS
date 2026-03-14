@@ -129,7 +129,6 @@ void smp_init(void) {
     }
 
     initialized = true;
-
     topology_map_siblings(cpu_datas, num_cpus);
 
     KLOG_INFO("SMP: initialization complete (%zu CPU(s))\n", num_cpus);

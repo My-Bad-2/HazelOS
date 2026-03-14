@@ -38,23 +38,11 @@ static void sleep_on_queue(struct dlist_head* queue) {
 }
 
 static void process_insert_thread(process_t* p, thread_t* t) {
-    struct rb_node** link  = &p->thread_tree.rb_node;
-    struct rb_node* parent = nullptr;
-
-    while (*link) {
-        parent = *link;
-
-        thread_t* entry = rb_entry(parent, thread_t, process_node);
-
-        if (t->tid < entry->tid) {
-            link = &parent->rb_left;
-        } else {
-            link = &parent->rb_right;
-        }
+    if (!p || !t) {
+        return;
     }
 
-    rb_link_node(&t->process_node, parent, link);
-    rb_insert_color(&t->process_node, &p->thread_tree);
+    dlist_add_tail(&t->process_node, &p->thread_list);
 }
 
 static thread_t* thread_create_internal(
@@ -83,6 +71,7 @@ static thread_t* thread_create_internal(
     t->assigned_cpu = UINT32_MAX;
     t->policy       = policy;
 
+    dlist_init(&t->process_node);
     dlist_init(&t->wait_node);
     dlist_init(&t->join_queue);
 
@@ -150,6 +139,7 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
     child->policy       = parent->policy;
     child->sched_class  = parent->sched_class;
 
+    dlist_init(&child->process_node);
     dlist_init(&child->wait_node);
     dlist_init(&child->join_queue);
 
@@ -207,9 +197,9 @@ void thread_destroy(thread_t* t) {
     if (t->owner) {
         acquire_spinlock(&t->owner->lock);
 
-        if (!RB_EMPTY_NODE(&t->process_node)) {
-            rb_erase(&t->process_node, &t->owner->thread_tree);
-            RB_CLEAR_NODE(&t->process_node);
+        if (!dlist_empty(&t->process_node)) {
+            dlist_del(&t->process_node);
+            dlist_init(&t->process_node);
             t->owner->thread_count--;
         }
 

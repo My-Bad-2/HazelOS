@@ -59,8 +59,8 @@ process_t* process_create(const char* name, process_t* parent, bool is_kernel) {
     proc->state = PROCESS_ALIVE;
 
     create_spinlock(&proc->lock);
-    proc->thread_tree = RB_ROOT;
 
+    dlist_init(&proc->thread_list);
     dlist_init(&proc->children_list);
     dlist_init(&proc->sibling_node);
     dlist_init(&proc->wait_queue);
@@ -131,15 +131,15 @@ void process_destroy(process_t* proc) {
     acquire_spinlock(&proc->lock);
     proc->state = PROCESS_DEAD;
 
-    while (proc->thread_tree.rb_node) {
-        struct rb_node* node = rb_first(&proc->thread_tree);
-        thread_t* t          = rb_entry(node, thread_t, process_node);
+    while (!dlist_empty(&proc->thread_list)) {
+        struct dlist_head* node = proc->thread_list.next;
+        thread_t* t             = dlist_entry(node, thread_t, process_node);
 
-        rb_erase(&t->process_node, &proc->thread_tree);
-        RB_CLEAR_NODE(&t->process_node);
-        proc->thread_count--;
+        dlist_del(node);
+        dlist_init(&t->process_node);
 
         release_spinlock(&proc->lock);
+
         thread_destroy(t);
         acquire_spinlock(&proc->lock);
     }

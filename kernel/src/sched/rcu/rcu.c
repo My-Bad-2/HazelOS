@@ -107,7 +107,8 @@ void rcu_init(void) {
     rcu_state.gp_thread->assigned_cpu  = 0;
     rcu_state.gp_thread->affinity_mask = (1 << 0);
 
-    KLOG_DEBUG("thread = %p\n", rcu_state.gp_thread);
+    init_srcu_domain(&g_srcu);
+    init_qsbr_domain(&g_qsbr);
 
     KLOG_INFO("RCU: Subsystem initialized for %u CPUs\n", cpus);
 }
@@ -255,8 +256,6 @@ void synchronize_rcu(void) {
 static void rcu_gp_thread(void*) {
     thread_t* self = smp_current_core()->curr_thread;
 
-    KLOG_DEBUG("rcu_gp_thread_called!\n");
-
     while (true) {
         acquire_spinlock(&rcu_state.gp_lock);
 
@@ -264,7 +263,6 @@ static void rcu_gp_thread(void*) {
             self->state = THREAD_BLOCKED;
             release_spinlock(&rcu_state.gp_lock);
             schedule();
-            KLOG_DEBUG("rcu_gp_thread_called!\n");
             acquire_spinlock(&rcu_state.gp_lock);
         }
 
@@ -295,7 +293,6 @@ static void rcu_gp_thread(void*) {
             self->state = THREAD_BLOCKED;
             release_spinlock(&root->lock);
             schedule();
-            KLOG_DEBUG("rcu_gp_thread_called!\n");
         }
 
         atomic_store_explicit(&rcu_state.completed_gp_seq, seq, memory_order_release);

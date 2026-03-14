@@ -20,25 +20,30 @@ void arch_enable_interrupts(void) {
 }
 
 void arch_pause(void) {
-    asm volatile("sti");
+    asm volatile("pause");
 }
 
-void arch_write(const char* str) {
+void arch_write(int target, const char* str) {
     if (unlikely(!str)) {
         return;
     }
 
-    if (term_is_initialized()) {
+    if (target == TARGET_FRAMEBUFFER && term_is_initialized()) {
         term_write(str);
-    } /* else { */
-    for (size_t i = 0; str[i] != '\0'; ++i) {
-        drivers_uart_writec(COM_PORT1, str[i]);
+    } else {
+        for (size_t i = 0; str[i] != '\0'; ++i) {
+            drivers_uart_writec(COM_PORT1, str[i]);
+        }
     }
-    // }
 }
 
-void arch_writec(char ch) {
-    drivers_uart_writec(COM_PORT1, ch);
+void arch_writec(int target, char ch) {
+    if (target == TARGET_FRAMEBUFFER && term_is_initialized()) {
+        char str[] = {ch, '\0'};
+        term_write(str);
+    } else {
+        drivers_uart_writec(COM_PORT1, ch);
+    }
 }
 
 void arch_halt(bool interrupts) {

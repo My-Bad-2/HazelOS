@@ -349,10 +349,6 @@ void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
         if (!kernel_proc) {
             PANIC("SCHED: failed to create kernel process\n");
         }
-
-        rcu_init();
-        init_srcu_domain(&g_srcu);
-        init_qsbr_domain(&g_qsbr);
     }
 
     cpu->cfs_tree = RB_ROOT_CACHED;

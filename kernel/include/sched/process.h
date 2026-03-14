@@ -49,7 +49,7 @@ typedef struct process {
     pagemap_t map;
 
     spinlock_t lock;
-    struct rb_root thread_tree;
+    struct dlist_head thread_list;
     handle_table_t handle_table;
 
     struct process* parent;
@@ -57,28 +57,6 @@ typedef struct process {
     struct dlist_head sibling_node;
     struct dlist_head wait_queue;
 } process_t;
-
-union sched_entity {
-    struct {
-        size_t vruntime;
-        size_t total_runtime;
-        int nice;
-        int nice_idx;
-    } cfs;
-
-    struct {
-        size_t arrival_time;
-        size_t time_slice;
-        int priority;
-    } rt;
-
-    struct {
-        size_t deadline;
-        size_t period;
-        size_t runtime;
-        size_t remaining;
-    } dl;
-};
 
 #define SCHED_DATA_PAYLOAD_SIZE 32
 typedef struct {
@@ -112,8 +90,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     size_t last_start_time;
 
     struct rb_node rb_node;
-    struct rb_node process_node;
-
+    struct dlist_head process_node;
     struct dlist_head wait_node;   // When this thread is blocked on a queue
     struct dlist_head join_queue;  // Threads waiting for this thread to exit
 

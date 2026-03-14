@@ -17,6 +17,8 @@ void kmain(void) {
 
     drivers_init();
 
+    rcu_init();
+
     KLOG_INFO("Hello, World!\n");
     launch_user_init();
 

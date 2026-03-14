@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define TARGET_UART        1
+#define TARGET_FRAMEBUFFER 2
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -19,8 +22,8 @@ void arch_restore_flags(size_t flags);
 uint32_t arch_get_core_idx(void);
 uint64_t arch_get_random_bytes(void);
 
-void arch_write(const char* str);
-void arch_writec(char ch);
+void arch_write(int target, const char* str);
+void arch_writec(int target, char ch);
 
 void arch_serial_init(void);
 void arch_init(void);
