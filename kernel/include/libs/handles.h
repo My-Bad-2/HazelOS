@@ -10,14 +10,23 @@
 extern "C" {
 #endif
 
-// [32-bit generation] [32-bit index]
-typedef uint64_t handle_t;
+// [12-bit generation] [20-bit index]
+typedef uint32_t handle_t;
 
 #define HANDLE_INVALID 0
 
+// 32-bit split: 20 bits for index (~1 million handles), 12 bits for generation
+#define HANDLE_INDEX_BITS 20
+#define HANDLE_INDEX_MASK ((1U << HANDLE_INDEX_BITS) - 1)
+#define HANDLE_GEN_SHIFT  HANDLE_INDEX_BITS
+#define HANDLE_GEN_MASK   ((1U << (32 - HANDLE_INDEX_BITS)) - 1)
+
 typedef struct [[gnu::aligned(16)]] {
-    void* obj;
-    uint32_t next_free;
+    union {
+        void* obj;
+        uint32_t next_free;
+    };
+
     uint32_t generation;  // Version counter
     uint32_t rights;      // rights
 } handle_slot_t;

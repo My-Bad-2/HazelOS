@@ -39,10 +39,17 @@ handle_t handle_alloc(handle_table_t* table, void* ptr, uint32_t rights) {
     handle_slot_t* slot;
 
     if (table->next_free_idx != (uint32_t)-1) {
-        idx                  = table->next_free_idx;
-        slot                 = (handle_slot_t*)xa_load(&table->xa, idx);
+        idx  = table->next_free_idx;
+        slot = (handle_slot_t*)xa_load(&table->xa, idx);
+
+        uint32_t next        = next;
         table->next_free_idx = slot->next_free;
     } else {
+        if (table->max_idx > HANDLE_INDEX_MASK) {
+            release_spinlock(&table->lock);
+            return HANDLE_INVALID;
+        }
+
         idx = table->max_idx++;
 
         slot = kmem_cache_alloc(handle_cache);
@@ -67,7 +74,7 @@ handle_t handle_alloc(handle_table_t* table, void* ptr, uint32_t rights) {
     table->active_count++;
     release_spinlock(&table->lock);
 
-    return ((uint64_t)gen << 32) | idx;
+    return (gen << HANDLE_GEN_SHIFT) | idx;
 }
 
 void* handle_lookup(handle_table_t* table, handle_t handle, uint32_t rights) {
@@ -75,8 +82,8 @@ void* handle_lookup(handle_table_t* table, handle_t handle, uint32_t rights) {
         return nullptr;
     }
 
-    uint32_t idx     = (uint32_t)(handle & 0xFFFFFFFF);
-    uint32_t req_gen = (uint32_t)(handle >> 32);
+    uint32_t idx     = handle & HANDLE_INDEX_MASK;
+    uint32_t req_gen = (handle >> HANDLE_GEN_SHIFT) & HANDLE_GEN_MASK;
 
     handle_slot_t* slot = (handle_slot_t*)xa_load(&table->xa, idx);
     if (!slot) {
@@ -110,8 +117,8 @@ void* handle_free(handle_table_t* table, handle_t handle) {
         return nullptr;
     }
 
-    uint32_t idx     = (uint32_t)(handle & 0xFFFFFFFF);
-    uint32_t req_gen = (uint32_t)(handle >> 32);
+    uint32_t idx     = handle & HANDLE_INDEX_MASK;
+    uint32_t req_gen = (handle >> HANDLE_GEN_SHIFT) & HANDLE_GEN_MASK;
 
     acquire_spinlock(&table->lock);
 
@@ -124,11 +131,10 @@ void* handle_free(handle_table_t* table, handle_t handle) {
     void* ptr = slot->obj;
     slot->obj = nullptr;
 
-    uint32_t new_gen = slot->generation + 1;
+    uint32_t new_gen = (slot->generation + 1) & HANDLE_GEN_MASK;
     if (new_gen == 0) {
         new_gen = 1;
     }
-
     __atomic_store_n(&slot->generation, new_gen, memory_order_release);
 
     slot->next_free      = table->next_free_idx;
@@ -144,11 +150,10 @@ int handle_get_rights(handle_table_t* table, handle_t handle, uint32_t* rights_o
         return -EBADF;
     }
 
-    uint32_t idx     = (uint32_t)(handle & 0xFFFFFFFF);
-    uint32_t req_gen = (uint32_t)(handle >> 32);
+    uint32_t idx     = handle & HANDLE_INDEX_MASK;
+    uint32_t req_gen = (handle >> HANDLE_GEN_SHIFT) & HANDLE_GEN_MASK;
 
     handle_slot_t* slot = (handle_slot_t*)xa_load(&table->xa, idx);
-
     if (!slot) {
         return -EBADF;
     }

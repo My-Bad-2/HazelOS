@@ -1,7 +1,6 @@
 #include "sched/ipc.h"
 
 #include <errno.h>
-#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>

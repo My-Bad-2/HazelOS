@@ -13,7 +13,7 @@ typedef struct {
     size_t data_size_max;
     size_t data_size_actual;
 
-    uint64_t* handles_buffer;
+    int32_t* handles_buffer;
     size_t handles_max;
     size_t handles_actual;
 } ipc_msg_info_t;
@@ -21,7 +21,7 @@ typedef struct {
 typedef struct {
     uint64_t key;     // Cookie
     uint32_t events;  // Bitmask of what happened
-    uint64_t handle;  // Handle that triggered the event
+    int32_t handle;   // Handle that triggered the event
 } ipc_event_t;
 
 #endif
