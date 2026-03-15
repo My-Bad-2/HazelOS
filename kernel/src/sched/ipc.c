@@ -1,6 +1,7 @@
 #include "sched/ipc.h"
 
 #include <errno.h>
+#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
@@ -17,15 +18,10 @@
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
+#include "sched/syscalls.h"
 #include "uapi/ipc.h"
 
 #define TIMER_FLAG_PERIODIC (1 << 0)
-
-struct ipc_handle_msg {
-    struct dlist_head node;
-    ipc_object_t* object;
-    uint32_t rights;
-};
 
 struct ipc_timer {
     ipc_object_t header;
@@ -47,8 +43,9 @@ struct ipc_shared_mem {
 
 static kmem_cache_t* channel_cache = nullptr;
 static kmem_cache_t* event_cache   = nullptr;
-static kmem_cache_t* msg_cache     = nullptr;
 static kmem_cache_t* timer_cache   = nullptr;
+
+static void sys_ipc_notify_internal(ipc_channel_t* dest);
 
 static inline void thread_queue_init(struct thread_queue* tq) {
     dlist_init(&tq->list);
@@ -96,7 +93,48 @@ static void* get_object(process_t* proc, int32_t handle, ipc_obj_type_t type, ui
         return nullptr;
     }
 
+    atomic_fetch_add(&obj->ref_count, 1);
     return obj;
+}
+
+static void put_object(process_t* proc, ipc_object_t* obj) {
+    if (!obj) {
+        return;
+    }
+
+    if (atomic_fetch_sub(&obj->ref_count, 1) == 1) {
+        if (obj->type == OBJ_CHANNEL) {
+            ipc_channel_t* chan = (ipc_channel_t*)obj;
+
+            if (chan->peer) {
+                acquire_spinlock(&chan->peer->header.lock);
+
+                chan->peer->peer        = nullptr;
+                chan->peer->peer_closed = true;
+                sys_ipc_notify_internal(chan->peer);
+
+                release_spinlock(&chan->peer->header.lock);
+            }
+
+            ipc_msg_t *msg, *n;
+            dlist_for_each_entry_safe(msg, n, &chan->msg_queue, node) {
+                dlist_del(&msg->node);
+
+                for (size_t i = 0; i < msg->num_handles; ++i) {
+                    put_object(proc, msg->handles[i]);
+                }
+
+                kfree(msg);
+            }
+
+            kmem_cache_free(channel_cache, chan);
+        } else if (obj->type == OBJ_TIMER) {
+            timer_cancel(&((struct ipc_timer*)obj)->hw_timer);
+            kmem_cache_free(timer_cache, obj);
+        } else {
+            kfree(obj);
+        }
+    }
 }
 
 static int get_handle_rights(process_t* proc, int32_t handle, uint32_t* rights_out) {
@@ -104,25 +142,12 @@ static int get_handle_rights(process_t* proc, int32_t handle, uint32_t* rights_o
 }
 
 void sys_ipc_close(int32_t handle) {
-    process_t* me = smp_current_core()->curr_thread->owner;
-
+    process_t* me     = smp_current_core()->curr_thread->owner;
     ipc_object_t* obj = handle_free(&me->handle_table, (handle_t)handle);
-
-    if (obj) {
-        if (atomic_fetch_sub(&obj->ref_count, 1) == 1) {
-            if (obj->type == OBJ_CHANNEL) {
-                kmem_cache_free(channel_cache, obj);
-            } else if (obj->type == OBJ_TIMER) {
-                timer_cancel(&((struct ipc_timer*)obj)->hw_timer);
-                kmem_cache_free(timer_cache, obj);
-            } else {
-                kfree(obj);
-            }
-        }
-    }
+    put_object(me, obj);
 }
 
-int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
+int sys_ipc_create_channel(int32_t* handles_out) {
     process_t* me = smp_current_core()->curr_thread->owner;
 
     if (!channel_cache) {
@@ -155,57 +180,36 @@ int sys_ipc_create_channel(int32_t* handles_out, uintptr_t* ring_vaddr_out) {
 
     ch1->header.type = OBJ_CHANNEL;
     create_spinlock(&ch1->header.lock);
+    dlist_init(&ch1->msg_queue);
+    ch1->max_msg_count = 1024;
 
     ch2->header.type = OBJ_CHANNEL;
     create_spinlock(&ch2->header.lock);
+    dlist_init(&ch2->msg_queue);
+    ch2->max_msg_count = 1024;
 
-    // Peer linking
     ch1->peer = ch2;
     ch2->peer = ch1;
 
-    void* kpage = vmalloc(
-        &me->space,
-        nullptr,
-        IPC_RING_SIZE,
-        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER,
-        CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
-    );
-
-    if (!kpage) {
+    int handle1 = alloc_handle(me, &ch1->header, IPC_RIGHTS_ALL);
+    if (handle1 < 0) {
         kmem_cache_free(channel_cache, ch1);
         kmem_cache_free(channel_cache, ch2);
-
-        return -ENOMEM;
-    }
-
-    ipc_ring_t* ring = (ipc_ring_t*)kpage;
-    memset(ring, 0, sizeof(ipc_ring_t));
-
-    ring->capacity = IPC_RING_SIZE - sizeof(ipc_ring_t);
-
-    if (ring_vaddr_out) {
-        *ring_vaddr_out = (uintptr_t)kpage;
-    }
-
-    int handle1 = alloc_handle(me, &ch1->header, IPC_RIGHTS_ALL);
-
-    if (handle1 < 0) {
         return handle1;
     }
 
     int handle2 = alloc_handle(me, &ch2->header, IPC_RIGHTS_ALL);
-
     if (handle2 < 0) {
-        sys_ipc_close(handle1);
+        put_object(me, &ch1->header);
         kmem_cache_free(channel_cache, ch2);
         return handle2;
     }
 
-    handles_out[0] = handle1;
-    handles_out[1] = handle2;
-
-    return handle1;
+    if (handles_out) {
+        handles_out[0] = handle1;
+        handles_out[1] = handle2;
+    }
+    return 0;
 }
 
 int sys_ipc_create_port_set(int32_t* handle_out) {
@@ -220,12 +224,10 @@ int sys_ipc_create_port_set(int32_t* handle_out) {
 
     set->header.type = OBJ_PORT_SET;
     create_spinlock(&set->header.lock);
-
     dlist_init(&set->event_queue);
     thread_queue_init(&set->waiters);
 
     int32_t handle = alloc_handle(me, &set->header, IPC_RIGHTS_ALL);
-
     if (handle == 0) {
         kfree(set);
         return handle;
@@ -241,24 +243,26 @@ int sys_ipc_create_port_set(int32_t* handle_out) {
 int sys_ipc_bind(int32_t port_handle, int32_t chan_handle, uint64_t key) {
     process_t* me = smp_current_core()->curr_thread->owner;
 
-    // We need Write rights on the channel and read rights on the port set
     ipc_port_set_t* set    = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_READ);
     ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
 
     if (!set || !channel) {
+        put_object(me, (ipc_object_t*)set);
+        put_object(me, (ipc_object_t*)channel);
         return -EACCES;
     }
 
     acquire_spinlock(&channel->header.lock);
-
     channel->wait_set = set;
     channel->user_key = key;
-
     release_spinlock(&channel->header.lock);
+
+    put_object(me, (ipc_object_t*)set);
+    put_object(me, (ipc_object_t*)channel);
     return 0;
 }
 
-static void sys_ipc_notify_internal(ipc_channel_t* dest) {
+void sys_ipc_notify_internal(ipc_channel_t* dest) {
     ipc_port_set_t* set = dest->wait_set;
 
     if (!set) {
@@ -268,7 +272,6 @@ static void sys_ipc_notify_internal(ipc_channel_t* dest) {
     acquire_spinlock(&set->header.lock);
 
     ipc_kernel_event_t* event = kmem_cache_alloc(event_cache);
-
     if (!event) {
         release_spinlock(&set->header.lock);
         return;
@@ -276,7 +279,7 @@ static void sys_ipc_notify_internal(ipc_channel_t* dest) {
 
     event->data.key    = dest->user_key;
     event->data.events = IPC_EVENT_READABLE;
-    event->data.handle = 0;  // Unknown to sender
+    event->data.handle = 0;
     event->is_embedded = false;
 
     dlist_add_tail(&event->node, &set->event_queue);
@@ -300,29 +303,39 @@ int sys_ipc_notify(int32_t chan_handle) {
         );
     }
 
-    process_t* me      = smp_current_core()->curr_thread->owner;
-    ipc_channel_t* src = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
+    process_t* me = smp_current_core()->curr_thread->owner;
 
+    ipc_channel_t* src = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
     if (!src) {
         return -EBADF;
     }
 
-    acquire_spinlock(&src->header.lock);
-
     ipc_channel_t* dest = src->peer;
-
-    if (!dest) {
-        release_spinlock(&src->header.lock);
+    if (!dest || src->peer_closed) {
+        put_object(me, (ipc_object_t*)src);
         return -EPIPE;
     }
 
-    acquire_spinlock(&dest->header.lock);
+    ipc_channel_t* first_lock  = (src < dest) ? src : dest;
+    ipc_channel_t* second_lock = (src < dest) ? dest : src;
+
+    acquire_spinlock(&first_lock->header.lock);
+    acquire_spinlock(&second_lock->header.lock);
+
+    if (!src->peer || src->peer_closed) {
+        release_spinlock(&second_lock->header.lock);
+        release_spinlock(&first_lock->header.lock);
+
+        put_object(me, (ipc_object_t*)src);
+        return -EPIPE;
+    }
 
     sys_ipc_notify_internal(dest);
 
-    release_spinlock(&dest->header.lock);
-    release_spinlock(&src->header.lock);
+    release_spinlock(&second_lock->header.lock);
+    release_spinlock(&first_lock->header.lock);
 
+    put_object(me, (ipc_object_t*)src);
     return 0;
 }
 
@@ -334,46 +347,56 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
         return -EACCES;
     }
 
+    int ret     = 0;
+    thread_t* t = smp_current_core()->curr_thread;
+
+    acquire_spinlock(&set->header.lock);
+
     while (true) {
+        thread_queue_push(&set->waiters, t);
+        release_spinlock(&set->header.lock);
+
+        scheduler_sleep((uint32_t)timeout_ms);
+
         acquire_spinlock(&set->header.lock);
 
-        if (!dlist_empty(&set->event_queue)) {
-            struct dlist_head* first  = set->event_queue.next;
-            ipc_kernel_event_t* event = dlist_entry(first, ipc_kernel_event_t, node);
+        if (!dlist_empty(&t->wait_node)) {
+            dlist_del(&t->wait_node);
 
-            if (out_event) {
-                *out_event = event->data;
+            if (dlist_empty(&set->event_queue)) {
+                ret = -EAGAIN;
+                break;
             }
+        }
+    }
 
-            dlist_del(first);
+    if (ret == 0 && !dlist_empty(&set->event_queue)) {
+        struct dlist_head* first  = set->event_queue.next;
+        ipc_kernel_event_t* event = dlist_entry(first, ipc_kernel_event_t, node);
 
-            if (!event->is_embedded) {
-                kmem_cache_free(event_cache, event);
-            }
-
-            release_spinlock(&set->header.lock);
-            return 0;
+        if (out_event) {
+            *out_event = event->data;
         }
 
-        thread_t* t = smp_current_core()->curr_thread;
-        thread_queue_push(&set->waiters, t);
+        dlist_del(first);
 
-        release_spinlock(&set->header.lock);
-        scheduler_sleep((uint32_t)timeout_ms);
+        if (!event->is_embedded) {
+            kmem_cache_free(event_cache, event);
+        }
     }
+
+    release_spinlock(&set->header.lock);
+    put_object(me, (ipc_object_t*)set);
+    return ret;
 }
 
-int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t count) {
-    if (!msg_cache) {
-        msg_cache = kmem_cache_create(
-            "ipc_msg_cache",
-            sizeof(struct ipc_handle_msg),
-            sizeof(struct ipc_handle_msg),
-            0,
-            nullptr
-        );
-    }
-
+int sys_ipc_send_msg(
+    int32_t chan_handle,
+    const void* user_data,
+    size_t size,
+    int32_t* user_handles,
+    size_t num_handles
+) {
     if (!event_cache) {
         event_cache = kmem_cache_create(
             "ipc_event_cache",
@@ -384,93 +407,164 @@ int sys_ipc_send_handles(int32_t chan_handle, int32_t* user_handles, size_t coun
         );
     }
 
-    if (count > 8) {
+    if (size > (UINT16_MAX + 1) || num_handles > IPC_MAX_MSG_HANDLES) {
         return -EINVAL;
     }
 
-    process_t* me          = smp_current_core()->curr_thread->owner;
-    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
-
-    if (!channel) {
+    process_t* me      = smp_current_core()->curr_thread->owner;
+    ipc_channel_t* src = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
+    if (!src) {
         return -EACCES;
     }
 
-    ipc_object_t* objs[8];
-    uint32_t rights[8];
+    ipc_msg_t* msg = kmalloc(sizeof(ipc_msg_t) + size);
+    if (!msg) {
+        put_object(me, (ipc_object_t*)src);
+        return -ENOMEM;
+    }
 
-    for (size_t i = 0; i < count; ++i) {
-        if (get_handle_rights(me, user_handles[i], &rights[i]) < 0) {
-            return -EBADF;
-        }
+    msg->payload_size = size;
+    msg->num_handles  = num_handles;
 
-        // Do we have permission to transfer this handle?
-        if (!(rights[i] & IPC_RIGHT_TRANSFER)) {
+    if (size > 0 && user_data) {
+        copy_from_user(msg->payload, user_data, size);
+    }
+
+    for (size_t i = 0; i < num_handles; ++i) {
+        if (get_handle_rights(me, user_handles[i], &msg->handle_rights[i]) < 0 ||
+            !(msg->handle_rights[i] & IPC_RIGHT_TRANSFER)) {
+            for (size_t j = 0; j < i; ++j) {
+                atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
+            }
+
+            kfree(msg);
+            put_object(me, (ipc_object_t*)src);
             return -EACCES;
         }
 
-        objs[i] = handle_lookup(&me->handle_table, (handle_t)user_handles[i], 0);
-
-        if (!objs[i]) {
-            return -EBADF;
-        }
+        msg->handles[i] = handle_lookup(&me->handle_table, (handle_t)user_handles[i], 0);
+        atomic_fetch_add(&msg->handles[i]->ref_count, 1);
     }
 
-    acquire_spinlock(&channel->header.lock);
-    ipc_channel_t* dest = channel->peer;
+    ipc_channel_t* dest = src->peer;
+    if (!dest || src->peer_closed) {
+        for (size_t i = 0; i < num_handles; ++i) {
+            atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
+        }
 
-    if (!dest) {
-        release_spinlock(&channel->header.lock);
+        kfree(msg);
+        put_object(me, (ipc_object_t*)src);
         return -EPIPE;
     }
 
-    acquire_spinlock(&dest->header.lock);
-    dlist_init(&dest->handle_queue);
+    ipc_channel_t* first_lock  = (src < dest) ? src : dest;
+    ipc_channel_t* second_lock = (src < dest) ? dest : src;
 
-    for (size_t i = 0; i < count; ++i) {
-        struct ipc_handle_msg* msg = kmem_cache_alloc(msg_cache);
+    acquire_spinlock(&first_lock->header.lock);
+    acquire_spinlock(&second_lock->header.lock);
 
-        msg->object = objs[i];
-        msg->rights = rights[i];
+    if (!src->peer || src->peer_closed) {
+        release_spinlock(&second_lock->header.lock);
+        release_spinlock(&first_lock->header.lock);
 
-        atomic_fetch_add(&msg->object->ref_count, 1);
-        dlist_add_tail(&msg->node, &dest->handle_queue);
+        for (size_t i = 0; i < num_handles; ++i) {
+            atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
+        }
+
+        kfree(msg);
+        put_object(me, (ipc_object_t*)src);
+        return -EPIPE;
     }
+
+    if (dest->msg_count >= dest->max_msg_count) {
+        release_spinlock(&second_lock->header.lock);
+        release_spinlock(&first_lock->header.lock);
+
+        for (size_t i = 0; i < num_handles; ++i) {
+            atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
+        }
+
+        kfree(msg);
+        put_object(me, (ipc_object_t*)src);
+        return -EAGAIN;
+    }
+
+    dlist_add_tail(&msg->node, &dest->msg_queue);
+    dest->msg_count++;
 
     sys_ipc_notify_internal(dest);
 
-    release_spinlock(&dest->header.lock);
-    release_spinlock(&channel->header.lock);
+    release_spinlock(&second_lock->header.lock);
+    release_spinlock(&first_lock->header.lock);
 
+    put_object(me, (ipc_object_t*)src);
     return 0;
 }
 
-int sys_ipc_recv_handles(int32_t chan_handle, int32_t* out_handles, size_t max_count) {
-    process_t* me          = smp_current_core()->curr_thread->owner;
-    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_READ);
+int sys_ipc_recv_msg(int32_t chan_handle, ipc_msg_info_t* user_info) {
+    if (!user_info) {
+        return -EINVAL;
+    }
 
+    process_t* me = smp_current_core()->curr_thread->owner;
+
+    ipc_msg_info_t info;
+    if (copy_from_user(&info, user_info, sizeof(ipc_msg_info_t)) > 0) {
+        return -EFAULT;
+    }
+
+    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_READ);
     if (!channel) {
         return -EACCES;
     }
 
     acquire_spinlock(&channel->header.lock);
-
-    int read_count = 0;
-
-    while (read_count < max_count && !dlist_empty(&channel->handle_queue)) {
-        struct dlist_head* node    = channel->handle_queue.next;
-        struct ipc_handle_msg* msg = dlist_entry(node, struct ipc_handle_msg, node);
-        dlist_del(node);
-
-        int32_t new_h = alloc_handle(me, msg->object, msg->rights);
-
-        atomic_fetch_sub(&msg->object->ref_count, 1);
-
-        out_handles[read_count++] = new_h;
-        kmem_cache_free(msg_cache, msg);
+    if (dlist_empty(&channel->msg_queue)) {
+        release_spinlock(&channel->header.lock);
+        put_object(me, (ipc_object_t*)channel);
+        return channel->peer_closed ? -EPIPE : -EAGAIN;
     }
 
+    struct dlist_head* first = channel->msg_queue.next;
+    ipc_msg_t* msg           = dlist_entry(first, ipc_msg_t, node);
+
+    dlist_del(first);
+    channel->msg_count--;
+
     release_spinlock(&channel->header.lock);
-    return read_count;
+
+    size_t copy_size =
+        (msg->payload_size < info.data_size_max) ? msg->payload_size : info.data_size_max;
+    if (copy_size > 0 && info.data_buffer) {
+        copy_to_user(info.data_buffer, msg->payload, copy_size);
+    }
+
+    info.data_size_actual = msg->payload_size;
+
+    size_t handle_copy =
+        (msg->num_handles < info.handles_max) ? msg->num_handles : info.handles_max;
+
+    int32_t temp_handles[IPC_MAX_MSG_HANDLES];
+    for (size_t i = 0; i < handle_copy; ++i) {
+        temp_handles[i] = alloc_handle(me, msg->handles[i], msg->handle_rights[i]);
+        atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
+    }
+
+    if (handle_copy > 0 && info.handles_buffer) {
+        copy_to_user(info.handles_buffer, temp_handles, handle_copy * sizeof(int32_t));
+    }
+
+    for (size_t i = handle_copy; i < msg->num_handles; ++i) {
+        put_object(me, msg->handles[i]);
+    }
+
+    info.handles_actual = msg->num_handles;
+
+    copy_to_user(user_info, &info, sizeof(ipc_msg_info_t));
+
+    kfree(msg);
+    put_object(me, (ipc_object_t*)channel);
+    return (copy_size < msg->payload_size || handle_copy < msg->num_handles) ? -E2BIG : 0;
 }
 
 static void ipc_timer_callback(void* ctx) {
@@ -525,8 +619,8 @@ int sys_ipc_timer_arm(
     }
 
     struct ipc_timer* t = kmem_cache_alloc(timer_cache);
-
     if (!t) {
+        put_object(me, (ipc_object_t*)set);
         return -ENOMEM;
     }
 
@@ -543,7 +637,6 @@ int sys_ipc_timer_arm(
     atomic_fetch_add(&set->header.ref_count, 1);
 
     size_t ticks = (deadline_ms * timer_get_hz()) / 1000;
-
     if (ticks == 0) {
         ticks = 1;
     }
@@ -560,10 +653,12 @@ int sys_ipc_timer_arm(
         timer_cancel(&t->hw_timer);
         kmem_cache_free(timer_cache, t);
         atomic_fetch_sub(&set->header.ref_count, 1);
+        put_object(me, (ipc_object_t*)set);
         return handle;
     }
 
     *handle_out = handle;
+    put_object(me, (ipc_object_t*)set);
     return 0;
 }
 
@@ -593,7 +688,6 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
     size_t page_count   = aligned_size / PAGE_SIZE_SMALL;
 
     struct ipc_shared_mem* shm = kmalloc(sizeof(struct ipc_shared_mem));
-
     if (!shm) {
         return -ENOMEM;
     }
@@ -623,6 +717,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
 
         if (!virt_addr) {
             shm->page_count = i;
+            release_spinlock(&shm->header.lock);
             ipc_shm_free(me, shm);
             return -ENOMEM;
         }
@@ -634,16 +729,15 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
     release_spinlock(&shm->header.lock);
 
     int32_t handle = alloc_handle(me, &shm->header, IPC_RIGHTS_ALL);
-
     if (handle == 0) {
         ipc_shm_free(me, shm);
         return handle;
     }
 
     acquire_spinlock(&shm->header.lock);
-
     *handle_out = handle;
     *vaddr_out  = shm->pages[0];
+    release_spinlock(&shm->header.lock);
 
     return 0;
 }
@@ -677,7 +771,7 @@ int sys_ipc_inspect(int32_t handle, struct ipc_info* info) {
         case OBJ_CHANNEL: {
             ipc_channel_t* chan          = (ipc_channel_t*)obj;
             info->channel.user_key       = chan->user_key;
-            info->channel.queued_handles = dlist_count(&chan->handle_queue);
+            info->channel.queued_handles = chan->msg_count;
 
             if (chan->peer) {
                 info->channel.peer_alive  = true;
@@ -717,5 +811,6 @@ int sys_ipc_inspect(int32_t handle, struct ipc_info* info) {
     }
 
     release_spinlock(&obj->lock);
+    put_object(me, obj);
     return 0;
 }

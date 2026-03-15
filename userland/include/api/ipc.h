@@ -4,8 +4,6 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#define IPC_RING_SIZE   (4096 * 4)
-#define IPC_RING_MASK   (IPC_RING_SIZE - 1)
 #define IPC_MAX_HANDLES 1024
 
 #define IPC_EVENT_READABLE (1 << 0)
@@ -13,22 +11,14 @@
 #define IPC_EVENT_CLOSED   (1 << 2)
 
 typedef struct {
-    uint32_t magic;
-    uint32_t payload_len;
-    uint32_t handle_count;
-    uint32_t flags;
-} ipc_message_header_t;
+    void* data_buffer;
+    size_t data_size_max;
+    size_t data_size_actual;
 
-// Shared Memory Ring Buffer
-typedef struct [[gnu::aligned(64)]] {
-    atomic_uint tail;
-    atomic_uint head;
-    uint32_t capacity;
-
-    uint8_t pad[52];
-
-    uint8_t data[];
-} ipc_ring_t;
+    int32_t* handles_buffer;
+    size_t handles_max;
+    size_t handles_actual;
+} ipc_msg_info_t;
 
 typedef struct {
     uint64_t key;     // Cookie
@@ -36,15 +26,8 @@ typedef struct {
     int32_t handle;   // Handle that triggered the event
 } ipc_event_t;
 
-int ipc_ring_write(ipc_ring_t* ring, const void* src, uint32_t len);
-uint32_t ipc_ring_read(ipc_ring_t* ring, void* dest, uint32_t max_len);
-
-void* ipc_ring_peek(ipc_ring_t* ring, uint32_t* out_len);
-void ipc_ring_advance(ipc_ring_t* ring, uint32_t len);
-
 int ipc_send_msg(
     int32_t chan_handle,
-    ipc_ring_t* ring,
     const void* data,
     uint32_t len,
     int32_t* handles,
@@ -54,7 +37,6 @@ int ipc_send_msg(
 int ipc_recv_msg(
     int32_t chan_handle,
     int32_t port_set,
-    ipc_ring_t* ring,
     void* buffer,
     uint32_t max_len,
     int32_t* handles_out,

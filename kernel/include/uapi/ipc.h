@@ -4,21 +4,19 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#define IPC_RING_SIZE (4096ul * 4)
-
 #define IPC_EVENT_READABLE (1 << 0)
 #define IPC_EVENT_WRITABLE (1 << 1)
 #define IPC_EVENT_CLOSED   (1 << 2)
 
-typedef struct [[gnu::aligned(64)]] {
-    atomic_uint tail;
-    atomic_uint head;
-    uint32_t capacity;
+typedef struct {
+    void* data_buffer;
+    size_t data_size_max;
+    size_t data_size_actual;
 
-    uint8_t pad[52];
-
-    uint8_t data[];
-} ipc_ring_t;
+    int32_t* handles_buffer;
+    size_t handles_max;
+    size_t handles_actual;
+} ipc_msg_info_t;
 
 typedef struct {
     uint64_t key;     // Cookie

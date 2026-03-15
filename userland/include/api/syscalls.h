@@ -24,8 +24,8 @@ extern "C" {
 #define SYS_IPC_NOTIFY          503
 #define SYS_IPC_WAIT            504
 #define SYS_HANDLE_CLOSE        505
-#define SYS_IPC_SEND_HANDLES    506
-#define SYS_IPC_RECV_HANDLES    507
+#define SYS_IPC_SEND_MSG        506
+#define SYS_IPC_RECV_MSG        507
 #define SYS_IPC_TIMER_ARM       508
 #define SYS_IPC_SHM_ALLOC       509
 
@@ -63,17 +63,22 @@ int munmmap(void* addr, size_t length);
 int mprotect(void* addr, size_t length, int prot);
 void* sys_mremap(void* old_address, size_t old_size, size_t new_size, int flags, void* new_address);
 
-int ipc_create_channel(int32_t* handles, uintptr_t* out);
-int ipc_create_port_set(void);
+int ipc_create_channel(int32_t* handles);
+int ipc_create_port_set(int32_t* handle);
 
 int ipc_bind(int32_t port_set, int32_t channel, uint64_t key);
 int ipc_notify(int32_t channel);
 int ipc_wait(int32_t port_set, ipc_event_t* event, int timeout_ms);
 int ipc_handle_close(int32_t handle);
 
-int ipc_send_handles(int32_t handle, int32_t* handles, size_t n);
-int ipc_recv_handles(int32_t handle, int32_t* handles, size_t max_count);
-
+int sys_ipc_send_msg(
+    int32_t chan_handle,
+    const void* user_data,
+    size_t size,
+    int32_t* user_handles,
+    size_t num_handles
+);
+int sys_ipc_recv_msg(int32_t chan_handle, ipc_msg_info_t* info);
 int ipc_timer_arm_oneshot(
     int32_t port_handle,
     uint64_t user_key,

@@ -30,7 +30,7 @@ int64_t sys_write(uint32_t fd, const char* user_buf, size_t count) {
             chunk_size = sizeof(buf) - 1;
         }
 
-        if (copy_from_user(buf, user_buf + bytes_processed, chunk_size) != 0) {
+        if (copy_from_user(buf, user_buf + bytes_processed, chunk_size) > 0) {
             return EFAULT;
         }
 

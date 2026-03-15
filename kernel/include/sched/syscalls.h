@@ -29,9 +29,10 @@ extern "C" {
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 
-bool copy_from_user(void* dest, const void* src, size_t len);
-void syscalls_init(void);
+size_t copy_from_user(void* dest, const void* src, size_t len);
+size_t copy_to_user(void* dest, const void* src, size_t len);
 
+void syscalls_init(void);
 int64_t sys_write(uint32_t fd, const char* user_buf, size_t count);
 
 #ifdef __cplusplus

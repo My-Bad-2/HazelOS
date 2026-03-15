@@ -54,10 +54,6 @@ static uint64_t sys_ipc_close_wrapper(uint64_t handle) {
     return 0;
 }
 
-static uint64_t sys_ipc_recv_handles_wrapper(uint64_t h, uint64_t buf, uint64_t max) {
-    return (uint64_t)sys_ipc_recv_handles((int32_t)h, (int32_t*)buf, (size_t)max);
-}
-
 static syscall_fn_t custom_syscalls[] = {
     (syscall_fn_t)sys_ipc_create_channel,
     (syscall_fn_t)sys_ipc_create_port_set,
@@ -65,8 +61,8 @@ static syscall_fn_t custom_syscalls[] = {
     (syscall_fn_t)sys_ipc_notify,
     (syscall_fn_t)sys_ipc_wait,
     (syscall_fn_t)sys_ipc_close_wrapper,
-    (syscall_fn_t)sys_ipc_send_handles,
-    (syscall_fn_t)sys_ipc_recv_handles_wrapper,
+    (syscall_fn_t)sys_ipc_send_msg,
+    (syscall_fn_t)sys_ipc_recv_msg,
     (syscall_fn_t)sys_ipc_timer_arm,
     (syscall_fn_t)sys_ipc_shm_alloc,
 };

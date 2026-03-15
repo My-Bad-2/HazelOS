@@ -1,5 +1,6 @@
 #include "api/syscalls.h"
 
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -23,8 +24,8 @@ int munmmap(void* addr, size_t length) {
     return (int)syscall(SYS_MUNMAP, (long)addr, (long)length);
 }
 
-int ipc_create_channel(int32_t* handles, uintptr_t* ring_vaddr_out) {
-    long ret = syscall(SYS_IPC_CREATE_CHANNEL, (long)handles, (long)ring_vaddr_out);
+int ipc_create_channel(int32_t* handles) {
+    long ret = syscall(SYS_IPC_CREATE_CHANNEL, (long)handles);
 
     if (ret != 0) {
         return -1;
@@ -33,16 +34,14 @@ int ipc_create_channel(int32_t* handles, uintptr_t* ring_vaddr_out) {
     return 0;
 }
 
-int ipc_create_port_set(void) {
-    int32_t handle;
+int ipc_create_port_set(int32_t* handle) {
+    long ret = syscall(SYS_IPC_CREATE_PORT_SET, (long)handle);
 
-    long ret = syscall(SYS_IPC_CREATE_PORT_SET, (long)&handle);
-
-    if (ret > 0) {
+    if (ret != 0) {
         return -1;
     }
 
-    return handle;
+    return 0;
 }
 
 int ipc_bind(int32_t port_set, int32_t channel, uint64_t key) {
@@ -61,12 +60,29 @@ int ipc_handle_close(int32_t handle) {
     return syscall(SYS_HANDLE_CLOSE, handle);
 }
 
-int ipc_send_handles(int32_t handle, int32_t* handles, size_t n) {
-    return syscall(SYS_IPC_SEND_HANDLES, handle, (long)handles, (long)n);
+int sys_ipc_send_msg(
+    int32_t chan_handle,
+    const void* user_data,
+    size_t size,
+    int32_t* user_handles,
+    size_t num_handles
+) {
+    if (num_handles > IPC_MAX_HANDLES) {
+        return -EINVAL;
+    }
+
+    return syscall(
+        SYS_IPC_SEND_MSG,
+        chan_handle,
+        (long)user_data,
+        (long)size,
+        (long)user_handles,
+        (long)num_handles
+    );
 }
 
-int ipc_recv_handles(int32_t handle, int32_t* handles, size_t max_count) {
-    return syscall(SYS_IPC_RECV_HANDLES, handle, (long)handles, (long)max_count);
+int sys_ipc_recv_msg(int32_t chan_handle, ipc_msg_info_t* info) {
+    return syscall(SYS_IPC_RECV_MSG, chan_handle, (long)info);
 }
 
 int ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* vaddr_out) {
