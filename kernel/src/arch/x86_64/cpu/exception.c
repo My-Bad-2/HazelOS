@@ -185,15 +185,6 @@ int register_external_interrupt_handler(
 
     bool mask = false;
 
-    KLOG_DEBUG(
-        "ISR: registered vector=%u trigger=%d polarity=%d handler=%p ctx=%p\n",
-        vector,
-        trigger,
-        polarity,
-        handler,
-        ctx
-    );
-
     if (gsi != GSI_NONE) {
         configure_irq(vector, trigger, polarity, delivery, dest, dest_apic, mask, gsi);
     }
@@ -231,8 +222,6 @@ int register_external_irq_handler(
 
     configure_legacy_irq(vector, delivery, dest, dest_apic, mask);
 
-    KLOG_DEBUG("ISR: registered vector=%u handler=%p ctx=%p\n", vector, handler, ctx);
-
     return 0;
 }
 
@@ -263,15 +252,6 @@ int register_interrupt_handler(
     isr_registry[vector].trigger  = trigger;
     isr_registry[vector].polarity = polarity;
 
-    KLOG_DEBUG(
-        "ISR: registered vector=%u trigger=%d polarity=%d handler=%p ctx=%p\n",
-        vector,
-        trigger,
-        polarity,
-        handler,
-        ctx
-    );
-
     return 0;
 }
 
@@ -297,7 +277,6 @@ void deregister_external_interrupt_handler(uint8_t vector) {
     bool mask = true;
 
     configure_irq(vector, trigger, polarity, DELIVERY_MODE_FIXED, DESTMODE_PHYSICAL, 0, mask, 0);
-    KLOG_DEBUG("ISR: deregistered vector=%u\n", vector);
 }
 
 void deregister_interrupt_handler(uint8_t vector) {
