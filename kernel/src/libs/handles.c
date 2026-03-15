@@ -2,91 +2,103 @@
 
 #include <errno.h>
 #include <stdatomic.h>
+#include <stdint.h>
 
 #include "libs/spinlock.h"
-#include "memory/memory.h"
-#include "memory/pagemap.h"
-#include "memory/vma.h"
+#include "memory/heap.h"
+
+static kmem_cache_t* handle_cache = nullptr;
 
 void handle_table_init(handle_table_t* table) {
-    create_spinlock(&table->lock);
-
-    table->active_count  = 0;
-    table->next_free_idx = 0;
-
-    table->slots = (handle_slot_t*)vmalloc(
-        kernel_space,
-        nullptr,
-        sizeof(handle_slot_t) * HANDLE_MAX,
-        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
-        CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
-    );
-
-    for (uint32_t i = 0; i < HANDLE_MAX - 1; ++i) {
-        table->slots[i].obj        = nullptr;
-        table->slots[i].generation = 0;
-        table->slots[i].next_free  = i + 1;
+    if (!handle_cache) {
+        handle_cache = kmem_cache_create(
+            "handle_cache",
+            sizeof(handle_slot_t),
+            _Alignof(handle_slot_t),
+            0,
+            nullptr
+        );
     }
 
-    table->slots[HANDLE_MAX - 1].next_free = (uint32_t)(-1);
+    create_spinlock(&table->lock);
+    xa_init(&table->xa, 6);
+
+    table->active_count  = 0;
+    table->next_free_idx = (uint32_t)-1;
+    table->max_idx       = 1;
 }
 
 handle_t handle_alloc(handle_table_t* table, void* ptr, uint32_t rights) {
+    if (!ptr) {
+        return HANDLE_INVALID;
+    }
+
     acquire_spinlock(&table->lock);
 
-    if (table->next_free_idx == (uint32_t)-1) {
-        release_spinlock(&table->lock);
-        return 0;
+    uint32_t idx = table->next_free_idx;
+    handle_slot_t* slot;
+
+    if (table->next_free_idx != (uint32_t)-1) {
+        idx                  = table->next_free_idx;
+        slot                 = (handle_slot_t*)xa_load(&table->xa, idx);
+        table->next_free_idx = slot->next_free;
+    } else {
+        idx = table->max_idx++;
+
+        slot = kmem_cache_alloc(handle_cache);
+        if (!slot) {
+            table->max_idx--;
+            release_spinlock(&table->lock);
+            return HANDLE_INVALID;
+        }
+
+        slot->generation = 1;
+        xa_store(&table->xa, idx, slot);
     }
 
-    uint32_t idx        = table->next_free_idx;
-    handle_slot_t* slot = &table->slots[idx];
+    uint32_t gen = slot->generation;
 
-    table->next_free_idx = slot->next_free;
-
-    uint32_t new_gen = slot->generation;
-
-    if (new_gen == 0) {
-        slot->generation++;
-    }
-
-    slot->obj    = ptr;
     slot->rights = rights;
-    __atomic_store_n(&slot->generation, new_gen, memory_order_release);
+    slot->obj    = ptr;
+
+    atomic_thread_fence(memory_order_release);
+    __atomic_store_n(&slot->generation, gen, memory_order_release);
 
     table->active_count++;
     release_spinlock(&table->lock);
 
-    return (handle_t)((new_gen << 16) | idx);
+    return ((uint64_t)gen << 32) | idx;
 }
 
 void* handle_lookup(handle_table_t* table, handle_t handle, uint32_t rights) {
-    uint32_t idx     = handle & HANDLE_IDX_MASK;
-    uint32_t req_gen = (handle >> 16);
-
-    if (idx >= HANDLE_MAX) {
+    if (handle == HANDLE_INVALID) {
         return nullptr;
     }
 
-    handle_slot_t* slot = &table->slots[idx];
+    uint32_t idx     = (uint32_t)(handle & 0xFFFFFFFF);
+    uint32_t req_gen = (uint32_t)(handle >> 32);
+
+    handle_slot_t* slot = (handle_slot_t*)xa_load(&table->xa, idx);
+    if (!slot) {
+        return nullptr;
+    }
 
     uint32_t cur_gen = __atomic_load_n(&slot->generation, memory_order_acquire);
-
     if (cur_gen != req_gen) {
         return nullptr;
     }
 
-    void* ptr         = slot->obj;
+    void* ptr               = slot->obj;
+    uint32_t current_rights = slot->rights;
+
+    atomic_thread_fence(memory_order_acquire);
     uint32_t post_gen = __atomic_load_n(&slot->generation, memory_order_acquire);
 
-    if (post_gen != req_gen || slot->obj == nullptr) {
+    if (post_gen != req_gen || ptr == nullptr) {
         return nullptr;
     }
 
-    // We check if the handle has all the bits requested in `required_rights`
-    if ((slot->rights & rights) != rights) {
-        // Access denied
+    if ((current_rights & rights) != rights) {
         return nullptr;
     }
 
@@ -94,29 +106,33 @@ void* handle_lookup(handle_table_t* table, handle_t handle, uint32_t rights) {
 }
 
 void* handle_free(handle_table_t* table, handle_t handle) {
-    create_spinlock(&table->lock);
-
-    uint32_t idx     = handle & HANDLE_IDX_MASK;
-    uint32_t req_gen = (handle >> 16);
-
-    if (idx >= HANDLE_MAX) {
+    if (handle == HANDLE_INVALID) {
         return nullptr;
     }
 
-    handle_slot_t* slot = &table->slots[idx];
+    uint32_t idx     = (uint32_t)(handle & 0xFFFFFFFF);
+    uint32_t req_gen = (uint32_t)(handle >> 32);
 
-    if (slot->generation != req_gen) {
+    acquire_spinlock(&table->lock);
+
+    handle_slot_t* slot = (handle_slot_t*)xa_load(&table->xa, idx);
+    if (!slot || slot->generation != req_gen || slot->obj == nullptr) {
         release_spinlock(&table->lock);
         return nullptr;
     }
 
     void* ptr = slot->obj;
-
     slot->obj = nullptr;
+
+    uint32_t new_gen = slot->generation + 1;
+    if (new_gen == 0) {
+        new_gen = 1;
+    }
+
+    __atomic_store_n(&slot->generation, new_gen, memory_order_release);
 
     slot->next_free      = table->next_free_idx;
     table->next_free_idx = idx;
-
     table->active_count--;
 
     release_spinlock(&table->lock);
@@ -124,16 +140,21 @@ void* handle_free(handle_table_t* table, handle_t handle) {
 }
 
 int handle_get_rights(handle_table_t* table, handle_t handle, uint32_t* rights_out) {
-    uint32_t idx = handle & HANDLE_IDX_MASK;
-    uint32_t gen = handle >> 16;
-
-    if (idx >= HANDLE_MAX) {
+    if (handle == HANDLE_INVALID) {
         return -EBADF;
     }
 
-    handle_slot_t* slot = &table->slots[idx];
+    uint32_t idx     = (uint32_t)(handle & 0xFFFFFFFF);
+    uint32_t req_gen = (uint32_t)(handle >> 32);
 
-    if (slot->generation != gen) {
+    handle_slot_t* slot = (handle_slot_t*)xa_load(&table->xa, idx);
+
+    if (!slot) {
+        return -EBADF;
+    }
+
+    uint32_t cur_gen = __atomic_load_n(&slot->generation, memory_order_acquire);
+    if (cur_gen != req_gen || slot->obj == nullptr) {
         return -EBADF;
     }
 

@@ -82,7 +82,7 @@ int sys_ipc_send_msg(
 }
 
 int sys_ipc_recv_msg(int32_t chan_handle, ipc_msg_info_t* info) {
-    return syscall(SYS_IPC_RECV_MSG, chan_handle, (long)info);
+    return syscall(SYS_IPC_RECV_MSG, (long)chan_handle, (long)info);
 }
 
 int ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* vaddr_out) {

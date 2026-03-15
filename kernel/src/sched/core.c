@@ -674,7 +674,9 @@ void scheduler_sleep(size_t ms) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* curr      = cpu->curr_thread;
 
-    if (!curr || curr == cpu->idle_thread) return;
+    if (!curr || curr == cpu->idle_thread) {
+        return;
+    }
 
     size_t now           = get_time_now();
     size_t target_wakeup = now + (ms * 1000000);
@@ -683,18 +685,16 @@ void scheduler_sleep(size_t ms) {
 
     while (true) {
         now = get_time_now();
-        if (now >= target_wakeup) break;
+        if (now >= target_wakeup) {
+            break;
+        }
 
         size_t remaining_ms = (target_wakeup - now) / 1000000;
-        if (remaining_ms == 0) remaining_ms = 1;
+        if (remaining_ms == 0) {
+            remaining_ms = 1;
+        }
 
-        timer_arm_oneshot(
-            &cpu->timer_manager,
-            &curr->sleep_timer,
-            remaining_ms,
-            sleep_callback,
-            curr
-        );
+        timer_arm(&cpu->timer_manager, &curr->sleep_timer, remaining_ms, 0, sleep_callback, curr);
 
         curr->state            = THREAD_SLEEPING;
         cpu->reschedule_needed = true;
@@ -710,7 +710,9 @@ void scheduler_sleep(size_t ms) {
 }
 
 void scheduler_renice(thread_t* t, int nice) {
-    if (!t) return;
+    if (!t) {
+        return;
+    }
 
     if (nice < -20) {
         nice = -20;

@@ -1,3 +1,4 @@
+#include "libs/xarray.h"
 #ifndef KERNEL_LIBS_HANDLES_H
 #define KERNEL_LIBS_HANDLES_H 1
 
@@ -5,29 +6,27 @@
 
 #include "spinlock.h"
 
-#define HANDLE_MAX      (UINT16_MAX + 1)
-#define HANDLE_IDX_MASK (HANDLE_MAX - 1)
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef uint32_t handle_t;
+// [32-bit generation] [32-bit index]
+typedef uint64_t handle_t;
+
+#define HANDLE_INVALID 0
 
 typedef struct [[gnu::aligned(16)]] {
-    union {
-        void* obj;           // Pointer to Process/Thread
-        uint32_t next_free;  // Free list link
-    };
-
+    void* obj;
+    uint32_t next_free;
     uint32_t generation;  // Version counter
     uint32_t rights;      // rights
 } handle_slot_t;
 
 typedef struct {
     spinlock_t lock;
-    handle_slot_t* slots;
+    xarray_t xa;
     uint32_t next_free_idx;
+    uint32_t max_idx;
     int active_count;
 } handle_table_t;
 

@@ -49,18 +49,13 @@ void syscall_init(void) {
 
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
-static uint64_t sys_ipc_close_wrapper(uint64_t handle) {
-    sys_ipc_close((int32_t)handle);
-    return 0;
-}
-
 static syscall_fn_t custom_syscalls[] = {
     (syscall_fn_t)sys_ipc_create_channel,
     (syscall_fn_t)sys_ipc_create_port_set,
     (syscall_fn_t)sys_ipc_bind,
     (syscall_fn_t)sys_ipc_notify,
     (syscall_fn_t)sys_ipc_wait,
-    (syscall_fn_t)sys_ipc_close_wrapper,
+    (syscall_fn_t)sys_ipc_close,
     (syscall_fn_t)sys_ipc_send_msg,
     (syscall_fn_t)sys_ipc_recv_msg,
     (syscall_fn_t)sys_ipc_timer_arm,

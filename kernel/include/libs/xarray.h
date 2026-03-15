@@ -1,4 +1,3 @@
-#include "memory/heap.h"
 #ifndef KERNEL_LIBS_XARRAY_H
 #define KERNEL_LIBS_XARRAY_H 1
 
@@ -6,6 +5,7 @@
 #include <stdint.h>
 
 #include "libs/spinlock.h"
+#include "memory/heap.h"
 
 #define XA_TAG_MASK  0x3ul
 #define XA_MAX_DEPTH 64

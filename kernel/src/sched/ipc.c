@@ -642,9 +642,9 @@ int sys_ipc_timer_arm(
     }
 
     if (flags & TIMER_FLAG_PERIODIC) {
-        timer_arm_periodic(mgr, &t->hw_timer, ticks, ipc_timer_callback, t);
+        timer_arm(mgr, &t->hw_timer, 0, ticks, ipc_timer_callback, t);
     } else {
-        timer_arm_oneshot(mgr, &t->hw_timer, ticks, ipc_timer_callback, t);
+        timer_arm(mgr, &t->hw_timer, ticks, 0, ipc_timer_callback, t);
     }
 
     int32_t handle = alloc_handle(me, &t->header, IPC_RIGHTS_ALL);
@@ -800,8 +800,7 @@ int sys_ipc_inspect(int32_t handle, struct ipc_info* info) {
         case OBJ_TIMER: {
             struct ipc_timer* t = (struct ipc_timer*)obj;
 
-            info->timer.deadline  = t->hw_timer.expires_at;
-            info->timer.is_active = (t->hw_timer.node.rb_parent->rb_color != 0);
+            info->timer.deadline = t->hw_timer.expires_at;
             break;
         }
 
