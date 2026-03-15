@@ -894,7 +894,7 @@ int arch_mmu_protect(
 
     while (curr_virt < end_virt) {
         uintptr_t curr_phys = map->phys_root;
-        uint64_t* pte       = NULL;
+        uint64_t* pte       = nullptr;
         size_t step_size    = PAGE_SIZE_SMALL;
         bool is_huge        = false;
 

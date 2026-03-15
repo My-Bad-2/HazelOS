@@ -137,7 +137,7 @@ void lapic_init(void) {
         uintptr_t phys_base = apic_base_msr & X86_PAGE_ADDRESS_MASK;
         virt_base           = vmalloc(
             kernel_space,
-            NULL,
+            nullptr,
             PAGE_SIZE_SMALL,
             VMM_FLAG_MMIO,
             CACHE_MMIO,
@@ -195,7 +195,7 @@ void lapic_init(void) {
     register_interrupt_handler(
         INTERRUPT_APIC_TIMER,
         apic_timer_handler,
-        NULL,
+        nullptr,
         IRQ_TRIGGER_EDGE,
         IRQ_POLARITY_HIGH
     );
@@ -203,7 +203,7 @@ void lapic_init(void) {
     register_interrupt_handler(
         INTERRUPT_APIC_ERROR,
         apic_error_handler,
-        NULL,
+        nullptr,
         IRQ_TRIGGER_EDGE,
         IRQ_POLARITY_HIGH
     );

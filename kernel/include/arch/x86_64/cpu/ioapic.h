@@ -10,8 +10,8 @@ extern "C" {
 #endif
 
 void ioapic_init(void);
-bool ioapic_is_valid_irq(uint32_t gsi);
 bool ioapic_is_initialized(void);
+bool ioapic_is_valid_irq(uint32_t gsi);
 
 void ioapic_configure_irq(
     uint32_t gsi,
@@ -23,8 +23,7 @@ void ioapic_configure_irq(
     uint8_t vector,
     bool mask
 );
-void ioapic_mask_irq(uint32_t gsi, bool mask);
-void ioapic_configure_irq_vector(uint32_t gsi, uint8_t vector);
+
 void ioapic_configure_legacy_irq(
     uint8_t irq,
     apic_interrupt_delivery_mode_t delivery,
@@ -34,7 +33,10 @@ void ioapic_configure_legacy_irq(
     bool mask
 );
 
+void ioapic_mask_irq(uint32_t gsi, bool mask);
+void ioapic_configure_irq_vector(uint32_t gsi, uint8_t vector);
 void ioapic_send_eoi(uint32_t gsi, uint8_t vector);
+
 uint32_t ioapic_get_gsi(uint8_t irq);
 
 #ifdef __cplusplus

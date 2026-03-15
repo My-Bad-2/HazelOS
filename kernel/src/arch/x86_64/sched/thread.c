@@ -37,7 +37,7 @@ struct user_stack_layout {
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     if (!t) {
         errno = EINVAL;
-        KLOG_WARN("THREAD: init called with null thread\n");
+        KLOG_WARN("THREAD: init called with nullptr thread\n");
         return false;
     }
 
@@ -146,7 +146,7 @@ void arch_thread_destroy(thread_t* t) {
 void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf) {
     if (!child || !tf) {
         errno = EINVAL;
-        KLOG_WARN("THREAD: clone called with null args child=%p tf=%p\n", child, tf);
+        KLOG_WARN("THREAD: clone called with nullptr args child=%p tf=%p\n", child, tf);
         return;
     }
 
@@ -181,7 +181,7 @@ void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf) {
 void thread_save_fpu(thread_t* t) {
     if (!t) {
         errno = EINVAL;
-        KLOG_WARN("THREAD: save_fpu called with null thread\n");
+        KLOG_WARN("THREAD: save_fpu called with nullptr thread\n");
         return;
     }
 
@@ -193,7 +193,7 @@ void thread_save_fpu(thread_t* t) {
 void thread_restore_fpu(thread_t* t) {
     if (!t) {
         errno = EINVAL;
-        KLOG_WARN("THREAD: restore_fpu called with null thread\n");
+        KLOG_WARN("THREAD: restore_fpu called with nullptr thread\n");
         return;
     }
 

@@ -112,7 +112,7 @@ static inline void slist_push_atomic(struct slist_node* new_node, struct slist_h
 }
 
 static inline struct slist_node* slist_pop_all_atomic(struct slist_head* head) {
-    return __atomic_exchange_n(&head->first, NULL, memory_order_acquire);
+    return __atomic_exchange_n(&head->first, nullptr, memory_order_acquire);
 }
 
 #define slist_for_each(pos, head) for ((pos) = (head)->first; pos; (pos) = (pos)->next)

@@ -19,11 +19,9 @@
 
 #include "internal/ioapic.h"
 
-#define NUM_IRQS 16
-
-#define PORT_ADDRESS 0x22
-#define PORT_DATA    0x23
-
+#define NUM_IRQS               16
+#define PORT_ADDRESS           0x22
+#define PORT_DATA              0x23
 #define IMCR_PORT_ADDRESS      0x70
 #define IMCR_PASS_THROUGH_APIC 0x01
 
@@ -53,125 +51,36 @@ static inline void imcr_connect_to_ioapic(void) {
     io_write8(PORT_DATA, IMCR_PASS_THROUGH_APIC);
 }
 
-static void map_ioapic_mmio(ioapic_t* ioapic, size_t index) {
-    uintptr_t phys_base = align_down((uintptr_t)ioapic->desc.address, PAGE_SIZE_SMALL);
-
-    ASSERT(((uintptr_t)ioapic->desc.address + IOAPIC_WINDOW_SIZE) <= (phys_base + PAGE_SIZE_SMALL));
-
-    void* virt = nullptr;
-
-    for (size_t i = 0; i < index; ++i) {
-        uintptr_t other_phys = align_down(ioapics[i].desc.address, PAGE_SIZE_SMALL);
-        if (other_phys == phys_base) {
-            virt = (void*)align_down((uintptr_t)ioapics[i].virt_base, PAGE_SIZE_SMALL);
-            break;
-        }
-    }
-
-    if (!virt) {
-        virt = vmalloc(
-            kernel_space,
-            nullptr,
-            PAGE_SIZE_SMALL,
-            VMM_FLAG_MMIO | VMM_FLAG_DEMAND,
-            CACHE_MMIO,
-            PAGE_SIZE_SMALL
-        );
-
-        if (!virt) {
-            errno = ENOMEM;
-            PANIC("IOAPIC: failed to allocate MMIO page for ioapic=%zu errno=%d\n", index, errno);
-        }
-
-        pagemap_map_args_t args = {
-            .virt_addr = virt,
-            .phys_addr = (void*)phys_base,
-            PAGE_SIZE_SMALL,
-            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
-            CACHE_MMIO,
-            PAGE_SIZE_SMALL
-        };
-
-        pagemap_t* map = vmm_get_kernel_pagemap();
-
-        if (!pagemap_map(map, &args)) {
-            errno = EIO;
-            PANIC("IOAPIC: failed to map MMIO phys=0x%lx -> %p errno=%d\n", phys_base, virt, errno);
-        }
-
-        KLOG_DEBUG(
-            "IOAPIC: mapped phys=0x%lx -> %p cache=%d flags=0x%x\n",
-            phys_base,
-            virt,
-            CACHE_MMIO,
-            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL
-        );
-    }
-
-    uintptr_t offset  = (uintptr_t)ioapic->desc.address - phys_base;
-    ioapic->virt_base = (void*)((uintptr_t)virt + offset);
-}
-
 static inline uint32_t ioapic_read(ioapic_t* ioapic, uint8_t reg) {
-    ASSERT(ioapic);
-
-    uintptr_t cmd  = (uintptr_t)ioapic->virt_base + IOAPIC_IOREGSEL;
-    uintptr_t data = (uintptr_t)ioapic->virt_base + IOAPIC_IOWIN;
-
-    mmio_write32((void*)cmd, reg);
-    return mmio_read32((void*)data);
+    mmio_write32((void*)((uintptr_t)ioapic->virt_base + IOAPIC_IOREGSEL), reg);
+    return mmio_read32((void*)((uintptr_t)ioapic->virt_base + IOAPIC_IOWIN));
 }
 
 static inline void ioapic_write(ioapic_t* ioapic, uint8_t reg, uint32_t val) {
-    ASSERT(ioapic);
-
-    uintptr_t cmd  = (uintptr_t)ioapic->virt_base + IOAPIC_IOREGSEL;
-    uintptr_t data = (uintptr_t)ioapic->virt_base + IOAPIC_IOWIN;
-
-    mmio_write32((void*)cmd, reg);
-    mmio_write32((void*)data, val);
+    mmio_write32((void*)((uintptr_t)ioapic->virt_base + IOAPIC_IOREGSEL), reg);
+    mmio_write32((void*)((uintptr_t)ioapic->virt_base + IOAPIC_IOWIN), val);
 }
 
-static uint64_t ioapic_read_redirection_entry(ioapic_t* ioapic, uint32_t gsi) {
-    ASSERT(gsi >= ioapic->desc.gsi_base);
+static ioapic_rte_t ioapic_read_rte(ioapic_t* ioapic, uint32_t gsi) {
     uint32_t offset = gsi - ioapic->desc.gsi_base;
-    ASSERT(offset <= ioapic->max_redirection_entry);
+    uint8_t reg     = (uint8_t)IOAPIC_REG_RTE(offset);
 
-    uint8_t reg = (uint8_t)IOAPIC_REG_RTE(offset);
-
-    uint64_t res = ioapic_read(ioapic, reg);
-    res |= ((uint64_t)ioapic_read(ioapic, (uint8_t)(reg + 1)) << 32);
-
-    return res;
+    ioapic_rte_t rte;
+    rte.low  = ioapic_read(ioapic, reg);
+    rte.high = ioapic_read(ioapic, reg + 1);
+    return rte;
 }
 
-static void ioapic_write_redirection_entry(ioapic_t* ioapic, uint32_t gsi, uint64_t val) {
-    ASSERT(gsi >= ioapic->desc.gsi_base);
+static void ioapic_write_rte(ioapic_t* ioapic, uint32_t gsi, ioapic_rte_t rte) {
     uint32_t offset = gsi - ioapic->desc.gsi_base;
-    ASSERT(offset <= ioapic->max_redirection_entry);
+    uint8_t reg     = (uint8_t)IOAPIC_REG_RTE(offset);
 
-    uint8_t reg = (uint8_t)IOAPIC_REG_RTE(offset);
-    ioapic_write(ioapic, reg, val & 0xffffffff);
-    ioapic_write(ioapic, (uint8_t)(reg + 1), (val >> 32) & 0xffffffff);
-}
-
-static void init_ioapic_entries(ioapic_t* ioapic) {
-    acquire_interrupt_lock(&lock);
-
-    uint32_t ver                  = ioapic_read(ioapic, IOAPIC_REG_VER);
-    ioapic->version               = IOAPIC_VER_VERSION(ver);
-    ioapic->max_redirection_entry = IOAPIC_VER_MAX_REDIR_ENTRY(ver);
-
-    for (uint32_t j = 0; j <= ioapic->max_redirection_entry; ++j) {
-        uint32_t gsi = j + ioapic->desc.gsi_base;
-        ioapic_write_redirection_entry(ioapic, gsi, IOAPIC_RTE_MASKED);
-    }
-
-    release_interrupt_lock(&lock);
+    ioapic_write(ioapic, reg, rte.low);
+    ioapic_write(ioapic, reg + 1, rte.high);
 }
 
 static ioapic_t* find_ioapic_for_gsi(uint32_t gsi) {
-    for (uint32_t i = 0; i < ioapic_count; ++i) {
+    for (size_t i = 0; i < ioapic_count; ++i) {
         uint32_t start = ioapics[i].desc.gsi_base;
         uint32_t end   = start + ioapics[i].max_redirection_entry;
 
@@ -185,90 +94,57 @@ static ioapic_t* find_ioapic_for_gsi(uint32_t gsi) {
 
 static ioapic_t* require_ioapic(uint32_t gsi) {
     ioapic_t* ioapic = find_ioapic_for_gsi(gsi);
-
     if (!ioapic) {
-        errno = ENOENT;
-        PANIC("IOAPIC: could not resolve global IRQ gsi=%u errno=%d\n", gsi, errno);
+        PANIC("IOAPIC: could not resolve global IRQ gsi=%u\n", gsi);
     }
 
     return ioapic;
 }
 
-static void parse_iso_entry(
-    struct acpi_madt_interrupt_source_override* iso,
-    uint8_t* irq,
-    uint32_t* gsi,
-    irq_polarity_t* polarity,
-    irq_trigger_mode_t* trigger
-) {
-    if (!iso) {
-        return;
-    }
+static void map_ioapic_mmio(ioapic_t* ioapic, size_t index) {
+    uintptr_t phys_base = align_down((uintptr_t)ioapic->desc.address, PAGE_SIZE_SMALL);
+    void* virt          = NULL;
 
-    if (iso->bus != 0) {
-        errno = EINVAL;
-        PANIC("IOAPIC: invalid bus for interrupt override bus=%u errno=%d\n", iso->bus, errno);
-    }
-
-    if (irq) {
-        *irq = iso->source;
-    }
-
-    if (gsi) {
-        *gsi = iso->gsi;
-    }
-
-    // Flag is in format: 0xTPP (T=Trigger, P=Polarity)
-    uint16_t flags = iso->flags;
-
-    if (polarity) {
-        uint8_t pol = flags & ACPI_MADT_POLARITY_MASK;
-
-        switch (pol) {
-            case ACPI_MADT_POLARITY_ACTIVE_HIGH:
-                *polarity = IRQ_POLARITY_HIGH;
-                break;
-            case ACPI_MADT_POLARITY_ACTIVE_LOW:
-                *polarity = IRQ_POLARITY_LOW;
-                break;
-            default:
-                break;
+    // Check if another IOAPIC shares the same page block to avoid duplicate mappings
+    for (size_t i = 0; i < index; ++i) {
+        if (align_down(ioapics[i].desc.address, PAGE_SIZE_SMALL) == phys_base) {
+            virt = (void*)align_down((uintptr_t)ioapics[i].virt_base, PAGE_SIZE_SMALL);
+            break;
         }
     }
 
-    if (trigger) {
-        uint8_t trig = flags & ACPI_MADT_TRIGGERING_MASK;
+    if (!virt) {
+        virt = vmalloc(
+            kernel_space,
+            NULL,
+            PAGE_SIZE_SMALL,
+            VMM_FLAG_MMIO | VMM_FLAG_DEMAND,
+            CACHE_MMIO,
+            PAGE_SIZE_SMALL
+        );
 
-        switch (trig) {
-            case ACPI_MADT_TRIGGERING_EDGE:
-                *trigger = IRQ_TRIGGER_EDGE;
-                break;
-            case ACPI_MADT_TRIGGERING_LEVEL:
-                *trigger = IRQ_TRIGGER_LEVEL;
-                break;
-            default:
-                break;
+        if (!virt) {
+            KLOG_INIT_FAIL();
+            PANIC("IOAPIC: failed to allocate MMIO page for ioapic=%zu", index);
+        }
+
+        pagemap_map_args_t args = {
+            .virt_addr = virt,
+            .phys_addr = (void*)phys_base,
+            .length    = PAGE_SIZE_SMALL,
+            .flags     = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
+            .cache     = CACHE_MMIO,
+            .page_size = PAGE_SIZE_SMALL
+        };
+
+        if (!pagemap_map(vmm_get_kernel_pagemap(), &args)) {
+            KLOG_INIT_FAIL();
+            PANIC("IOAPIC: failed to map MMIO phys=0x%lx -> %p", phys_base, virt);
         }
     }
-}
 
-static void resolve_legacy_irq(
-    uint8_t irq,
-    uint32_t* gsi,
-    irq_trigger_mode_t* trigger,
-    irq_polarity_t* polarity
-) {
-    ASSERT(gsi && trigger && polarity);
-
-    *gsi      = irq;
-    *trigger  = IRQ_TRIGGER_EDGE;
-    *polarity = IRQ_POLARITY_HIGH;
-
-    if (overrides[irq].remapped) {
-        *gsi      = overrides[irq].gsi;
-        *trigger  = overrides[irq].trigger;
-        *polarity = overrides[irq].polarity;
-    }
+    uintptr_t offset  = (uintptr_t)ioapic->desc.address - phys_base;
+    ioapic->virt_base = (void*)((uintptr_t)virt + offset);
 }
 
 void ioapic_init(void) {
@@ -276,116 +152,100 @@ void ioapic_init(void) {
         return;
     }
 
-    ioapic_count = acpi_get_ioapic_count();
+    KLOG_INIT_START("IOAPIC");
 
+    ioapic_count = acpi_get_ioapic_count();
     if (ioapic_count == 0) {
-        KLOG_DEBUG("IOAPIC: no IOAPICs detected, skipping init\n");
+        KLOG_INIT_FAIL();
+        KLOG_DEBUG("IOAPIC: no IOAPICs detected\n");
         return;
     }
 
-    KLOG_DEBUG("IOAPIC: init start count=%zu\n", ioapic_count);
+    create_interrupt_lock(&lock);
+    imcr_connect_to_ioapic();
 
     ioapics = kmalloc(sizeof(ioapic_t) * ioapic_count);
-
     if (!ioapics) {
-        errno = ENOMEM;
-        PANIC("IOAPIC: failed to allocate ioapic array count=%zu errno=%d\n", ioapic_count, errno);
+        KLOG_INIT_FAIL();
+        PANIC("IOAPIC: failed to allocate memory");
     }
 
-    struct acpi_madt_ioapic* descs                   = acpi_get_ioapics();
-    struct acpi_madt_interrupt_source_override* isos = acpi_get_isos();
-    size_t iso_count                                 = acpi_get_iso_count();
-
-    imcr_connect_to_ioapic();
+    struct acpi_madt_ioapic* descs = acpi_get_ioapics();
 
     for (size_t i = 0; i < ioapic_count; ++i) {
         ioapics[i].desc = descs[i];
         map_ioapic_mmio(&ioapics[i], i);
-        init_ioapic_entries(&ioapics[i]);
 
-        uintptr_t phys_base = align_down((uintptr_t)ioapics[i].desc.address, PAGE_SIZE_SMALL);
+        uint32_t ver                     = ioapic_read(&ioapics[i], IOAPIC_REG_VER);
+        ioapics[i].version               = IOAPIC_VER_VERSION(ver);
+        ioapics[i].max_redirection_entry = IOAPIC_VER_MAX_REDIR_ENTRY(ver);
 
-        KLOG_INFO(
-            "IOAPIC: id=%u ver=0x%x max_redir=%u gsi_base=%u mapped=%p phys=0x%lx\n",
-            ioapics[i].desc.id,
-            ioapics[i].version,
-            ioapics[i].max_redirection_entry,
-            ioapics[i].desc.gsi_base,
-            ioapics[i].virt_base,
-            phys_base
-        );
-    }
-
-    int isa = 0;
-    for (int i = 0; i < NUM_IRQS; ++i) {
-        if (isa >= iso_count) {
-            break;
-        }
-
-        struct iso_override* override                   = &overrides[i];
-        struct acpi_madt_interrupt_source_override* iso = &isos[isa];
-
-        if (iso->source == i) {
-            override->remapped = true;
-
-            parse_iso_entry(
-                &isos[isa],
-                &override->irq,
-                &override->gsi,
-                &override->polarity,
-                &override->trigger
-            );
-
-            KLOG_DEBUG(
-                "IOAPIC: ISO irq=%u -> gsi=%u trig=%d pol=%d\n",
-                override->irq,
-                override->gsi,
-                override->trigger,
-                override->polarity
-            );
-
-            isa++;
+        for (uint32_t j = 0; j <= ioapics[i].max_redirection_entry; ++j) {
+            ioapic_rte_t rte = {.raw = 0};
+            rte.mask         = 1;
+            ioapic_write_rte(&ioapics[i], j + ioapics[i].desc.gsi_base, rte);
         }
     }
 
-    KLOG_INFO("IOAPIC: initialization complete count=%zu\n", ioapic_count);
+    struct acpi_madt_interrupt_source_override* isos = acpi_get_isos();
+    size_t iso_count                                 = acpi_get_iso_count();
+
+    for (size_t i = 0; i < iso_count; i++) {
+        struct acpi_madt_interrupt_source_override* iso = &isos[i];
+
+        if (iso->source >= NUM_IRQS || iso->bus != 0) {
+            continue;
+        }
+
+        struct iso_override* override = &overrides[iso->source];
+        override->remapped            = true;
+        override->irq                 = iso->source;
+        override->gsi                 = iso->gsi;
+
+        uint16_t flags     = iso->flags;
+        override->polarity = (flags & ACPI_MADT_POLARITY_MASK) == ACPI_MADT_POLARITY_ACTIVE_LOW
+                                 ? IRQ_POLARITY_LOW
+                                 : IRQ_POLARITY_HIGH;
+        override->trigger  = (flags & ACPI_MADT_TRIGGERING_MASK) == ACPI_MADT_TRIGGERING_LEVEL
+                                 ? IRQ_TRIGGER_LEVEL
+                                 : IRQ_TRIGGER_EDGE;
+    }
+
+    KLOG_INIT_OK();
+}
+
+bool ioapic_is_initialized(void) {
+    return ioapics != NULL;
 }
 
 bool ioapic_is_valid_irq(uint32_t gsi) {
-    return find_ioapic_for_gsi(gsi) != nullptr;
+    return find_ioapic_for_gsi(gsi) != NULL;
+}
+
+uint32_t ioapic_get_gsi(uint8_t irq) {
+    return overrides[irq].remapped ? overrides[irq].gsi : irq;
+}
+
+void ioapic_mask_irq(uint32_t gsi, bool mask) {
+    ioapic_t* ioapic = require_ioapic(gsi);
+    acquire_interrupt_lock(&lock);
+
+    ioapic_rte_t rte = ioapic_read_rte(ioapic, gsi);
+    rte.mask         = mask ? 1 : 0;
+    ioapic_write_rte(ioapic, gsi, rte);
+
+    release_interrupt_lock(&lock);
 }
 
 void ioapic_send_eoi(uint32_t gsi, uint8_t vector) {
     ioapic_t* ioapic = require_ioapic(gsi);
 
-    ASSERT(ioapic->version >= IOAPIC_EOIR_MIN_VERSION);
-
-    acquire_interrupt_lock(&lock);
-
-    uintptr_t cmd = (uintptr_t)ioapic->virt_base + IOAPIC_EOIR_REG;
-    mmio_write32((void*)cmd, vector);
-
-    release_interrupt_lock(&lock);
-}
-
-void ioapic_mask_irq(uint32_t gsi, bool mask) {
-    ioapic_t* ioapic = require_ioapic(gsi);
-
-    acquire_interrupt_lock(&lock);
-
-    uint64_t val = ioapic_read_redirection_entry(ioapic, gsi);
-
-    if (mask) {
-        val |= IOAPIC_RTE_MASKED;
-    } else {
-        val &= ~IOAPIC_RTE_MASKED;
+    // Only IOAPICs >= version 0x20 support the EOIR register.
+    if (ioapic->version >= IOAPIC_EOIR_MIN_VERSION) {
+        acquire_interrupt_lock(&lock);
+        mmio_write32((void*)((uintptr_t)ioapic->virt_base + IOAPIC_EOIR_REG), vector);
+        release_interrupt_lock(&lock);
     }
-
-    ioapic_write_redirection_entry(ioapic, gsi, val);
-
-    release_interrupt_lock(&lock);
-
-    KLOG_TRACE("IOAPIC: %smasked gsi=%u\n", mask ? "" : "un", gsi);
 }
 
 void ioapic_configure_irq(
@@ -400,62 +260,38 @@ void ioapic_configure_irq(
 ) {
     ioapic_t* ioapic = require_ioapic(gsi);
 
-    acquire_interrupt_lock(&lock);
-
-    if ((delivery == DELIVERY_MODE_FIXED) ||
-        (delivery == DELIVERY_MODE_LOWEST_PRIO) &&
-            ((vector < PLATFORM_INTERRUPT_BASE) || (vector > PLATFORM_INTERRUPT_MAX))) {
+    if ((delivery == DELIVERY_MODE_FIXED || delivery == DELIVERY_MODE_LOWEST_PRIO) &&
+        (vector < PLATFORM_INTERRUPT_BASE || vector > PLATFORM_INTERRUPT_MAX)) {
         mask = true;
     }
 
-    uint64_t val = 0;
-    val |= IOAPIC_RTE_TRIGGER_MODE(trigger);
-    val |= IOAPIC_RTE_POLARITY(polarity);
-    val |= IOAPIC_RTE_DELIVERY_MODE(delivery);
-    val |= IOAPIC_RTE_DST_MODE(dest);
-    val |= IOAPIC_RTE_DST(dest_apic);
-    val |= IOAPIC_RTE_VECTOR(vector);
+    ioapic_rte_t rte  = {.raw = 0};
+    rte.vector        = vector;
+    rte.delivery_mode = delivery;
+    rte.dest_mode     = dest;
+    rte.trigger_mode  = trigger;
+    rte.polarity      = polarity;
+    rte.destination   = dest_apic;
+    rte.mask          = mask ? 1 : 0;
 
-    if (mask) {
-        val |= IOAPIC_RTE_MASKED;
-    }
-
-    ioapic_write_redirection_entry(ioapic, gsi, val);
-
+    acquire_interrupt_lock(&lock);
+    ioapic_write_rte(ioapic, gsi, rte);
     release_interrupt_lock(&lock);
-
-    KLOG_TRACE(
-        "IOAPIC: configured gsi=%u trig=%d pol=%d deliv=%d dest=%d lapic=0x%x vec=%u mask=%d\n",
-        gsi,
-        trigger,
-        polarity,
-        delivery,
-        dest,
-        dest_apic,
-        vector,
-        mask
-    );
 }
 
 void ioapic_configure_irq_vector(uint32_t gsi, uint8_t vector) {
     ioapic_t* ioapic = require_ioapic(gsi);
 
     acquire_interrupt_lock(&lock);
+    ioapic_rte_t rte = ioapic_read_rte(ioapic, gsi);
 
-    uint64_t val = ioapic_read_redirection_entry(ioapic, gsi);
-
-    if ((vector < PLATFORM_INTERRUPT_BASE) || (vector > PLATFORM_INTERRUPT_MAX)) {
-        val |= IOAPIC_RTE_MASKED;
-    } else {
-        val &= ~IOAPIC_RTE_MASKED;
+    rte.vector = vector;
+    if (vector < PLATFORM_INTERRUPT_BASE || vector > PLATFORM_INTERRUPT_MAX) {
+        rte.mask = 1;
     }
 
-    val |= IOAPIC_RTE_VECTOR(vector);
-    ioapic_write_redirection_entry(ioapic, gsi, val);
-
+    ioapic_write_rte(ioapic, gsi, rte);
     release_interrupt_lock(&lock);
-
-    KLOG_TRACE("IOAPIC: set vector gsi=%u vec=%u\n", gsi, vector);
 }
 
 void ioapic_configure_legacy_irq(
@@ -466,22 +302,15 @@ void ioapic_configure_legacy_irq(
     uint8_t vector,
     bool mask
 ) {
-    uint32_t gsi;
-    irq_trigger_mode_t trigger;
-    irq_polarity_t polarity;
+    uint32_t gsi               = irq;
+    irq_trigger_mode_t trigger = IRQ_TRIGGER_EDGE;
+    irq_polarity_t polarity    = IRQ_POLARITY_HIGH;
 
-    resolve_legacy_irq(irq, &gsi, &trigger, &polarity);
-    ioapic_configure_irq(gsi, trigger, polarity, delivery, dest, dest_lapic, vector, mask);
-}
-
-uint32_t ioapic_get_gsi(uint8_t irq) {
     if (overrides[irq].remapped) {
-        return overrides[irq].gsi;
+        gsi      = overrides[irq].gsi;
+        trigger  = overrides[irq].trigger;
+        polarity = overrides[irq].polarity;
     }
 
-    return irq;
-}
-
-bool ioapic_is_initialized(void) {
-    return ioapics != nullptr;
+    ioapic_configure_irq(gsi, trigger, polarity, delivery, dest, dest_lapic, vector, mask);
 }
