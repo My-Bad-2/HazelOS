@@ -10,12 +10,15 @@
 extern "C" {
 #endif
 
-#define SYS_WRITE    1
-#define SYS_MMAP     9
-#define SYS_MPROTECT 10
-#define SYS_MUNMAP   11
-#define SYS_MREMAP   25
-#define SYS_EXIT     60
+#define SYS_WRITE    0x01
+#define SYS_MMAP     0x09
+#define SYS_MPROTECT 0x0a
+#define SYS_MUNMAP   0x0b
+#define SYS_MREMAP   0x19
+#define SYS_CLONE    0x38
+#define SYS_FORK     0x39
+#define SYS_VFORK    0x3a
+#define SYS_EXIT     0x3c
 
 // Custom syscalls
 #define SYS_IPC_CREATE_CHANNEL  500
@@ -62,6 +65,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
 int munmmap(void* addr, size_t length);
 int mprotect(void* addr, size_t length, int prot);
 void* sys_mremap(void* old_address, size_t old_size, size_t new_size, int flags, void* new_address);
+int fork(void);
 
 int ipc_create_channel(int32_t* handles);
 int ipc_create_port_set(int32_t* handle);

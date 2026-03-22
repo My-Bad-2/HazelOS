@@ -15,6 +15,19 @@
 #include "sched/process.h"
 #include "sched/scheduler.h"
 
+#if defined(__x86_64__)
+#define TARGET_ELF_MACHINE EM_X86_64
+#elif defined(__aarch64__)
+#define TARGET_ELF_MACHINE EM_AARCH64
+#elif defined(__riscv)
+#define TARGET_ELF_MACHINE EM_RISCV
+#else
+#error "Unsupported architecture for ELF Loader"
+#endif
+
+// NOLINTNEXTLINE
+process_t* init_process = nullptr;
+
 static inline bool validate_elf(Elf64_Ehdr* ehdr) {
     if (!ehdr) {
         return false;
@@ -26,12 +39,12 @@ static inline bool validate_elf(Elf64_Ehdr* ehdr) {
     }
 
     if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
-        KLOG_ERROR("ELF: Not 64-bit\n");
+        KLOG_ERROR("ELF: Not 64-bit executable\n");
         return false;
     }
 
-    if (ehdr->e_machine != EM_X86_64) {
-        KLOG_ERROR("ELF: Not x86_64\n");
+    if (ehdr->e_machine != TARGET_ELF_MACHINE) {
+        KLOG_ERROR("ELF: Architecture mismatch\n");
         return false;
     }
 
@@ -114,24 +127,23 @@ thread_t* load_elf(void* address) {
         return nullptr;
     }
 
-    process_t* proc = process_create("user_init", nullptr, false);
-
-    if (!proc) {
+    init_process = process_create("user_init", nullptr, false);
+    if (!init_process) {
         KLOG_ERROR("Loader: Failed to create process\n");
         return nullptr;
     }
 
     Elf64_Phdr* phdrs = (Elf64_Phdr*)((uint8_t*)ehdr + ehdr->e_phoff);
-
     for (int i = 0; i < ehdr->e_phnum; ++i) {
         if (phdrs[i].p_type == PT_LOAD) {
-            if (!load_segment(proc, &phdrs[i], address)) {
+            if (!load_segment(init_process, &phdrs[i], address)) {
                 return nullptr;
             }
         }
     }
 
-    thread_t* t = thread_create("user_init", proc, SCHED_NORMAL, (void*)ehdr->e_entry, nullptr, 0);
+    thread_t* t =
+        thread_create("user_init", init_process, SCHED_NORMAL, (void*)ehdr->e_entry, nullptr, 0);
 
     return t;
 }

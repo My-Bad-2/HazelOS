@@ -3,9 +3,11 @@
 .section .text
 
 .global syscall_entry
+.global syscall_restore_path
 .extern syscall_dispatcher
 .type syscall_entry, @function
 syscall_entry:
+    cld
     swapgs
 
     movq %rsp, %gs:32
@@ -47,6 +49,9 @@ syscall_entry:
 
     movq %rax, 96(%rsp)
 
+.global syscall_restore_path
+.type syscall_restore_path, @function
+syscall_restore_path:
     popq %rbx
     popq %rdx
     popq %rsi
@@ -63,6 +68,8 @@ syscall_entry:
 
     popq %rcx
     popq %r11
+    
+    cli
     popq %rsp
 
     swapgs

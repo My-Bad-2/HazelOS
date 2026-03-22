@@ -12,6 +12,8 @@
 #include "memory/pagemap.h"
 #include "memory/paging.h"
 #include "memory/vma.h"
+#include "sched/process.h"
+#include "sched/scheduler.h"
 
 static uint32_t vmm_get_segment_flags(uint32_t elf_flags) {
     uint32_t flags = 0;
@@ -102,17 +104,23 @@ struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code) {
     return info;
 }
 
-void pf_handler(interrupt_trapframe_t* tf) {
+__attribute__((force_align_arg_pointer)) void pf_handler(interrupt_trapframe_t* tf) {
     uintptr_t fault_addr = read_cr2();
+    thread_t* t          = smp_current_core()->curr_thread;
+    if (!t || !t->owner) {
+        PANIC("Early boot page fault at %p (RIP: %p)!\n", fault_addr, tf->rip);
+    }
 
-    vm_space_t* curr_space = &smp_current_core()->curr_thread->owner->space;
+    process_t* proc   = t->owner;
+    vm_space_t* space = &proc->space;
 
-    if (vmm_handle_fault(curr_space, fault_addr, tf->error_code)) {
+    if (vmm_handle_fault(space, fault_addr, tf->error_code)) {
         return;
     }
 
     if (tf->error_code & X86_PAGE_FAULT_USER) {
-        // terminate the user process
+        process_exit(-EFAULT);
+        scheduler_yield();
     } else {
         PANIC("Kernel page fault at %p! (RIP: %p)", fault_addr, tf->rip);
     }

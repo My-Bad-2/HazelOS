@@ -160,6 +160,12 @@ bool pagemap_clone(pagemap_t* dest, pagemap_t* src) {
         return false;
     }
 
+    if (arch_mmu_create(&dest->arch) != 0) {
+        return false;
+    }
+
+    create_interrupt_lock(&dest->lock);
+
     acquire_interrupt_lock(&src->lock);
     acquire_interrupt_lock(&dest->lock);
 
@@ -168,5 +174,11 @@ bool pagemap_clone(pagemap_t* dest, pagemap_t* src) {
     release_interrupt_lock(&dest->lock);
     release_interrupt_lock(&src->lock);
 
-    return (status == 0);
+    if (status != 0) {
+        KLOG_DEBUG("Clone failed!\n");
+        arch_mmu_destroy(&dest->arch);
+        return false;
+    }
+
+    return true;
 }

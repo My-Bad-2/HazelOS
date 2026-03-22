@@ -101,6 +101,15 @@ uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
                     (void*)regs->r8
                 );
                 break;
+            case SYS_FORK:
+                res = (uint64_t)sys_fork(regs);
+                break;
+            case SYS_VFORK:
+                res = (uint64_t)sys_vfork(regs);
+                break;
+            case SYS_CLONE:
+                res = (uint64_t)sys_clone(regs->rdi, (void*)regs->rsi, regs);
+                break;
             default:
                 KLOG_DEBUG("Syscall %lu called!\n", num);
                 break;

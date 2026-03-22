@@ -90,7 +90,7 @@ void vmfree(vm_space_t* space, void* ptr, size_t size);
 
 struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code);
 bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_code);
-bool vmm_clone_space(vm_space_t* parent, vm_space_t* child);
+bool vmm_clone_space(vm_space_t* parent, vm_space_t* child, pagemap_t* map);
 
 void pf_handler(interrupt_trapframe_t* tf);
 

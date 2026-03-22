@@ -8,6 +8,7 @@
 #include "cpu/registers.h"
 #include "cpu/simd.h"
 #include "cpu/smp.h"
+#include "cpu/syscalls.h"
 #include "libs/log.h"
 #include "libs/math.h"
 #include "memory/heap.h"
@@ -34,6 +35,12 @@ struct user_stack_layout {
     uint64_t thread_exit;
 };
 
+struct fork_stack_layout {
+    switch_context_t ctx;
+    syscall_regs_t regs;
+    uint64_t thread_exit;
+};
+
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     if (!t) {
         errno = EINVAL;
@@ -48,7 +55,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     }
 
     process_t* proc = t->owner;
-    t->kernel_stack = (thread_t*)vmalloc(
+    t->kernel_stack = vmalloc(
         kernel_space,
         nullptr,
         KSTACK_SIZE,
@@ -143,7 +150,7 @@ void arch_thread_destroy(thread_t* t) {
     }
 }
 
-void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf) {
+void arch_thread_clone(thread_t* child, syscall_regs_t* tf, void* child_stack) {
     if (!child || !tf) {
         errno = EINVAL;
         KLOG_WARN("THREAD: clone called with nullptr args child=%p tf=%p\n", child, tf);
@@ -166,16 +173,22 @@ void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf) {
     memcpy(child->fpu_buffer, parent->fpu_buffer, fpu_size);
 
     uintptr_t sp = align_down(child->kernel_stack_top, 0x10);
-    sp -= sizeof(struct user_stack_layout);
+    sp -= sizeof(struct fork_stack_layout);
 
-    struct user_stack_layout* layout = (struct user_stack_layout*)sp;
-    memset(layout, 0, sizeof(struct user_stack_layout));
+    struct fork_stack_layout* layout = (struct fork_stack_layout*)sp;
+    memset(layout, 0, sizeof(struct fork_stack_layout));
 
-    layout->tf     = *tf;
-    layout->tf.rax = 0;
+    layout->regs     = *tf;
+    layout->regs.rax = 0;
 
-    layout->ctx.rip    = (uint64_t)isr_restore_path;
-    child->context_rsp = (uint64_t)&layout->tf;
+    extern void syscall_restore_path(void);
+    layout->ctx.rip    = (uint64_t)syscall_restore_path;
+    child->context_rsp = (uint64_t)&layout->ctx;
+
+    if (child_stack) {
+        syscall_regs_t* child_tf = (syscall_regs_t*)child->context_rsp;
+        child_tf->rsp            = (uintptr_t)child_stack;
+    }
 }
 
 void thread_save_fpu(thread_t* t) {
@@ -200,4 +213,46 @@ void thread_restore_fpu(thread_t* t) {
     if (t->fpu_buffer) {
         simd_restore(t->fpu_buffer);
     }
+}
+
+int thread_change_exec(
+    thread_t* t,
+    vm_space_t* new_space,
+    uintptr_t entry_point,
+    uintptr_t new_rsp
+) {
+    if (!t || !t->owner) {
+        return -EINVAL;
+    }
+
+    process_t* proc      = t->owner;
+    vm_space_t old_space = proc->space;
+
+    proc->space = *new_space;
+    proc->map   = *new_space->map;
+
+    pagemap_load(&proc->map);
+    vmm_destroy_space(&old_space);
+
+    interrupt_trapframe_t* tf = (interrupt_trapframe_t*)t->context_rsp;
+
+    tf->rip = entry_point;
+    tf->rsp = new_rsp;
+
+    tf->rax = 0;
+    tf->rbx = 0;
+    tf->rcx = 0;
+    tf->rdx = 0;
+    tf->rbp = 0;
+    tf->r8  = 0;
+    tf->r9  = 0;
+    tf->r10 = 0;
+    tf->r11 = 0;
+    tf->r12 = 0;
+    tf->r13 = 0;
+    tf->r14 = 0;
+    tf->r15 = 0;
+
+    wait_queue_wake_up_all(&proc->vfork_wait_queue);
+    return 0;
 }

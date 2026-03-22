@@ -6,11 +6,14 @@
 
 #include "libs/dlist.h"
 #include "libs/handles.h"
+#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
+#include "memory/vma.h"
 #include "memory/vmm.h"
 #include "sched/sched_class.h"
 #include "sched/scheduler.h"
+#include "sched/wait.h"
 
 handle_table_t pid_handle_tbl;
 handle_table_t tid_handle_tbl;
@@ -18,21 +21,7 @@ handle_table_t tid_handle_tbl;
 static kmem_cache_t* process_cache = nullptr;
 static spinlock_t global_process_lock;
 
-static void wake_up_all(struct dlist_head* queue) {
-    struct thread* curr = nullptr;
-
-    dlist_for_each_entry(curr, queue, wait_node) {
-        dlist_del(&curr->wait_node);
-
-        scheduler_unblock(curr);
-    }
-}
-
-static void sleep_on_queue(struct dlist_head* queue) {
-    thread_t* curr = smp_current_core()->curr_thread;
-    dlist_add_tail(&curr->wait_node, queue);
-    scheduler_block();
-}
+extern process_t* init_process;
 
 process_t* process_create(const char* name, process_t* parent, bool is_kernel) {
     if (!process_cache) {
@@ -63,7 +52,7 @@ process_t* process_create(const char* name, process_t* parent, bool is_kernel) {
     dlist_init(&proc->thread_list);
     dlist_init(&proc->children_list);
     dlist_init(&proc->sibling_node);
-    dlist_init(&proc->wait_queue);
+    wait_queue_init(&proc->wait_queue);
 
     if (is_kernel) {
         memcpy(&proc->map, vmm_get_kernel_pagemap(), sizeof(pagemap_t));
@@ -90,10 +79,9 @@ process_t* process_create(const char* name, process_t* parent, bool is_kernel) {
     acquire_spinlock(&proc->lock);
     proc->state     = PROCESS_ZOMBIE;
     proc->exit_code = exit_code;
-
-    wake_up_all(&proc->wait_queue);
     release_spinlock(&proc->lock);
 
+    wait_queue_wake_up_all(&proc->wait_queue);
     thread_exit(exit_code);
 }
 
@@ -102,24 +90,34 @@ int process_wait(process_t* proc, int* exit_code) {
         return -1;
     }
 
-    acquire_spinlock(&proc->lock);
+    while (true) {
+        thread_sleep_prepare(&proc->wait_queue);
 
-    while (proc->state != PROCESS_ZOMBIE && proc->state != PROCESS_DEAD) {
-        release_spinlock(&proc->lock);
-        sleep_on_queue(&proc->wait_queue);
         acquire_spinlock(&proc->lock);
-    }
+        bool is_done = (proc->state == PROCESS_ZOMBIE || proc->state == PROCESS_DEAD);
 
-    if (exit_code) {
-        *exit_code = proc->exit_code;
-    }
+        if (is_done) {
+            if (exit_code) {
+                *exit_code = proc->exit_code;
+            }
 
-    proc->state = PROCESS_DEAD;
-    release_spinlock(&proc->lock);
+            proc->state = PROCESS_DEAD;
+        }
+
+        release_spinlock(&proc->lock);
+
+        if (is_done) {
+            thread_sleep_finish(&proc->wait_queue);
+            break;
+        }
+
+        scheduler_yield();
+        thread_sleep_finish(&proc->wait_queue);
+    }
 
     int pid = proc->pid;
-
     process_destroy(proc);
+
     return pid;
 }
 
@@ -146,18 +144,80 @@ void process_destroy(process_t* proc) {
 
     release_spinlock(&proc->lock);
 
+    wait_queue_wake_up_all(&proc->vfork_wait_queue);
+
     if (!proc->is_kernel) {
         pagemap_release(&proc->map);
     }
 
     acquire_spinlock(&global_process_lock);
 
+    while (!dlist_empty(&proc->children_list)) {
+        struct dlist_head* child_node = proc->children_list.next;
+        process_t* orphan             = dlist_entry(child_node, process_t, sibling_node);
+
+        dlist_del(child_node);
+        orphan->parent = init_process;
+        dlist_add_tail(&orphan->sibling_node, &init_process->children_list);
+    }
+
     if (!dlist_empty(&proc->sibling_node)) {
         dlist_del(&proc->sibling_node);
+    }
+
+    if (proc->parent) {
+        wait_queue_wake_up_all(&proc->parent->wait_queue);
     }
 
     release_spinlock(&global_process_lock);
 
     handle_free(&pid_handle_tbl, (uint32_t)proc->pid);
     kmem_cache_free(process_cache, proc);
+}
+
+process_t* process_clone(process_t* parent, uint64_t flags) {
+    if (!parent) {
+        return nullptr;
+    }
+
+    process_t* child = kmem_cache_alloc(process_cache);
+    if (!child) {
+        return nullptr;
+    }
+
+    memset(child, 0, sizeof(process_t));
+
+    child->pid       = (int)handle_alloc(&pid_handle_tbl, child, 0);
+    child->state     = PROCESS_ALIVE;
+    child->is_kernel = false;
+    create_spinlock(&child->lock);
+
+    dlist_init(&child->thread_list);
+    dlist_init(&child->children_list);
+    dlist_init(&child->sibling_node);
+
+    wait_queue_init(&child->wait_queue);
+    wait_queue_init(&child->vfork_wait_queue);
+
+    strncpy(child->name, parent->name, 31);
+
+    if (flags & CLONE_VM) {
+        // Share address space
+        child->space = parent->space;
+        child->map   = parent->map;
+    } else {
+        if (!vmm_clone_space(&parent->space, &child->space, &child->map)) {
+            handle_free(&pid_handle_tbl, (uint32_t)child->pid);
+            kmem_cache_free(process_cache, child);
+            return nullptr;
+        }
+    }
+
+    child->parent = parent;
+
+    acquire_spinlock(&global_process_lock);
+    dlist_add_tail(&child->sibling_node, &parent->children_list);
+    release_spinlock(&global_process_lock);
+
+    return child;
 }

@@ -1,6 +1,5 @@
 #include "cpu/ioapic.h"
 
-#include <errno.h>
 #include <stdint.h>
 #include <uacpi/acpi.h>
 

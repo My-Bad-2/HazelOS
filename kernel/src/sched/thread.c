@@ -1,41 +1,28 @@
+#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "arch.h"
 #include "cpu/exception.h"
+#include "cpu/syscalls.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
 #include "libs/log.h"
-#include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
+#include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/sched_class.h"
 #include "sched/scheduler.h"
+#include "sched/wait.h"
 
 static kmem_cache_t* thread_cache         = nullptr;
 static struct dlist_head dead_thread_list = DLIST_INIT(dead_thread_list);
 static spinlock_t dead_thread_lock;
 
-static struct dlist_head reaper_wait_queue = DLIST_INIT(reaper_wait_queue);
-
-static void wake_up_all(struct dlist_head* queue) {
-    struct thread* curr = nullptr;
-
-    dlist_for_each_entry(curr, queue, wait_node) {
-        dlist_del(&curr->wait_node);
-
-        scheduler_unblock(curr);
-    }
-}
-
-static void sleep_on_queue(struct dlist_head* queue) {
-    thread_t* curr = smp_current_core()->curr_thread;
-    dlist_add_tail(&curr->wait_node, queue);
-    scheduler_block();
-}
+static struct wait_queue reaper_wait_queue;
 
 static void process_insert_thread(process_t* p, thread_t* t) {
     if (!p || !t) {
@@ -65,7 +52,7 @@ static thread_t* thread_create_internal(
     memset(t, 0, sizeof(thread_t));
     memcpy(t->name, name, sizeof(t->name));
 
-    t->tid          = handle_alloc(&tid_handle_tbl, t, 0);
+    t->tid          = (int)handle_alloc(&tid_handle_tbl, t, 0);
     t->owner        = proc;
     t->state        = THREAD_READY;
     t->assigned_cpu = UINT32_MAX;
@@ -73,7 +60,7 @@ static thread_t* thread_create_internal(
 
     dlist_init(&t->process_node);
     dlist_init(&t->wait_node);
-    dlist_init(&t->join_queue);
+    wait_queue_init(&t->join_queue);
 
     struct sched_class* sc = get_sched_class(policy);
     t->sched_class         = sc;
@@ -116,7 +103,8 @@ thread_t* thread_create(
     return t;
 }
 
-thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf) {
+thread_t*
+thread_clone(process_t* target_proc, thread_t* parent, syscall_regs_t* tf, void* child_stack) {
     if (!target_proc || !parent || !tf) {
         return nullptr;
     }
@@ -127,25 +115,24 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
     }
 
     memset(child, 0, sizeof(thread_t));
-    child->tid = handle_alloc(&tid_handle_tbl, child, 0);
-    if (child->tid == 0) {
-        kmem_cache_free(thread_cache, child);
-        return nullptr;
-    }
 
-    child->owner        = target_proc;
-    child->assigned_cpu = UINT32_MAX;
-    child->state        = THREAD_READY;
-    child->policy       = parent->policy;
-    child->sched_class  = parent->sched_class;
+    child->tid           = (int)handle_alloc(&tid_handle_tbl, child, 0);
+    child->owner         = target_proc;
+    child->assigned_cpu  = UINT32_MAX;
+    child->state         = THREAD_READY;
+    child->policy        = parent->policy;
+    child->sched_class   = parent->sched_class;
+    child->affinity_mask = parent->affinity_mask;
+
+    strncpy(child->name, parent->name, 31);
 
     dlist_init(&child->process_node);
     dlist_init(&child->wait_node);
-    dlist_init(&child->join_queue);
+    wait_queue_init(&child->join_queue);
 
     memcpy(&child->sched, &parent->sched, sizeof(sched_entity_t));
 
-    child->kernel_stack = (thread_t*)vmalloc(
+    child->kernel_stack = vmalloc(
         kernel_space,
         nullptr,
         KSTACK_SIZE,
@@ -155,14 +142,14 @@ thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapf
     );
 
     if (!child->kernel_stack) {
-        handle_free(&tid_handle_tbl, child->tid);
+        handle_free(&tid_handle_tbl, (handle_t)child->tid);
         kmem_cache_free(thread_cache, child);
         return nullptr;
     }
 
     child->kernel_stack_top = (uintptr_t)child->kernel_stack + KSTACK_SIZE;
 
-    arch_thread_clone(child, tf);
+    arch_thread_clone(child, tf, child_stack);
 
     acquire_spinlock(&target_proc->lock);
     process_insert_thread(target_proc, child);
@@ -178,11 +165,10 @@ static void reaper_enqueue_dead_thread(thread_t* t) {
     }
 
     acquire_spinlock(&dead_thread_lock);
-
     dlist_add_tail(&t->wait_node, &dead_thread_list);
-    wake_up_all(&reaper_wait_queue);
-
     release_spinlock(&dead_thread_lock);
+
+    wait_queue_wake_up_all(&reaper_wait_queue);
 }
 
 void thread_destroy(thread_t* t) {
@@ -192,7 +178,7 @@ void thread_destroy(thread_t* t) {
 
     scheduler_remove_thread(t);
 
-    wake_up_all(&t->join_queue);
+    wait_queue_wake_up_all(&t->join_queue);
 
     if (t->owner) {
         acquire_spinlock(&t->owner->lock);
@@ -214,7 +200,15 @@ void thread_destroy(thread_t* t) {
     }
 
     arch_thread_destroy(t);
-    handle_free(&tid_handle_tbl, t->tid);
+    if (t->kernel_stack) {
+        vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
+    }
+
+    if (t->fpu_buffer) {
+        kfree(t->fpu_buffer);
+    }
+
+    handle_free(&tid_handle_tbl, (handle_t)t->tid);
     kmem_cache_free(thread_cache, t);
 }
 
@@ -224,7 +218,7 @@ void thread_exit(int exit_code) {
     thread_t* curr      = cpu->curr_thread;
 
     curr->exit_code = exit_code;
-    wake_up_all(&curr->join_queue);
+    wait_queue_wake_up_all(&curr->join_queue);
 
     bool is_last_thread = false;
     if (curr->owner) {
@@ -254,8 +248,17 @@ void thread_join(thread_t* t, int* exit_code) {
         return;
     }
 
-    while (t->state != THREAD_TERMINATED) {
-        sleep_on_queue(&t->join_queue);
+    while (true) {
+        thread_sleep_prepare(&t->join_queue);
+
+        bool is_ded = (t->state == THREAD_TERMINATED);
+        if (is_ded) {
+            thread_sleep_finish(&t->join_queue);
+            break;
+        }
+
+        scheduler_yield();
+        thread_sleep_finish(&t->join_queue);
     }
 
     if (exit_code) {
@@ -267,11 +270,23 @@ void reaper_task_entry(void*) {
     KLOG_INFO("REAPER: background cleanup thread started\n");
 
     while (true) {
+        thread_sleep_prepare(&reaper_wait_queue);
+
+        acquire_spinlock(&dead_thread_lock);
+        bool has_work = !dlist_empty(&dead_thread_list);
+        release_spinlock(&dead_thread_lock);
+
+        if (!has_work) {
+            scheduler_yield();
+            thread_sleep_finish(&reaper_wait_queue);
+            continue;
+        }
+
+        thread_sleep_finish(&reaper_wait_queue);
         acquire_spinlock(&dead_thread_lock);
 
         if (dlist_empty(&dead_thread_list)) {
             release_spinlock(&dead_thread_lock);
-            sleep_on_queue(&reaper_wait_queue);
             continue;
         }
 
@@ -284,7 +299,37 @@ void reaper_task_entry(void*) {
         KLOG_DEBUG("REAPER: cleaning up dead thread tid=%u\n", dead_thread->tid);
 
         arch_thread_destroy(dead_thread);
-        handle_free(&tid_handle_tbl, dead_thread->tid);
+        handle_free(&tid_handle_tbl, (handle_t)dead_thread->tid);
         kmem_cache_free(thread_cache, dead_thread);
     }
+}
+
+int thread_vclone(thread_t* parent, syscall_regs_t* tf) {
+    process_t* child_proc = process_clone(parent->owner, CLONE_VM);
+    if (!child_proc) {
+        return -ENOMEM;
+    }
+
+    thread_t* child_thread = thread_clone(child_proc, parent, tf, nullptr);
+    if (!child_thread) {
+        process_destroy(child_proc);
+        return -ENOMEM;
+    }
+
+    scheduler_add_thread(child_thread);
+
+    while (true) {
+        thread_sleep_prepare(&child_proc->vfork_wait_queue);
+
+        if (child_proc->state == PROCESS_DEAD || child_proc->state == PROCESS_ZOMBIE ||
+            child_proc->map.arch.phys_root != parent->owner->map.arch.phys_root) {
+            thread_sleep_finish(&child_proc->vfork_wait_queue);
+            break;
+        }
+
+        scheduler_yield();
+        thread_sleep_finish(&child_proc->vfork_wait_queue);
+    }
+
+    return child_proc->pid;
 }

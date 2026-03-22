@@ -62,6 +62,7 @@ void user_start() {
     size_t len      = strlen(str) + 1;
 
     ipc_test();
+    fork();
     write(1, str, len);
 
     while (true);

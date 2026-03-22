@@ -7,6 +7,7 @@
 #include "drivers/arch_timer.h"
 #include "drivers/timer.h"
 #include "libs/log.h"
+#include "sched/process.h"
 #include "sched/rcu.h"
 #include "sched/sched_class.h"
 #include "sched/scheduler.h"
@@ -581,6 +582,7 @@ void schedule(void) {
     update_tss_rsp(&cpu->arch.tss, next->kernel_stack_top);
 #endif
 
+    cpu->kstack_top = next->kernel_stack_top;
     if (next_proc && (curr_proc != next_proc)) {
         pagemap_load(&next_proc->map);
     }
@@ -663,11 +665,7 @@ void scheduler_yield(void) {
 }
 
 static void sleep_callback(void* ctx) {
-    thread_t* t = (thread_t*)ctx;
-
-    if (t && t->state == THREAD_SLEEPING) {
-        scheduler_unblock(t);
-    }
+    scheduler_unblock(ctx);
 }
 
 void scheduler_sleep(size_t ms) {
@@ -678,35 +676,14 @@ void scheduler_sleep(size_t ms) {
         return;
     }
 
-    size_t now           = get_time_now();
-    size_t target_wakeup = now + (ms * 1000000);
+    arch_disable_interrupts();
+    curr->state = THREAD_SLEEPING;
 
-    acquire_interrupt_lock(&cpu->lock);
-
-    while (true) {
-        now = get_time_now();
-        if (now >= target_wakeup) {
-            break;
-        }
-
-        size_t remaining_ms = (target_wakeup - now) / 1000000;
-        if (remaining_ms == 0) {
-            remaining_ms = 1;
-        }
-
-        timer_arm(&cpu->timer_manager, &curr->sleep_timer, remaining_ms, 0, sleep_callback, curr);
-
-        curr->state            = THREAD_SLEEPING;
-        cpu->reschedule_needed = true;
-
-        release_interrupt_lock(&cpu->lock);
-        schedule();
-        acquire_interrupt_lock(&cpu->lock);
-
-        timer_cancel(&curr->sleep_timer);
-    }
+    timer_event_t event;
+    timer_arm(&cpu->timer_manager, &event, ms * 1000000, 0, sleep_callback, curr);
 
     release_interrupt_lock(&cpu->lock);
+    scheduler_yield();
 }
 
 void scheduler_renice(thread_t* t, int nice) {

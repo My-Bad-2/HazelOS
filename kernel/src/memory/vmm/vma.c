@@ -1,6 +1,7 @@
 #include "memory/vma.h"
 
 #include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "libs/log.h"
@@ -444,11 +445,16 @@ void vmm_destroy_space(vm_space_t* space) {
     release_write(&space->lock);
 }
 
-bool vmm_clone_space(vm_space_t* parent, vm_space_t* child) {
-    if (!parent || !child) return false;
+bool vmm_clone_space(vm_space_t* parent, vm_space_t* child, pagemap_t* map) {
+    if (!parent || !child) {
+        return false;
+    }
 
     acquire_read(&parent->lock);
     acquire_write(&child->lock);
+
+    child->map = map;
+    pagemap_clone(child->map, parent->map);
 
     struct rb_node* node = rb_first(&parent->rb_root);
 
@@ -483,46 +489,21 @@ bool vmm_clone_space(vm_space_t* parent, vm_space_t* child) {
             if (!child_vma->object) {
                 goto clone_fail;
             }
+
+            uint32_t pte_flags               = parent_vma->flags & ~VMM_FLAG_WRITE;
+            pagemap_protect_args_t prot_args = {.flags = pte_flags, .cache = parent_vma->cache};
+
+            for (uintptr_t addr = parent_vma->start; addr < parent_vma->end;
+                 addr += parent_vma->page_size) {
+                if (pagemap_translate(parent->map, addr)) {
+                    prot_args.virt_addr = (void*)addr;
+                    pagemap_protect(parent->map, &prot_args);
+                }
+            }
         } else {
             child_vma->object        = parent_vma->object;
             child_vma->object_offset = parent_vma->object_offset;
             vm_object_ref(child_vma->object);
-        }
-
-        uintptr_t addr = parent_vma->start;
-        while (addr < parent_vma->end) {
-            uintptr_t phys = pagemap_translate(parent->map, addr);
-
-            if (phys) {
-                uint32_t pte_flags = child_vma->flags;
-
-                if (is_cow || (parent_vma->flags & VMM_FLAG_COW)) {
-                    pte_flags &= ~VMM_FLAG_WRITE;
-                    pagemap_protect_args_t prot_args = {
-                        .virt_addr = (void*)addr,
-                        .flags     = pte_flags
-                    };
-
-                    pagemap_protect(parent->map, &prot_args);
-                }
-
-                pagemap_map_args_t map_args = {
-                    .virt_addr = (void*)addr,
-                    .phys_addr = (void*)phys,
-                    .length    = child_vma->page_size,
-                    .flags     = pte_flags,
-                    .cache     = child_vma->cache,
-                    .page_size = child_vma->page_size,
-                };
-
-                if (!pagemap_map(child->map, &map_args)) {
-                    KLOG_ERROR("VMM: Failed to map clone page at %p", (void*)addr);
-                    kmem_cache_free(vma_cache, child_vma);
-                    goto clone_fail;
-                }
-            }
-
-            addr += parent_vma->page_size;
         }
 
         vmm_insert_vma(child, child_vma);

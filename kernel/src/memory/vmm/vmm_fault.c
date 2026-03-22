@@ -24,14 +24,12 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_co
     }
 
     if (!vma) {
-        release_read(&space->lock);
-        return false;
+        goto unhandled_fault;
     }
 
     if (vma->flags & VMM_FLAG_GUARD) {
         KLOG_WARN("VMM: Stack overflow detected at %p", (void*)fault_addr);
-        release_read(&space->lock);
-        return false;
+        goto unhandled_fault;
     }
 
     if (info.is_user && !(vma->flags & VMM_FLAG_USER)) {
@@ -46,11 +44,11 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_co
         goto segfault;
     }
 
-    uintptr_t aligned_addr = align_down(fault_addr, vma->page_size);
-    size_t object_offset   = vma->object_offset + (aligned_addr - vma->start);
+    uintptr_t aligned_addr  = align_down(fault_addr, vma->page_size);
+    size_t object_offset    = vma->object_offset + (aligned_addr - vma->start);
+    uintptr_t map_page_size = vma->page_size;
 
-    uintptr_t phys       = vm_object_get_page(vma->object, object_offset, true, info.is_write);
-    size_t map_page_size = vma->page_size;
+    uintptr_t phys = vm_object_get_page(vma->object, object_offset, true, info.is_write);
 
     // Transparent Huge page promotion attempt
     // Essentially, merge 512 4KB entries into a single 2MB entry
@@ -59,9 +57,10 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_co
 
     if (vma->page_size == PAGE_SIZE_SMALL && vma->object && vma->object->type == VM_OBJ_ANONYMOUS &&
         huge_vaddr >= vma->start && (huge_vaddr + PAGE_SIZE_MEDIUM) <= vma->end) {
-        phys = vm_object_get_huge_page(vma->object, huge_offset, info.is_write);
+        uintptr_t huge_phys = vm_object_get_huge_page(vma->object, huge_offset, info.is_write);
 
-        if (phys) {
+        if (huge_phys) {
+            phys          = huge_phys;
             aligned_addr  = huge_vaddr;
             map_page_size = PAGE_SIZE_MEDIUM;
         }
@@ -69,8 +68,7 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_co
 
     if (!phys) {
         KLOG_ERROR("VMM: Failed to resolve page fault at %p (OOM or VFS Error)", (void*)fault_addr);
-        release_read(&space->lock);
-        return false;
+        goto unhandled_fault;
     }
 
     uint32_t pte_flags = vma->flags;
@@ -79,19 +77,24 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_co
         pte_flags &= ~VMM_FLAG_WRITE;
     }
 
+    pagemap_unmap_args_t unmap_args = {
+        .virt_addr = (void*)aligned_addr,
+        .length    = map_page_size,
+    };
+    pagemap_unmap(space->map, &unmap_args);
+
     pagemap_map_args_t args = {
         .virt_addr = (void*)aligned_addr,
         .phys_addr = (void*)phys,
-        .length    = vma->page_size,
-        .flags     = pte_flags,
+        .length    = map_page_size,
+        .flags     = pte_flags | VMM_FLAG_FIXED,
         .cache     = vma->cache,
-        .page_size = vma->page_size,
+        .page_size = map_page_size,
     };
 
     if (!pagemap_map(space->map, &args)) {
         KLOG_ERROR("VMM: Hardware MMU mapping failed at %p", (void*)aligned_addr);
-        release_read(&space->lock);
-        return false;
+        goto unhandled_fault;
     }
 
     if (vma->object && vma->object->type == VM_OBJ_SHADOW) {
@@ -102,6 +105,7 @@ bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_co
     return true;
 
 segfault:
+unhandled_fault:
     release_read(&space->lock);
     return false;
 }

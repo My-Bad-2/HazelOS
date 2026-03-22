@@ -124,7 +124,7 @@ static void format_slab(
     atomic_init(&slab->in_use, 0);
     dlist_init(&slab->list);
 
-    char* base     = (char*)page_base;
+    char* base     = slab->base;
     slab->freelist = base;
 
     for (size_t i = 0; i < total_objs - 1; ++i) {

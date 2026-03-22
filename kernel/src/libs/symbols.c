@@ -1,11 +1,16 @@
 #include "libs/symbols.h"
 
 const char* resolve_symbol(uintptr_t address, uintptr_t* offset) {
+    if (kernel_symbol_count == 0) {
+        *offset = 0;
+        return "unknown";
+    }
+
     size_t left       = 0;
     size_t right      = kernel_symbol_count - 1;
     size_t best_index = SIZE_MAX;
 
-    while (left <= right) {
+    while (left <= right && right != SIZE_MAX) {
         size_t mid = left + (right - left) / 2;
 
         if (kernel_symbols[mid].addr <= address) {

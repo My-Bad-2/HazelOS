@@ -120,3 +120,7 @@ int ipc_timer_arm_periodic(
         (long)handle_out
     );
 }
+
+int fork(void) {
+    return syscall(SYS_FORK, 0);
+}

@@ -386,7 +386,7 @@ extern "C" {
 
 static inline uint64_t read_msr(uint64_t address) {
     uint32_t low, high;
-    asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(address));
+    asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(address) : "memory");
     return ((uint64_t)high << 32) | low;
 }
 
@@ -394,7 +394,7 @@ static inline void write_msr(uint64_t address, uint64_t value) {
     uint32_t low  = value & 0xffffffff;
     uint32_t high = value >> 32;
 
-    asm volatile("wrmsr" ::"a"(low), "d"(high), "c"(address));
+    asm volatile("wrmsr" ::"a"(low), "d"(high), "c"(address) : "memory");
 }
 
 static inline void invlpg(const void* addr) {

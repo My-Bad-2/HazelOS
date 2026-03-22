@@ -325,7 +325,12 @@ int arch_mmu_map(
 
             if (pte && (*pte != 0)) {
                 if (!phys && !is_demand && (*pte & X86_PAGE_FLAG_PRESENT)) {
-                    pmm_free((void*)(*pte & X86_PAGE_ADDRESS_MASK));
+                    uintptr_t phys_addr = *pte & X86_PAGE_ADDRESS_MASK;
+                    if ((*pte & X86_PAGE_FLAG_HUGE)) {
+                        phys_addr &= ~X86_PAGE_FLAG_LARGE_PAT;
+                    }
+
+                    pmm_free((void*)phys_addr);
                 }
 
                 *pte = 0;
@@ -382,7 +387,12 @@ int arch_mmu_unmap(arch_pagemap_t* map, uintptr_t virt, size_t length, bool free
 
         if (pte && (*pte != 0)) {
             if (free_phys && (*pte & X86_PAGE_FLAG_PRESENT)) {
-                pmm_free((void*)(*pte & X86_PAGE_ADDRESS_MASK));
+                uintptr_t phys = *pte & X86_PAGE_ADDRESS_MASK;
+                if ((*pte & X86_PAGE_FLAG_HUGE)) {
+                    phys &= ~X86_PAGE_FLAG_LARGE_PAT;
+                }
+
+                pmm_free((void*)phys);
             }
 
             *pte = 0;
@@ -416,8 +426,10 @@ uintptr_t arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_
         }
 
         if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) {
-            size_t page_mask = (level == 3) ? (PAGE_SIZE_LARGE - 1) : (PAGE_SIZE_MEDIUM - 1);
-            result_phys      = (entry & X86_PAGE_ADDRESS_MASK) + (virt & page_mask);
+            size_t page_mask    = (level == 3) ? (PAGE_SIZE_LARGE - 1) : (PAGE_SIZE_MEDIUM - 1);
+            uintptr_t base_phys = entry & X86_PAGE_ADDRESS_MASK;
+            base_phys &= ~X86_PAGE_FLAG_LARGE_PAT;
+            result_phys = base_phys + (virt & page_mask);
 
             if (out_flags) {
                 *out_flags = flags_to_generic(entry);
@@ -926,6 +938,13 @@ int arch_mmu_protect(
             uint64_t preserved_bits =
                 *pte & (X86_PAGE_ADDRESS_MASK | X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND |
                         X86_PAGE_FLAG_HUGE | X86_PAGE_FLAG_ACCESSED | X86_PAGE_FLAG_DIRTY);
+
+            if (is_huge) {
+                preserved_bits &= ~X86_PAGE_FLAG_LARGE_PAT;
+            } else {
+                preserved_bits &= ~X86_PAGE_FLAG_PAT;
+            }
+
             size_t arch_flags = flags_to_arch(flags, cache, is_huge, pkey);
 
             arch_flags &= ~(X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND | X86_PAGE_FLAG_HUGE);
@@ -1000,6 +1019,10 @@ int arch_mmu_shatter(arch_pagemap_t* map, uintptr_t virt) {
 
     uint64_t entry      = *pte;
     uintptr_t base_phys = entry & X86_PAGE_ADDRESS_MASK;
+
+    if (hit_level > 1) {
+        base_phys &= ~X86_PAGE_FLAG_LARGE_PAT;
+    }
 
     size_t flags = entry & ~(X86_PAGE_ADDRESS_MASK | X86_PAGE_FLAG_HUGE | X86_PAGE_FLAG_LARGE_PAT);
     if (entry & X86_PAGE_FLAG_LARGE_PAT) {
@@ -1199,7 +1222,11 @@ static int clone_table(uintptr_t dest_phys, uintptr_t src_phys, int level) {
             }
 
             if (entry & X86_PAGE_FLAG_PRESENT) {
-                pmm_inc_ref((void*)(entry & X86_PAGE_ADDRESS_MASK));
+                uintptr_t phys_addr = entry & X86_PAGE_ADDRESS_MASK;
+                if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) {
+                    phys_addr &= ~X86_PAGE_FLAG_LARGE_PAT;
+                }
+                pmm_inc_ref((void*)phys_addr);
             }
 
             dest[i] = entry;
@@ -1215,6 +1242,8 @@ static int clone_table(uintptr_t dest_phys, uintptr_t src_phys, int level) {
 
             int status = clone_table((uintptr_t)new_pt, entry & X86_PAGE_ADDRESS_MASK, level - 1);
             if (status != 0) {
+                pmm_free(new_pt);
+                dest[i] = 0;
                 return status;
             }
         }
@@ -1228,12 +1257,18 @@ int arch_mmu_clone(arch_pagemap_t* dest, arch_pagemap_t* src) {
         return -EINVAL;
     }
 
+    acquire_spinlock(&src->lock);
+    acquire_spinlock(&dest->lock);
+
     int status = clone_table(dest->phys_root, src->phys_root, paging_max_levels);
 
     uint64_t cr3 = read_cr3();
     if ((cr3 & X86_PAGE_ADDRESS_MASK) == (src->phys_root & X86_PAGE_ADDRESS_MASK)) {
         arch_mmu_load(src);
     }
+
+    release_spinlock(&dest->lock);
+    release_spinlock(&src->lock);
 
     return status;
 }

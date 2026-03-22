@@ -12,15 +12,15 @@
 #define MIX_K2 0xc4ceb9fe1a85ec53ul
 
 void arch_disable_interrupts(void) {
-    asm volatile("cli");
+    asm volatile("cli" ::: "memory");
 }
 
 void arch_enable_interrupts(void) {
-    asm volatile("sti");
+    asm volatile("sti" ::: "memory");
 }
 
 void arch_pause(void) {
-    asm volatile("pause");
+    asm volatile("pause" ::: "memory");
 }
 
 void arch_write(int target, const char* str) {
@@ -54,7 +54,7 @@ void arch_halt(bool interrupts) {
     }
 
     while (true) {
-        asm volatile("hlt");
+        asm volatile("hlt" ::: "memory");
     }
 }
 
@@ -64,7 +64,7 @@ size_t arch_save_flags(void) {
     asm volatile(
         "pushfq;"
         "popq %0"
-        : "=r"(rflags)
+        : "=r"(rflags)::"memory"
     );
 
     return rflags;
@@ -74,6 +74,7 @@ void arch_restore_flags(size_t flags) {
     asm volatile(
         "pushq %0;"
         "popfq;" ::"r"(flags)
+        : "memory"
     );
 }
 

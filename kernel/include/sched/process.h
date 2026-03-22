@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "cpu/exception.h"
+#include "cpu/syscalls.h"
 #include "drivers/timer.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
@@ -12,6 +12,12 @@
 #include "libs/spinlock.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
+#include "sched/wait.h"
+
+#define CLONE_VM     0x100
+#define CLONE_FS     0x200
+#define CLONE_THREAD 0x400
+#define CLONE_VFORK  0x800
 
 typedef enum {
     THREAD_READY = 0,
@@ -55,7 +61,8 @@ typedef struct process {
     struct process* parent;
     struct dlist_head children_list;
     struct dlist_head sibling_node;
-    struct dlist_head wait_queue;
+    struct wait_queue wait_queue;
+    struct wait_queue vfork_wait_queue;
 } process_t;
 
 #define SCHED_DATA_PAYLOAD_SIZE 32
@@ -68,7 +75,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     char name[32];
     process_t* owner;
 
-    uint32_t tid;
+    int tid;
     uint32_t assigned_cpu;
 
     uint16_t state;
@@ -92,7 +99,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     struct rb_node rb_node;
     struct dlist_head process_node;
     struct dlist_head wait_node;   // When this thread is blocked on a queue
-    struct dlist_head join_queue;  // Threads waiting for this thread to exit
+    struct wait_queue join_queue;  // Threads waiting for this thread to exit
 
     void* kernel_stack;
     void* user_stack;
@@ -102,8 +109,9 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
 } thread_t;
 
 process_t* process_create(const char* name, process_t* parent, bool is_kernel);
-void process_destroy(process_t* proc);
+process_t* process_clone(process_t* parent, uint64_t flags);
 process_t* get_kernel_process(void);
+void process_destroy(process_t* proc);
 
 [[noreturn]] void process_exit(int exit_code);
 int process_wait(process_t* proc, int* exit_code);
@@ -120,14 +128,27 @@ thread_t* thread_create(
     ...
 );
 void thread_destroy(thread_t* t);
-thread_t* thread_clone(process_t* target_proc, thread_t* parent, interrupt_trapframe_t* tf);
+thread_t*
+thread_clone(process_t* target_proc, thread_t* parent, syscall_regs_t* tf, void* child_stack);
+int thread_vclone(thread_t* parent, syscall_regs_t* tf);
+int thread_change_exec(
+    thread_t* t,
+    vm_space_t* new_space,
+    uintptr_t entry_point,
+    uintptr_t new_rsp
+);
 
 [[noreturn, gnu::used]] void thread_exit(int exit_code);
 void thread_join(thread_t* t, int* exit_code);
 
+void thread_sleep_prepare(struct wait_queue* wq);
+void thread_sleep_finish(struct wait_queue* wq);
+void wait_queue_wake_up_all(struct wait_queue* wq);
+void wait_queue_sleep(struct wait_queue* wq);
+
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
 void arch_thread_destroy(thread_t* t);
-void arch_thread_clone(thread_t* child, interrupt_trapframe_t* tf);
+void arch_thread_clone(thread_t* child, syscall_regs_t* tf, void* child_stack);
 
 void reaper_task_entry(void* args);
 
