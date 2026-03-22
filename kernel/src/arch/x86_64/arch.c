@@ -137,7 +137,7 @@ uint64_t arch_get_random_bytes(void) {
 
 void arch_serial_init(void) {
     drivers_uart_init(COM_PORT1, 115200);
-    cpu_read_features();
+    cpu_init();
 }
 
 void arch_init(void) {}

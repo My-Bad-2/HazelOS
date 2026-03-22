@@ -1,4 +1,5 @@
 #include "arch.h"
+#include "cpu/cpu.h"
 #include "cpu/smp.h"
 #include "drivers/drivers.h"
 #include "drivers/loader.h"
@@ -16,10 +17,10 @@ void kmain(void) {
     smp_init();
 
     drivers_init();
-
     rcu_init();
 
     KLOG_INFO("Hello, World!\n");
+    cpu_print_info();
     launch_user_init();
 
     arch_halt(true);

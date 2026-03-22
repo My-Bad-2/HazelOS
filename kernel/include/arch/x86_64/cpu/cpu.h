@@ -62,6 +62,7 @@
 #define FEATURE_AVX          (struct cpu_features){.leaf = FEATURE_LEAF1, .reg = 2, .bit = 28}
 #define FEATURE_F16C         (struct cpu_features){.leaf = FEATURE_LEAF1, .reg = 2, .bit = 29}
 #define FEATURE_RDRAND       (struct cpu_features){.leaf = FEATURE_LEAF1, .reg = 2, .bit = 30}
+#define FEATURE_HYPERVISOR   (struct cpu_features){.leaf = FEATURE_LEAF1, .reg = 2, .bit = 31}
 
 #define FEATURE_TURBO        (struct cpu_features){.leaf = FEATURE_LEAF6, .reg = 0, .bit = 1}
 #define FEATURE_HWP          (struct cpu_features){.leaf = FEATURE_LEAF6, .reg = 0, .bit = 7}
@@ -117,6 +118,7 @@
 #define FEATURE_ARCH_CAPABILITIES (struct cpu_features){.leaf = FEATURE_LEAF7, .reg = 3, .bit = 29}
 
 #define FEATURE_LAHF    (struct cpu_features){.leaf = FEATURE_LEAF8_01, .reg = 2, .bit = 0}
+#define FEATURE_SVM     (struct cpu_features){.leaf = FEATURE_LEAF8_01, .reg = 2, .bit = 2}
 #define FEATURE_SYSCALL (struct cpu_features){.leaf = FEATURE_LEAF8_01, .reg = 3, .bit = 11}
 #define FEATURE_XD      (struct cpu_features){.leaf = FEATURE_LEAF8_01, .reg = 3, .bit = 20}
 #define FEATURE_PDPE1GB (struct cpu_features){.leaf = FEATURE_LEAF8_01, .reg = 3, .bit = 26}
@@ -162,9 +164,26 @@ struct cpu_subfeatures {
     uint8_t bit;
 };
 
-void cpu_read_features(void);
+typedef struct {
+    char vendor_id[13];
+    char brand_string[49];
+    uint32_t family;
+    uint32_t model;
+    uint32_t stepping;
+
+    bool is_virtualized;
+    char hypervisor_vendor[13];
+
+    bool has_htt;
+    bool has_hw_virt;
+} cpu_info_t;
+
+void cpu_init(void);
 bool cpu_has_feature(struct cpu_features feat);
 bool cpu_has_subfeature(struct cpu_subfeatures feat);
+
+const cpu_info_t* get_cpu_info(void);
+void cpu_print_info(void);
 
 cpuid_registers_t cpu_read_value(uint32_t leaf);
 cpuid_registers_t cpu_read_subleaf_value(uint32_t leaf, uint32_t subleaf);
