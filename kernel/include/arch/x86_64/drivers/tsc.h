@@ -14,15 +14,16 @@ static inline uint64_t tsc_read(void) {
     uint32_t lo = 0;
     uint32_t hi = 0;
 
-    if (cpu_has_feature(FEATURE_RDTSCP)) {
-        asm volatile("rdtscp" : "=a"(lo), "=d"(hi)::"memory", "ecx");
-    } else {
-        asm volatile(
-            "lfence\n\t"
-            "rdtsc"
-            : "=a"(lo), "=d"(hi)
-        );
-    }
+    // Unnecessary clobbering
+    // if (cpu_has_feature(FEATURE_RDTSCP)) {
+    // asm volatile("rdtscp" : "=a"(lo), "=d"(hi)::"memory", "ecx");
+    // } else {
+    asm volatile(
+        "lfence\n\t"
+        "rdtsc"
+        : "=a"(lo), "=d"(hi)
+    );
+    // }
 
     return ((uint64_t)hi << 32) | lo;
 }
