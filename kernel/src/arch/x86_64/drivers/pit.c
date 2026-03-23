@@ -47,11 +47,9 @@ static void set_pit_frequency(uint32_t freq) {
 
 static uint16_t pit_read_hardware_count(void) {
     uint16_t count = 0;
-    irq_lock_t lock;
 
-    acquire_irq_lock(&lock);
-
-    uint8_t cmd = PIT_SELECT_CH0 | PIT_ACCESS_LATCH;
+    size_t flags = acquire_interrupt_lock(nullptr);
+    uint8_t cmd  = PIT_SELECT_CH0 | PIT_ACCESS_LATCH;
 
     io_write8(PIT_PORT_CMD, cmd);
     io_wait();
@@ -59,7 +57,7 @@ static uint16_t pit_read_hardware_count(void) {
     count = io_read8(PIT_PORT_CH0);
     count |= io_read8(PIT_PORT_CH0) << 8;
 
-    release_irq_lock(&lock);
+    release_interrupt_lock(nullptr, flags);
     return count;
 }
 

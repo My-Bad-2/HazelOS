@@ -11,7 +11,7 @@ void pagemap_create(pagemap_t* map) {
         return;
     }
 
-    create_interrupt_lock(&map->lock);
+    create_spinlock(&map->lock);
     arch_mmu_create(&map->arch);
 }
 
@@ -20,9 +20,9 @@ void pagemap_release(pagemap_t* map) {
         return;
     }
 
-    acquire_interrupt_lock(&map->lock);
+    size_t flags = acquire_interrupt_lock(&map->lock);
     arch_mmu_destroy(&map->arch);
-    release_interrupt_lock(&map->lock);
+    release_interrupt_lock(&map->lock, flags);
 }
 
 void pagemap_load(pagemap_t* map) {
@@ -164,15 +164,15 @@ bool pagemap_clone(pagemap_t* dest, pagemap_t* src) {
         return false;
     }
 
-    create_interrupt_lock(&dest->lock);
+    create_spinlock(&dest->lock);
 
-    acquire_interrupt_lock(&src->lock);
-    acquire_interrupt_lock(&dest->lock);
+    size_t flags_src  = acquire_interrupt_lock(&src->lock);
+    size_t flags_dest = acquire_interrupt_lock(&dest->lock);
 
     int status = arch_mmu_clone(&dest->arch, &src->arch);
 
-    release_interrupt_lock(&dest->lock);
-    release_interrupt_lock(&src->lock);
+    release_interrupt_lock(&dest->lock, flags_dest);
+    release_interrupt_lock(&src->lock, flags_src);
 
     if (status != 0) {
         KLOG_DEBUG("Clone failed!\n");

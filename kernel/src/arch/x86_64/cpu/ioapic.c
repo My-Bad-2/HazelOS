@@ -42,7 +42,7 @@ static struct iso_override {
     uint32_t gsi;
 } overrides[NUM_IRQS];
 
-static interrupt_lock_t lock;
+static qspinlock_t lock;
 
 // https://pdos.csail.mit.edu/6.828/2008/readings/ia32/MPspec.pdf Pg 3-8
 static inline void imcr_connect_to_ioapic(void) {
@@ -160,7 +160,7 @@ void ioapic_init(void) {
         return;
     }
 
-    create_interrupt_lock(&lock);
+    create_qspinlock(&lock);
     imcr_connect_to_ioapic();
 
     ioapics = kmalloc(sizeof(ioapic_t) * ioapic_count);
@@ -227,13 +227,13 @@ uint32_t ioapic_get_gsi(uint8_t irq) {
 
 void ioapic_mask_irq(uint32_t gsi, bool mask) {
     ioapic_t* ioapic = require_ioapic(gsi);
-    acquire_interrupt_lock(&lock);
+    size_t flags     = acquire_qinterrupt_lock(&lock);
 
     ioapic_rte_t rte = ioapic_read_rte(ioapic, gsi);
     rte.mask         = mask ? 1 : 0;
     ioapic_write_rte(ioapic, gsi, rte);
 
-    release_interrupt_lock(&lock);
+    release_qinterrupt_lock(&lock, flags);
 }
 
 void ioapic_send_eoi(uint32_t gsi, uint8_t vector) {
@@ -241,9 +241,9 @@ void ioapic_send_eoi(uint32_t gsi, uint8_t vector) {
 
     // Only IOAPICs >= version 0x20 support the EOIR register.
     if (ioapic->version >= IOAPIC_EOIR_MIN_VERSION) {
-        acquire_interrupt_lock(&lock);
+        size_t flags = acquire_qinterrupt_lock(&lock);
         mmio_write32((void*)((uintptr_t)ioapic->virt_base + IOAPIC_EOIR_REG), vector);
-        release_interrupt_lock(&lock);
+        release_qinterrupt_lock(&lock, flags);
     }
 }
 
@@ -273,15 +273,15 @@ void ioapic_configure_irq(
     rte.destination   = dest_apic;
     rte.mask          = mask ? 1 : 0;
 
-    acquire_interrupt_lock(&lock);
+    size_t flags = acquire_qinterrupt_lock(&lock);
     ioapic_write_rte(ioapic, gsi, rte);
-    release_interrupt_lock(&lock);
+    release_qinterrupt_lock(&lock, flags);
 }
 
 void ioapic_configure_irq_vector(uint32_t gsi, uint8_t vector) {
     ioapic_t* ioapic = require_ioapic(gsi);
 
-    acquire_interrupt_lock(&lock);
+    size_t flags     = acquire_qinterrupt_lock(&lock);
     ioapic_rte_t rte = ioapic_read_rte(ioapic, gsi);
 
     rte.vector = vector;
@@ -290,7 +290,7 @@ void ioapic_configure_irq_vector(uint32_t gsi, uint8_t vector) {
     }
 
     ioapic_write_rte(ioapic, gsi, rte);
-    release_interrupt_lock(&lock);
+    release_qinterrupt_lock(&lock, flags);
 }
 
 void ioapic_configure_legacy_irq(

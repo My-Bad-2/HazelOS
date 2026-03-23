@@ -66,7 +66,8 @@ int sys_fork(syscall_regs_t* tf) {
     }
 
     scheduler_add_thread(child_thread);
-    KLOG_DEBUG("Fork successful! child = %d\n", child_proc->pid);
+    scheduler_yield();
+
     return child_proc->pid;
 }
 

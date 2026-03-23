@@ -62,8 +62,12 @@ void user_start() {
     size_t len      = strlen(str) + 1;
 
     ipc_test();
-    fork();
     write(1, str, len);
+
+    int ret = fork();
+    char buf[128];
+    snprintf(buf, 128, "Hello from PID %d\n", ret);
+    write(1, buf, 128);
 
     while (true);
 }

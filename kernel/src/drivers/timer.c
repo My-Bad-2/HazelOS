@@ -25,7 +25,7 @@ void timer_manager_init(timer_manager_t* manager) {
     manager->next_expires_at = manager->curr_ticks;
     manager->active_timers   = 0;
 
-    create_spinlock(&manager->lock);
+    create_qspinlock(&manager->lock);
     KLOG_INIT_OK();
 }
 
@@ -61,7 +61,7 @@ void timer_arm(
         return;
     }
 
-    acquire_spinlock(&manager->lock);
+    acquire_qspinlock(&manager->lock);
 
     ht_init_node(&timer->node);
     timer->callback   = callback;
@@ -78,7 +78,7 @@ void timer_arm(
     internal_add_timer(manager, timer);
     manager->active_timers++;
 
-    release_spinlock(&manager->lock);
+    release_qspinlock(&manager->lock);
 }
 
 bool timer_cancel(timer_event_t* timer) {
@@ -87,10 +87,10 @@ bool timer_cancel(timer_event_t* timer) {
     }
 
     timer_manager_t* manager = timer->owner;
-    acquire_spinlock(&manager->lock);
+    acquire_qspinlock(&manager->lock);
 
     if (timer->owner != manager) {
-        release_spinlock(&manager->lock);
+        release_qspinlock(&manager->lock);
         return false;
     }
 
@@ -98,7 +98,7 @@ bool timer_cancel(timer_event_t* timer) {
     timer->owner = nullptr;
     manager->active_timers--;
 
-    release_spinlock(&manager->lock);
+    release_qspinlock(&manager->lock);
     return true;
 }
 
@@ -131,7 +131,7 @@ void timer_manager_tick(timer_manager_t* manager) {
         return;
     }
 
-    acquire_spinlock(&manager->lock);
+    acquire_qspinlock(&manager->lock);
 
     while (time_before_eq(manager->curr_ticks, now)) {
         uint32_t current_idx = manager->curr_ticks & TVR_MASK;
@@ -159,7 +159,7 @@ void timer_manager_tick(timer_manager_t* manager) {
 
         manager->tv1[current_idx].first = nullptr;
 
-        release_spinlock(&manager->lock);
+        release_qspinlock(&manager->lock);
 
         struct hlist_node* n;
         timer_event_t* timer;
@@ -171,7 +171,7 @@ void timer_manager_tick(timer_manager_t* manager) {
                 timer->callback(timer->ctx);
             }
 
-            acquire_spinlock(&manager->lock);
+            acquire_qspinlock(&manager->lock);
             if (timer->interval > 0 && timer->owner == manager) {
                 timer->expires_at = manager->curr_ticks + timer->interval;
                 internal_add_timer(manager, timer);
@@ -183,13 +183,14 @@ void timer_manager_tick(timer_manager_t* manager) {
                 timer->owner = nullptr;
                 manager->active_timers--;
             }
-            release_spinlock(&manager->lock);
+
+            release_qspinlock(&manager->lock);
         }
 
-        acquire_spinlock(&manager->lock);
+        acquire_qspinlock(&manager->lock);
         manager->curr_ticks++;
     }
 
     manager->next_expires_at = manager->curr_ticks;
-    release_spinlock(&manager->lock);
+    release_qspinlock(&manager->lock);
 }

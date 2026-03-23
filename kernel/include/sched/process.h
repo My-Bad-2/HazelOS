@@ -54,7 +54,7 @@ typedef struct process {
     vm_space_t space;
     pagemap_t map;
 
-    spinlock_t lock;
+    qspinlock_t lock;
     struct dlist_head thread_list;
     handle_table_t handle_table;
 

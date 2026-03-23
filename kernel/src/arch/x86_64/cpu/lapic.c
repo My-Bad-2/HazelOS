@@ -30,7 +30,7 @@ static bool tsc_deadline_supported = false;
 static bool warned_no_freq         = false;
 static bool warned_deadline_mode   = false;
 
-static interrupt_lock_t lock;
+static qspinlock_t lock;
 static timer_mode_t curr_mode;
 
 static uint32_t lapic_read(size_t offset) {
@@ -190,7 +190,7 @@ void lapic_init(void) {
 
     lapic_write(LAPIC_REG_LVT_TIMER, timer_val);
 
-    create_interrupt_lock(&lock);
+    create_qspinlock(&lock);
 
     register_interrupt_handler(
         INTERRUPT_APIC_TIMER,
@@ -235,11 +235,11 @@ void lapic_send_ipi(uint8_t vector, uint32_t dest_lapic_id, apic_interrupt_deliv
     if (x2apic_enabled) {
         write_msr(LAPIC_X2APIC_MSR_ICR, ((uint64_t)dest_lapic_id << 32) | req);
     } else {
-        acquire_interrupt_lock(&lock);
+        size_t flags = acquire_qinterrupt_lock(&lock);
         lapic_write(LAPIC_REG_IRQ_CMD_HIGH, ICR_DST(dest_lapic_id));
         lapic_write(LAPIC_REG_IRQ_CMD_LOW, req);
         lapic_wait_for_ipi_send();
-        release_interrupt_lock(&lock);
+        release_qinterrupt_lock(&lock, flags);
     }
 }
 
@@ -250,10 +250,10 @@ void lapic_send_self_ipi(uint8_t vector, apic_interrupt_delivery_mode_t mode) {
     }
 
     uint32_t req = ICR_LEVEL_ASSERT | ICR_DELIVERY_MODE(mode) | ICR_VECTOR(vector) | ICR_DST_SELF;
-    acquire_interrupt_lock(&lock);
+    size_t flags = acquire_qinterrupt_lock(&lock);
     lapic_write(LAPIC_REG_IRQ_CMD_LOW, req);
     lapic_wait_for_ipi_send();
-    release_interrupt_lock(&lock);
+    release_qinterrupt_lock(&lock, flags);
 }
 
 void lapic_send_broadcast_ipi(uint8_t vector, apic_interrupt_delivery_mode_t mode) {
@@ -263,10 +263,10 @@ void lapic_send_broadcast_ipi(uint8_t vector, apic_interrupt_delivery_mode_t mod
     if (x2apic_enabled) {
         write_msr(LAPIC_X2APIC_MSR_ICR, req);
     } else {
-        acquire_interrupt_lock(&lock);
+        size_t flags = acquire_qinterrupt_lock(&lock);
         lapic_write(LAPIC_REG_IRQ_CMD_LOW, req);
         lapic_wait_for_ipi_send();
-        release_interrupt_lock(&lock);
+        release_qinterrupt_lock(&lock, flags);
     }
 }
 
@@ -276,10 +276,10 @@ void lapic_send_broadcast_self_ipi(uint8_t vector, apic_interrupt_delivery_mode_
     if (x2apic_enabled) {
         write_msr(LAPIC_X2APIC_MSR_ICR, req);
     } else {
-        acquire_interrupt_lock(&lock);
+        size_t flags = acquire_qinterrupt_lock(&lock);
         lapic_write(LAPIC_REG_IRQ_CMD_LOW, req);
         lapic_wait_for_ipi_send();
-        release_interrupt_lock(&lock);
+        release_qinterrupt_lock(&lock, flags);
     }
 }
 

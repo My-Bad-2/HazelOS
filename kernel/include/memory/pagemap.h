@@ -45,7 +45,7 @@ typedef enum {
 // Per Process
 typedef struct {
     arch_pagemap_t arch;
-    interrupt_lock_t lock;
+    spinlock_t lock;
 } pagemap_t;
 
 typedef struct {

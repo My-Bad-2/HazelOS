@@ -20,7 +20,7 @@ void handle_table_init(handle_table_t* table) {
         );
     }
 
-    create_spinlock(&table->lock);
+    create_qspinlock(&table->lock);
     xa_init(&table->xa, 6);
 
     table->active_count  = 0;
@@ -33,7 +33,7 @@ handle_t handle_alloc(handle_table_t* table, void* ptr, uint32_t rights) {
         return HANDLE_INVALID;
     }
 
-    acquire_spinlock(&table->lock);
+    acquire_qspinlock(&table->lock);
 
     uint32_t idx = table->next_free_idx;
     handle_slot_t* slot;
@@ -46,7 +46,7 @@ handle_t handle_alloc(handle_table_t* table, void* ptr, uint32_t rights) {
         table->next_free_idx = slot->next_free;
     } else {
         if (table->max_idx > HANDLE_INDEX_MASK) {
-            release_spinlock(&table->lock);
+            release_qspinlock(&table->lock);
             return HANDLE_INVALID;
         }
 
@@ -55,11 +55,11 @@ handle_t handle_alloc(handle_table_t* table, void* ptr, uint32_t rights) {
         slot = kmem_cache_alloc(handle_cache);
         if (!slot) {
             table->max_idx--;
-            release_spinlock(&table->lock);
+            release_qspinlock(&table->lock);
             return HANDLE_INVALID;
         }
 
-        slot->generation = 1;
+        slot->generation = 0;
         xa_store(&table->xa, idx, slot);
     }
 
@@ -72,7 +72,7 @@ handle_t handle_alloc(handle_table_t* table, void* ptr, uint32_t rights) {
     __atomic_store_n(&slot->generation, gen, memory_order_release);
 
     table->active_count++;
-    release_spinlock(&table->lock);
+    release_qspinlock(&table->lock);
 
     return (gen << HANDLE_GEN_SHIFT) | idx;
 }
@@ -120,11 +120,11 @@ void* handle_free(handle_table_t* table, handle_t handle) {
     uint32_t idx     = handle & HANDLE_INDEX_MASK;
     uint32_t req_gen = (handle >> HANDLE_GEN_SHIFT) & HANDLE_GEN_MASK;
 
-    acquire_spinlock(&table->lock);
+    acquire_qspinlock(&table->lock);
 
     handle_slot_t* slot = (handle_slot_t*)xa_load(&table->xa, idx);
     if (!slot || slot->generation != req_gen || slot->obj == nullptr) {
-        release_spinlock(&table->lock);
+        release_qspinlock(&table->lock);
         return nullptr;
     }
 
@@ -141,7 +141,7 @@ void* handle_free(handle_table_t* table, handle_t handle) {
     table->next_free_idx = idx;
     table->active_count--;
 
-    release_spinlock(&table->lock);
+    release_qspinlock(&table->lock);
     return ptr;
 }
 

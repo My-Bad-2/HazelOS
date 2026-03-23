@@ -7,6 +7,7 @@
 #include "drivers/arch_timer.h"
 #include "drivers/timer.h"
 #include "libs/log.h"
+#include "libs/spinlock.h"
 #include "sched/process.h"
 #include "sched/rcu.h"
 #include "sched/sched_class.h"
@@ -244,23 +245,25 @@ static uint32_t select_best_cpu(thread_t* t) {
     return best_cpu;
 }
 
-static void double_unlock_cpu(per_cpu_data_t* cpu1, per_cpu_data_t* cpu2) {
+static void
+double_unlock_cpu(per_cpu_data_t* cpu1, per_cpu_data_t* cpu2, size_t flags1, size_t flags2) {
     if (cpu1->cpu_idx < cpu2->cpu_idx) {
-        release_interrupt_lock(&cpu1->lock);
-        release_interrupt_lock(&cpu2->lock);
+        release_qinterrupt_lock(&cpu1->lock, flags1);
+        release_qinterrupt_lock(&cpu2->lock, flags2);
     } else {
-        release_interrupt_lock(&cpu2->lock);
-        release_interrupt_lock(&cpu1->lock);
+        release_qinterrupt_lock(&cpu2->lock, flags2);
+        release_qinterrupt_lock(&cpu1->lock, flags1);
     }
 }
 
-static inline void double_lock_cpu(per_cpu_data_t* cpu1, per_cpu_data_t* cpu2) {
+static inline void
+double_lock_cpu(per_cpu_data_t* cpu1, per_cpu_data_t* cpu2, size_t* flags1, size_t* flags2) {
     if (cpu1->cpu_idx < cpu2->cpu_idx) {
-        acquire_interrupt_lock(&cpu1->lock);
-        acquire_interrupt_lock(&cpu2->lock);
+        *flags1 = acquire_qinterrupt_lock(&cpu1->lock);
+        *flags2 = acquire_qinterrupt_lock(&cpu2->lock);
     } else {
-        acquire_interrupt_lock(&cpu2->lock);
-        acquire_interrupt_lock(&cpu1->lock);
+        *flags2 = acquire_qinterrupt_lock(&cpu2->lock);
+        *flags1 = acquire_qinterrupt_lock(&cpu1->lock);
     }
 }
 
@@ -283,10 +286,11 @@ static void balance_load(void) {
         return;
     }
 
-    double_lock_cpu(this_cpu, busiest_cpu);
+    size_t flags1, flags2;
+    double_lock_cpu(this_cpu, busiest_cpu, &flags1, &flags2);
 
     if (busiest_cpu->thread_count <= (this_cpu->thread_count + 1)) {
-        double_unlock_cpu(this_cpu, busiest_cpu);
+        double_unlock_cpu(this_cpu, busiest_cpu, flags1, flags2);
         return;
     }
 
@@ -316,7 +320,7 @@ static void balance_load(void) {
         this_cpu->reschedule_needed = true;
     }
 
-    double_unlock_cpu(this_cpu, busiest_cpu);
+    double_unlock_cpu(this_cpu, busiest_cpu, flags1, flags2);
 }
 
 static bool sched_should_preempt(thread_t* new_task, thread_t* curr_task) {
@@ -396,7 +400,6 @@ void scheduler_init(void) {
 
 void scheduler_add_thread(thread_t* t) {
     if (!t) {
-        KLOG_DEBUG("Here?");
         return;
     }
 
@@ -413,9 +416,8 @@ void scheduler_add_thread(thread_t* t) {
 
     per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
 
-    acquire_interrupt_lock(&cpu->lock);
-
-    size_t now = get_time_now();
+    size_t flags = acquire_qinterrupt_lock(&cpu->lock);
+    size_t now   = get_time_now();
 
     t->state = THREAD_READY;
     t->sched_class->enqueue_task(cpu, t);
@@ -429,7 +431,7 @@ void scheduler_add_thread(thread_t* t) {
         }
     }
 
-    release_interrupt_lock(&cpu->lock);
+    release_qinterrupt_lock(&cpu->lock, flags);
 }
 
 void scheduler_remove_thread(thread_t* t) {
@@ -438,6 +440,7 @@ void scheduler_remove_thread(thread_t* t) {
     }
 
     per_cpu_data_t* cpu = nullptr;
+    size_t flags        = 0;
 
     while (true) {
         uint32_t expected_cpu = *(volatile uint32_t*)&t->assigned_cpu;
@@ -446,14 +449,14 @@ void scheduler_remove_thread(thread_t* t) {
             return;
         }
 
-        cpu = smp_get_core(expected_cpu);
-        acquire_interrupt_lock(&cpu->lock);
+        cpu   = smp_get_core(expected_cpu);
+        flags = acquire_qinterrupt_lock(&cpu->lock);
 
         if (t->assigned_cpu == expected_cpu) {
             break;
         }
 
-        release_interrupt_lock(&cpu->lock);
+        release_qinterrupt_lock(&cpu->lock, flags);
         arch_pause();
     }
 
@@ -472,10 +475,10 @@ void scheduler_remove_thread(thread_t* t) {
         t->state = THREAD_TERMINATED;
     }
 
-    release_interrupt_lock(&cpu->lock);
+    release_qinterrupt_lock(&cpu->lock, flags);
 }
 
-static thread_t* pick_next_task(per_cpu_data_t* cpu) {
+static thread_t* pick_next_task(per_cpu_data_t* cpu, size_t* flags) {
     struct sched_class* sc = sched_classes_head;
 
     while (sc) {
@@ -491,9 +494,9 @@ static thread_t* pick_next_task(per_cpu_data_t* cpu) {
 
     // No runnable tasks found. Try stealing from neighbors.
     if ((cpu->balance_counter & 63) == 0) {
-        release_interrupt_lock(&cpu->lock);
+        release_qinterrupt_lock(&cpu->lock, *flags);
         balance_load();
-        acquire_interrupt_lock(&cpu->lock);
+        *flags = acquire_qinterrupt_lock(&cpu->lock);
 
         sc = sched_classes_head;
         while (sc) {
@@ -534,7 +537,7 @@ void schedule(void) {
         thread_save_fpu(curr);
     }
 
-    acquire_interrupt_lock(&cpu->lock);
+    size_t flags = acquire_qinterrupt_lock(&cpu->lock);
 
     update_cpu_load(cpu, now);
 
@@ -553,7 +556,7 @@ void schedule(void) {
         }
     }
 
-    thread_t* next = pick_next_task(cpu);
+    thread_t* next = pick_next_task(cpu, &flags);
 
     if (curr == next) {
         curr->state           = THREAD_RUNNING;
@@ -562,7 +565,7 @@ void schedule(void) {
             curr->sched_class->dequeue_task(cpu, curr);
         }
 
-        release_interrupt_lock(&cpu->lock);
+        release_qinterrupt_lock(&cpu->lock, flags);
         return;
     }
 
@@ -589,7 +592,7 @@ void schedule(void) {
 
     thread_restore_fpu(next);
 
-    release_interrupt_lock(&cpu->lock);
+    release_qinterrupt_lock(&cpu->lock, flags);
 
     arch_switch_context(
         (switch_context_t**)&curr->context_rsp,
@@ -599,7 +602,7 @@ void schedule(void) {
 
 void scheduler_block(void) {
     per_cpu_data_t* cpu = smp_current_core();
-    acquire_interrupt_lock(&cpu->lock);
+    size_t flags        = acquire_qinterrupt_lock(&cpu->lock);
 
     thread_t* curr = cpu->curr_thread;
     if (curr && curr != cpu->idle_thread) {
@@ -607,7 +610,7 @@ void scheduler_block(void) {
         cpu->reschedule_needed = true;
     }
 
-    release_interrupt_lock(&cpu->lock);
+    release_qinterrupt_lock(&cpu->lock, flags);
     schedule();
 }
 
@@ -622,10 +625,10 @@ void scheduler_unblock(thread_t* t) {
 
     per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
 
-    acquire_interrupt_lock(&cpu->lock);
+    size_t flags = acquire_qinterrupt_lock(&cpu->lock);
 
     if (t->state != THREAD_BLOCKED && t->state != THREAD_SLEEPING) {
-        release_interrupt_lock(&cpu->lock);
+        release_qinterrupt_lock(&cpu->lock, flags);
         return;
     }
 
@@ -644,12 +647,12 @@ void scheduler_unblock(thread_t* t) {
         }
     }
 
-    release_interrupt_lock(&cpu->lock);
+    release_qinterrupt_lock(&cpu->lock, flags);
 }
 
 void scheduler_yield(void) {
     per_cpu_data_t* cpu = smp_current_core();
-    acquire_interrupt_lock(&cpu->lock);
+    size_t flags        = acquire_qinterrupt_lock(&cpu->lock);
 
     thread_t* curr = cpu->curr_thread;
     if (curr && curr != cpu->idle_thread) {
@@ -660,7 +663,7 @@ void scheduler_yield(void) {
         cpu->reschedule_needed = true;
     }
 
-    release_interrupt_lock(&cpu->lock);
+    release_qinterrupt_lock(&cpu->lock, flags);
     schedule();
 }
 
@@ -680,9 +683,9 @@ void scheduler_sleep(size_t ms) {
     curr->state = THREAD_SLEEPING;
 
     timer_event_t event;
-    timer_arm(&cpu->timer_manager, &event, ms * 1000000, 0, sleep_callback, curr);
+    timer_arm(cpu->timer_manager, &event, ms * 1000000, 0, sleep_callback, curr);
 
-    release_interrupt_lock(&cpu->lock);
+    release_qspinlock(&cpu->lock);
     scheduler_yield();
 }
 
@@ -704,6 +707,7 @@ void scheduler_renice(thread_t* t, int nice) {
     }
 
     per_cpu_data_t* cpu = nullptr;
+    size_t flags        = 0;
 
     while (true) {
         uint32_t expected_cpu = *(volatile uint32_t*)&t->assigned_cpu;
@@ -712,14 +716,14 @@ void scheduler_renice(thread_t* t, int nice) {
             return;
         }
 
-        cpu = smp_get_core(expected_cpu);
-        acquire_interrupt_lock(&cpu->lock);
+        cpu   = smp_get_core(expected_cpu);
+        flags = acquire_qinterrupt_lock(&cpu->lock);
 
         if (t->assigned_cpu == expected_cpu) {
             break;
         }
 
-        release_interrupt_lock(&cpu->lock);
+        release_qinterrupt_lock(&cpu->lock, flags);
         arch_pause();
     }
 
@@ -743,7 +747,7 @@ void scheduler_renice(thread_t* t, int nice) {
         }
     }
 
-    release_interrupt_lock(&cpu->lock);
+    release_qinterrupt_lock(&cpu->lock, flags);
 }
 
 bool scheduler_is_initialized(void) {

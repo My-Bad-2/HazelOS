@@ -1,10 +1,9 @@
-#include <llvm-libc-macros/generic-error-number-macros.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "arch.h"
-#include "cpu/exception.h"
 #include "cpu/syscalls.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
@@ -20,7 +19,7 @@
 
 static kmem_cache_t* thread_cache         = nullptr;
 static struct dlist_head dead_thread_list = DLIST_INIT(dead_thread_list);
-static spinlock_t dead_thread_lock;
+static qspinlock_t dead_thread_lock;
 
 static struct wait_queue reaper_wait_queue;
 
@@ -74,10 +73,10 @@ static thread_t* thread_create_internal(
         return nullptr;
     }
 
-    acquire_spinlock(&proc->lock);
+    acquire_qspinlock(&proc->lock);
     process_insert_thread(proc, t);
     proc->thread_count++;
-    release_spinlock(&proc->lock);
+    release_qspinlock(&proc->lock);
 
     return t;
 }
@@ -151,10 +150,10 @@ thread_clone(process_t* target_proc, thread_t* parent, syscall_regs_t* tf, void*
 
     arch_thread_clone(child, tf, child_stack);
 
-    acquire_spinlock(&target_proc->lock);
+    acquire_qspinlock(&target_proc->lock);
     process_insert_thread(target_proc, child);
     target_proc->thread_count++;
-    release_spinlock(&target_proc->lock);
+    release_qspinlock(&target_proc->lock);
 
     return child;
 }
@@ -164,9 +163,9 @@ static void reaper_enqueue_dead_thread(thread_t* t) {
         return;
     }
 
-    acquire_spinlock(&dead_thread_lock);
+    acquire_qspinlock(&dead_thread_lock);
     dlist_add_tail(&t->wait_node, &dead_thread_list);
-    release_spinlock(&dead_thread_lock);
+    release_qspinlock(&dead_thread_lock);
 
     wait_queue_wake_up_all(&reaper_wait_queue);
 }
@@ -181,7 +180,7 @@ void thread_destroy(thread_t* t) {
     wait_queue_wake_up_all(&t->join_queue);
 
     if (t->owner) {
-        acquire_spinlock(&t->owner->lock);
+        acquire_qspinlock(&t->owner->lock);
 
         if (!dlist_empty(&t->process_node)) {
             dlist_del(&t->process_node);
@@ -189,7 +188,7 @@ void thread_destroy(thread_t* t) {
             t->owner->thread_count--;
         }
 
-        release_spinlock(&t->owner->lock);
+        release_qspinlock(&t->owner->lock);
     }
 
     if (t == smp_current_core()->curr_thread) {
@@ -222,13 +221,13 @@ void thread_exit(int exit_code) {
 
     bool is_last_thread = false;
     if (curr->owner) {
-        acquire_spinlock(&curr->owner->lock);
+        acquire_qspinlock(&curr->owner->lock);
 
         if (curr->owner->thread_count <= 1) {
             is_last_thread = true;
         }
 
-        release_spinlock(&curr->owner->lock);
+        release_qspinlock(&curr->owner->lock);
     }
 
     if (is_last_thread && curr->owner->state == PROCESS_ALIVE) {
@@ -272,9 +271,9 @@ void reaper_task_entry(void*) {
     while (true) {
         thread_sleep_prepare(&reaper_wait_queue);
 
-        acquire_spinlock(&dead_thread_lock);
+        acquire_qspinlock(&dead_thread_lock);
         bool has_work = !dlist_empty(&dead_thread_list);
-        release_spinlock(&dead_thread_lock);
+        release_qspinlock(&dead_thread_lock);
 
         if (!has_work) {
             scheduler_yield();
@@ -283,17 +282,17 @@ void reaper_task_entry(void*) {
         }
 
         thread_sleep_finish(&reaper_wait_queue);
-        acquire_spinlock(&dead_thread_lock);
+        acquire_qspinlock(&dead_thread_lock);
 
         if (dlist_empty(&dead_thread_list)) {
-            release_spinlock(&dead_thread_lock);
+            release_qspinlock(&dead_thread_lock);
             continue;
         }
 
         struct dlist_head* node = dead_thread_list.next;
         dlist_del(node);
 
-        release_spinlock(&dead_thread_lock);
+        release_qspinlock(&dead_thread_lock);
 
         thread_t* dead_thread = dlist_entry(node, thread_t, wait_node);
         KLOG_DEBUG("REAPER: cleaning up dead thread tid=%u\n", dead_thread->tid);

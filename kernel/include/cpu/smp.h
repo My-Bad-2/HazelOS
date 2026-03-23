@@ -29,7 +29,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     uintptr_t kstack_top;
     uintptr_t scratch_user_rsp;
 
-    interrupt_lock_t lock;
+    qspinlock_t lock;
 
     uint32_t cpu_idx;
     uint32_t lapic_id;
@@ -38,6 +38,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     bool reschedule_needed;
     bool is_nohz_active;
     uint8_t _pad0;
+    uint32_t qspin_node_idx;
 
     size_t min_vruntime;
 
@@ -46,7 +47,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     struct rb_root_cached dl_tree;
     struct rcu_data* rcu;
 
-    timer_manager_t timer_manager;
+    timer_manager_t* timer_manager;
 
     atomic_size_t cpu_load;
     size_t last_load_update;  // Timestamp of last update
@@ -58,6 +59,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     atomic_int is_online;
 
     struct arch_cpu_data arch;
+    struct mcs_node qspin_nodes[MAX_QSPIN_NODES];
 } per_cpu_data_t;
 
 void smp_init(void);

@@ -4,8 +4,6 @@
 #include "boot/boot.h"
 #include "libs/log.h"
 #include "libs/math.h"
-#include "libs/spinlock.h"
-#include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
@@ -114,41 +112,4 @@ void uacpi_kernel_log(uacpi_log_level lvl, const uacpi_char* fmt) {
             KLOG_DEBUG(fmt);
             break;
     }
-}
-
-void* uacpi_kernel_alloc(uacpi_size size) {
-    return kmalloc(size);
-}
-
-void uacpi_kernel_free(void* mem, uacpi_size len) {
-    kfree(mem);
-}
-
-uacpi_handle uacpi_kernel_create_mutex() {
-    interrupt_lock_t* lock = kmalloc(sizeof(interrupt_lock_t));
-    create_interrupt_lock(lock);
-    return lock;
-}
-
-void uacpi_kernel_free_mutex(uacpi_handle lock) {
-    kfree(lock);
-}
-
-uacpi_handle uacpi_kernel_create_spinlock() {
-    spinlock_t* lock = kmalloc(sizeof(spinlock_t));
-    create_spinlock(lock);
-    return lock;
-}
-
-void uacpi_kernel_free_spinlock(uacpi_handle lock) {
-    kfree(lock);
-}
-
-uacpi_status uacpi_kernel_acquire_mutex(uacpi_handle lock, uacpi_u16) {
-    acquire_interrupt_lock((interrupt_lock_t*)lock);
-    return UACPI_STATUS_OK;
-}
-
-void uacpi_kernel_release_mutex(uacpi_handle lock) {
-    release_interrupt_lock((interrupt_lock_t*)lock);
 }

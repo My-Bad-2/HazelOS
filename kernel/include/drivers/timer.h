@@ -32,9 +32,9 @@ typedef struct {
     struct hlist_head tv5[TVN_SIZE];
 
     size_t curr_ticks;
-    spinlock_t lock;
-
     volatile size_t active_timers;
+
+    qspinlock_t lock;
     volatile uint32_t next_expires_at;
 } timer_manager_t;
 

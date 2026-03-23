@@ -4,27 +4,27 @@
 #include "libs/spinlock.h"
 
 struct sched_class* sched_classes_head = nullptr;
-static spinlock_t class_lock;
+static qspinlock_t class_lock;
 
 void sched_class_init(void) {
     sched_classes_head = nullptr;
-    create_spinlock(&class_lock);
+    create_qspinlock(&class_lock);
 }
 
 struct sched_class* get_sched_class(int policy_id) {
-    acquire_spinlock(&class_lock);
+    acquire_qspinlock(&class_lock);
 
     struct sched_class* curr = sched_classes_head;
     while (curr) {
         if (curr->policy_id == policy_id) {
-            release_spinlock(&class_lock);
+            release_qspinlock(&class_lock);
             return curr;
         }
 
         curr = curr->next;
     }
 
-    release_spinlock(&class_lock);
+    release_qspinlock(&class_lock);
     return nullptr;
 }
 
@@ -33,12 +33,12 @@ void sched_class_register(struct sched_class* sc) {
         return;
     }
 
-    acquire_spinlock(&class_lock);
+    acquire_qspinlock(&class_lock);
 
     struct sched_class** link = &sched_classes_head;
     while (*link && (*link)->priority >= sc->priority) {
         if (*link == sc) {
-            release_spinlock(&class_lock);
+            release_qspinlock(&class_lock);
             KLOG_WARN("SCHED: Class '%s' is already registered\n", sc->name);
             return;
         }
@@ -49,7 +49,7 @@ void sched_class_register(struct sched_class* sc) {
     sc->next = *link;
     *link    = sc;
 
-    release_spinlock(&class_lock);
+    release_qspinlock(&class_lock);
     KLOG_INFO(
         "SCHED: Registered class '%s' (policy: %d, priority: %d)\n",
         sc->name,
@@ -63,7 +63,7 @@ bool sched_class_unregister(struct sched_class* sc) {
         return false;
     }
 
-    acquire_spinlock(&class_lock);
+    acquire_qspinlock(&class_lock);
 
     struct sched_class** link = &sched_classes_head;
     bool found                = false;
@@ -79,7 +79,7 @@ bool sched_class_unregister(struct sched_class* sc) {
         link = &(*link)->next;
     }
 
-    release_spinlock(&class_lock);
+    release_qspinlock(&class_lock);
 
     if (found) {
         KLOG_INFO("SCHED: Unregistered class '%s'\n", sc->name);

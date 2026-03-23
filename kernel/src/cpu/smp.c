@@ -62,9 +62,11 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
     cpu->kstack_top = (uintptr_t)stack + KSTACK_SIZE;
     cpu->rcu        = kmalloc(sizeof(struct rcu_data));
 
-    create_interrupt_lock(&cpu->lock);
+    create_qspinlock(&cpu->lock);
 
-    timer_manager_init(&cpu->timer_manager);
+    cpu->timer_manager = kmalloc(sizeof(timer_manager_t));
+
+    timer_manager_init(cpu->timer_manager);
     arch_init_cpu_state(cpu);
 
     KLOG_DEBUG(

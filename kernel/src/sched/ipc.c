@@ -106,13 +106,13 @@ static void put_object(process_t* proc, ipc_object_t* obj) {
             ipc_channel_t* chan = (ipc_channel_t*)obj;
 
             if (chan->peer) {
-                acquire_spinlock(&chan->peer->header.lock);
+                acquire_qspinlock(&chan->peer->header.lock);
 
                 chan->peer->peer        = nullptr;
                 chan->peer->peer_closed = true;
                 sys_ipc_notify_internal(chan->peer);
 
-                release_spinlock(&chan->peer->header.lock);
+                release_qspinlock(&chan->peer->header.lock);
             }
 
             ipc_msg_t *msg, *n;
@@ -178,12 +178,12 @@ int sys_ipc_create_channel(int32_t* handles_out) {
     memset(ch2, 0, sizeof(ipc_channel_t));
 
     ch1->header.type = OBJ_CHANNEL;
-    create_spinlock(&ch1->header.lock);
+    create_qspinlock(&ch1->header.lock);
     dlist_init(&ch1->msg_queue);
     ch1->max_msg_count = 1024;
 
     ch2->header.type = OBJ_CHANNEL;
-    create_spinlock(&ch2->header.lock);
+    create_qspinlock(&ch2->header.lock);
     dlist_init(&ch2->msg_queue);
     ch2->max_msg_count = 1024;
 
@@ -222,7 +222,7 @@ int sys_ipc_create_port_set(int32_t* handle_out) {
     memset(set, 0, sizeof(ipc_port_set_t));
 
     set->header.type = OBJ_PORT_SET;
-    create_spinlock(&set->header.lock);
+    create_qspinlock(&set->header.lock);
     dlist_init(&set->event_queue);
     thread_queue_init(&set->waiters);
 
@@ -251,10 +251,10 @@ int sys_ipc_bind(int32_t port_handle, int32_t chan_handle, uint64_t key) {
         return -EACCES;
     }
 
-    acquire_spinlock(&channel->header.lock);
+    acquire_qspinlock(&channel->header.lock);
     channel->wait_set = set;
     channel->user_key = key;
-    release_spinlock(&channel->header.lock);
+    release_qspinlock(&channel->header.lock);
 
     put_object(me, (ipc_object_t*)set);
     put_object(me, (ipc_object_t*)channel);
@@ -268,11 +268,11 @@ void sys_ipc_notify_internal(ipc_channel_t* dest) {
         return;
     }
 
-    acquire_spinlock(&set->header.lock);
+    acquire_qspinlock(&set->header.lock);
 
     ipc_kernel_event_t* event = kmem_cache_alloc(event_cache);
     if (!event) {
-        release_spinlock(&set->header.lock);
+        release_qspinlock(&set->header.lock);
         return;
     }
 
@@ -288,7 +288,7 @@ void sys_ipc_notify_internal(ipc_channel_t* dest) {
         scheduler_unblock(t);
     }
 
-    release_spinlock(&set->header.lock);
+    release_qspinlock(&set->header.lock);
 }
 
 int sys_ipc_notify(int32_t chan_handle) {
@@ -318,12 +318,12 @@ int sys_ipc_notify(int32_t chan_handle) {
     ipc_channel_t* first_lock  = (src < dest) ? src : dest;
     ipc_channel_t* second_lock = (src < dest) ? dest : src;
 
-    acquire_spinlock(&first_lock->header.lock);
-    acquire_spinlock(&second_lock->header.lock);
+    acquire_qspinlock(&first_lock->header.lock);
+    acquire_qspinlock(&second_lock->header.lock);
 
     if (!src->peer || src->peer_closed) {
-        release_spinlock(&second_lock->header.lock);
-        release_spinlock(&first_lock->header.lock);
+        release_qspinlock(&second_lock->header.lock);
+        release_qspinlock(&first_lock->header.lock);
 
         put_object(me, (ipc_object_t*)src);
         return -EPIPE;
@@ -331,8 +331,8 @@ int sys_ipc_notify(int32_t chan_handle) {
 
     sys_ipc_notify_internal(dest);
 
-    release_spinlock(&second_lock->header.lock);
-    release_spinlock(&first_lock->header.lock);
+    release_qspinlock(&second_lock->header.lock);
+    release_qspinlock(&first_lock->header.lock);
 
     put_object(me, (ipc_object_t*)src);
     return 0;
@@ -349,15 +349,15 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
     int ret     = 0;
     thread_t* t = smp_current_core()->curr_thread;
 
-    acquire_spinlock(&set->header.lock);
+    acquire_qspinlock(&set->header.lock);
 
     while (true) {
         thread_queue_push(&set->waiters, t);
-        release_spinlock(&set->header.lock);
+        release_qspinlock(&set->header.lock);
 
         scheduler_sleep((uint32_t)timeout_ms);
 
-        acquire_spinlock(&set->header.lock);
+        acquire_qspinlock(&set->header.lock);
 
         if (!dlist_empty(&t->wait_node)) {
             dlist_del(&t->wait_node);
@@ -384,7 +384,7 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
         }
     }
 
-    release_spinlock(&set->header.lock);
+    release_qspinlock(&set->header.lock);
     put_object(me, (ipc_object_t*)set);
     return ret;
 }
@@ -459,12 +459,12 @@ int sys_ipc_send_msg(
     ipc_channel_t* first_lock  = (src < dest) ? src : dest;
     ipc_channel_t* second_lock = (src < dest) ? dest : src;
 
-    acquire_spinlock(&first_lock->header.lock);
-    acquire_spinlock(&second_lock->header.lock);
+    acquire_qspinlock(&first_lock->header.lock);
+    acquire_qspinlock(&second_lock->header.lock);
 
     if (!src->peer || src->peer_closed) {
-        release_spinlock(&second_lock->header.lock);
-        release_spinlock(&first_lock->header.lock);
+        release_qspinlock(&second_lock->header.lock);
+        release_qspinlock(&first_lock->header.lock);
 
         for (size_t i = 0; i < num_handles; ++i) {
             atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
@@ -476,8 +476,8 @@ int sys_ipc_send_msg(
     }
 
     if (dest->msg_count >= dest->max_msg_count) {
-        release_spinlock(&second_lock->header.lock);
-        release_spinlock(&first_lock->header.lock);
+        release_qspinlock(&second_lock->header.lock);
+        release_qspinlock(&first_lock->header.lock);
 
         for (size_t i = 0; i < num_handles; ++i) {
             atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
@@ -493,8 +493,8 @@ int sys_ipc_send_msg(
 
     sys_ipc_notify_internal(dest);
 
-    release_spinlock(&second_lock->header.lock);
-    release_spinlock(&first_lock->header.lock);
+    release_qspinlock(&second_lock->header.lock);
+    release_qspinlock(&first_lock->header.lock);
 
     put_object(me, (ipc_object_t*)src);
     return 0;
@@ -517,9 +517,9 @@ int sys_ipc_recv_msg(int32_t chan_handle, ipc_msg_info_t* user_info) {
         return -EACCES;
     }
 
-    acquire_spinlock(&channel->header.lock);
+    acquire_qspinlock(&channel->header.lock);
     if (dlist_empty(&channel->msg_queue)) {
-        release_spinlock(&channel->header.lock);
+        release_qspinlock(&channel->header.lock);
         put_object(me, (ipc_object_t*)channel);
         return channel->peer_closed ? -EPIPE : -EAGAIN;
     }
@@ -530,7 +530,7 @@ int sys_ipc_recv_msg(int32_t chan_handle, ipc_msg_info_t* user_info) {
     dlist_del(first);
     channel->msg_count--;
 
-    release_spinlock(&channel->header.lock);
+    release_qspinlock(&channel->header.lock);
 
     size_t copy_size =
         (msg->payload_size < info.data_size_max) ? msg->payload_size : info.data_size_max;
@@ -574,7 +574,7 @@ static void ipc_timer_callback(void* ctx) {
         return;
     }
 
-    acquire_spinlock(&set->header.lock);
+    acquire_qspinlock(&set->header.lock);
 
     if (t->event_node.node.next == nullptr) {
         dlist_add_tail(&t->event_node.node, &set->event_queue);
@@ -585,7 +585,7 @@ static void ipc_timer_callback(void* ctx) {
         }
     }
 
-    release_spinlock(&set->header.lock);
+    release_qspinlock(&set->header.lock);
 }
 
 int sys_ipc_timer_arm(
@@ -601,7 +601,7 @@ int sys_ipc_timer_arm(
 
     process_t* me        = smp_current_core()->curr_thread->owner;
     ipc_port_set_t* set  = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_WRITE);
-    timer_manager_t* mgr = &smp_current_core()->timer_manager;
+    timer_manager_t* mgr = smp_current_core()->timer_manager;
 
     if (!set) {
         return -EACCES;
@@ -626,7 +626,7 @@ int sys_ipc_timer_arm(
     memset(t, 0, sizeof(struct ipc_timer));
 
     t->header.type = OBJ_TIMER;
-    create_spinlock(&t->header.lock);
+    create_qspinlock(&t->header.lock);
 
     t->port                   = set;
     t->user_key               = user_key;
@@ -692,7 +692,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
     }
 
     shm->header.type = OBJ_SHARED_MEM;
-    create_spinlock(&shm->header.lock);
+    create_qspinlock(&shm->header.lock);
     shm->size       = aligned_size;
     shm->page_count = page_count;
     shm->pages      = kmalloc(sizeof(uintptr_t) * page_count);
@@ -702,7 +702,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
         return -ENOMEM;
     }
 
-    acquire_spinlock(&shm->header.lock);
+    acquire_qspinlock(&shm->header.lock);
 
     for (size_t i = 0; i < page_count; ++i) {
         void* virt_addr = vmalloc(
@@ -716,7 +716,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
 
         if (!virt_addr) {
             shm->page_count = i;
-            release_spinlock(&shm->header.lock);
+            release_qspinlock(&shm->header.lock);
             ipc_shm_free(me, shm);
             return -ENOMEM;
         }
@@ -725,7 +725,7 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
         shm->pages[i] = (uintptr_t)virt_addr;
     }
 
-    release_spinlock(&shm->header.lock);
+    release_qspinlock(&shm->header.lock);
 
     int32_t handle = alloc_handle(me, &shm->header, IPC_RIGHTS_ALL);
     if (handle == 0) {
@@ -733,10 +733,10 @@ int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* va
         return handle;
     }
 
-    acquire_spinlock(&shm->header.lock);
+    acquire_qspinlock(&shm->header.lock);
     *handle_out = handle;
     *vaddr_out  = shm->pages[0];
-    release_spinlock(&shm->header.lock);
+    release_qspinlock(&shm->header.lock);
 
     return 0;
 }
@@ -764,7 +764,7 @@ int sys_ipc_inspect(int32_t handle, struct ipc_info* info) {
     info->ref_count = atomic_load(&obj->ref_count);
     info->rights    = rights;
 
-    acquire_spinlock(&obj->lock);
+    acquire_qspinlock(&obj->lock);
 
     switch (obj->type) {
         case OBJ_CHANNEL: {
@@ -808,7 +808,7 @@ int sys_ipc_inspect(int32_t handle, struct ipc_info* info) {
             break;
     }
 
-    release_spinlock(&obj->lock);
+    release_qspinlock(&obj->lock);
     put_object(me, obj);
     return 0;
 }

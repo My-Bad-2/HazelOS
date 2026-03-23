@@ -25,7 +25,7 @@ static const char* C_CRIT    = "\033[1;31m";     // Bold Red
 static const char* C_FATAL   = "\033[41;37m";    // White on Red Background
 static const char* C_EMERG   = "\033[5;41;37m";  // Blinking White on Red
 
-static interrupt_lock_t log_lock;
+static spinlock_t log_lock;
 
 static uint32_t last_cpu_id          = 0;
 static bool line_is_unterminated     = false;
@@ -138,8 +138,9 @@ void kernel_log(log_level_t level, const char* fmt, ...) {
 
     bool ends_with_newline = (buf[total_len - 5] == '\n');
 
+    size_t flags = 0;
     if (!panic_in_progress) {
-        acquire_interrupt_lock(&log_lock);
+        flags = acquire_interrupt_lock(&log_lock);
     }
 
     if (line_is_unterminated && last_cpu_id != cpu_id) {
@@ -154,7 +155,7 @@ void kernel_log(log_level_t level, const char* fmt, ...) {
     line_is_unterminated = !ends_with_newline;
 
     if (!panic_in_progress) {
-        release_interrupt_lock(&log_lock);
+        release_interrupt_lock(&log_lock, flags);
     }
 }
 
@@ -171,8 +172,9 @@ void kernel_log_cont(const char* fmt, ...) {
 
     uint32_t cpu_id = arch_get_core_idx();
 
+    size_t flags = 0;
     if (!panic_in_progress) {
-        acquire_interrupt_lock(&log_lock);
+        flags = acquire_interrupt_lock(&log_lock);
     }
 
     log_level_t level = last_target_level;
@@ -188,7 +190,7 @@ void kernel_log_cont(const char* fmt, ...) {
     line_is_unterminated = !ends_with_newline;
 
     if (!panic_in_progress) {
-        release_interrupt_lock(&log_lock);
+        release_interrupt_lock(&log_lock, flags);
     }
 }
 

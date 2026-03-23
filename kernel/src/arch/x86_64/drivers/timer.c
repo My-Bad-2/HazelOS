@@ -37,7 +37,7 @@ static void timer_handler(interrupt_trapframe_t*, void*) {
     per_cpu_data_t* cpu = smp_current_core();
 
     timer_tick();
-    timer_manager_tick(&cpu->timer_manager);
+    timer_manager_tick(cpu->timer_manager);
 
     if (scheduler_is_initialized()) {
         thread_t* curr = cpu->curr_thread;

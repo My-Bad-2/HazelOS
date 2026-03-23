@@ -32,7 +32,7 @@ typedef struct [[gnu::aligned(16)]] {
 } handle_slot_t;
 
 typedef struct {
-    spinlock_t lock;
+    qspinlock_t lock;
     xarray_t xa;
     uint32_t next_free_idx;
     uint32_t max_idx;

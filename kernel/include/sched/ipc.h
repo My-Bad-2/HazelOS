@@ -36,7 +36,7 @@ typedef enum {
 typedef struct {
     ipc_obj_type_t type;
     atomic_int ref_count;
-    spinlock_t lock;
+    qspinlock_t lock;
 } ipc_object_t;
 
 typedef struct ipc_msg {
