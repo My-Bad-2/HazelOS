@@ -9,13 +9,14 @@
 #include "drivers/arch_timer.h"
 #include "drivers/timer.h"
 #include "libs/log.h"
+#include "libs/math.h"
 #include "libs/spinlock.h"
 
 #include "internal/pit.h"
 
-static atomic_size_t global_ticks    = 0;
-static atomic_uint current_frequency = 0;
-static bool warned_zero_freq         = false;
+static _Atomic(uint64_t) global_ticks = 0;
+static atomic_uint current_frequency  = 0;
+static bool warned_zero_freq          = false;
 
 static void set_pit_frequency(uint32_t freq) {
     if (freq == 0) {
@@ -48,8 +49,8 @@ static void set_pit_frequency(uint32_t freq) {
 static uint16_t pit_read_hardware_count(void) {
     uint16_t count = 0;
 
-    size_t flags = acquire_interrupt_lock(nullptr);
-    uint8_t cmd  = PIT_SELECT_CH0 | PIT_ACCESS_LATCH;
+    uint64_t flags = acquire_interrupt_lock(nullptr);
+    uint8_t cmd    = PIT_SELECT_CH0 | PIT_ACCESS_LATCH;
 
     io_write8(PIT_PORT_CMD, cmd);
     io_wait();
@@ -69,7 +70,7 @@ uint64_t pit_get_ticks(void) {
     return atomic_load_explicit(&global_ticks, memory_order_seq_cst);
 }
 
-size_t pit_get_hz(void) {
+uint64_t pit_get_hz(void) {
     return current_frequency;
 }
 
@@ -91,8 +92,8 @@ void pit_init(void) {
     KLOG_INFO("PIT: initialized at %u Hz\n", freq);
 }
 
-void pit_mdelay(size_t ms) {
-    size_t start_ticks = pit_get_ticks();
+void pit_mdelay(uint64_t ms) {
+    uint64_t start_ticks = pit_get_ticks();
 
     uint32_t freq = atomic_load_explicit(&current_frequency, memory_order_seq_cst);
 
@@ -115,7 +116,7 @@ void pit_mdelay(size_t ms) {
     }
 }
 
-void pit_udelay(size_t us) {
+void pit_udelay(uint64_t us) {
     if (us >= 1000) {
         pit_mdelay(us / 1000);
         us %= 1000;
@@ -142,4 +143,37 @@ void pit_udelay(size_t us) {
             break;
         }
     }
+}
+
+uint64_t pit_get_time_ms(void) {
+    uint64_t freq = atomic_load_explicit(&current_frequency, memory_order_seq_cst);
+    if (freq == 0) {
+        return 0;
+    }
+
+    uint64_t ticks = pit_get_ticks();
+    // Formula: (ticks * 1000) / freq
+    return muldiv64(ticks, 1000ul, freq);
+}
+
+uint64_t pit_get_time_us(void) {
+    uint64_t freq = atomic_load_explicit(&current_frequency, memory_order_seq_cst);
+    if (freq == 0) {
+        return 0;
+    }
+
+    uint64_t ticks = pit_get_ticks();
+    // Formula: (ticks * 1,000,000) / freq
+    return muldiv64(ticks, 1000000ul, freq);
+}
+
+uint64_t pit_get_time_ns(void) {
+    uint64_t freq = atomic_load_explicit(&current_frequency, memory_order_seq_cst);
+    if (freq == 0) {
+        return 0;
+    }
+
+    uint64_t ticks = pit_get_ticks();
+    // Formula: (ticks * 1,000,000,000) / freq
+    return muldiv64(ticks, 1000000000ul, freq);
 }

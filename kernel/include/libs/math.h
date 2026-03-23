@@ -3,6 +3,9 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
+
+#include "compiler.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +39,11 @@ static inline size_t div_roundup(size_t n, size_t a) {
 
 static inline bool is_aligned(size_t n, size_t a) {
     return (n & (a - 1)) == 0;
+}
+
+static inline uint64_t muldiv64(uint64_t a, uint64_t b, uint64_t c) {
+    uint128_t res = (uint128_t)a * b;
+    return (uint64_t)(res / c);
 }
 
 #ifdef __cplusplus

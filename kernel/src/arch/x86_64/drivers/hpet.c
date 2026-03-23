@@ -10,6 +10,7 @@
 #include "drivers/pit.h"
 #include "drivers/timer.h"
 #include "libs/log.h"
+#include "libs/math.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
@@ -93,7 +94,7 @@ void hpet_init(void) {
     uintptr_t phys_addr = hpet->address.address;
     uacpi_table_unref(&hpet_view);
 
-    size_t size = PAGE_SIZE_SMALL;
+    uint64_t size = PAGE_SIZE_SMALL;
 
     hpet_regs = vmalloc(
         kernel_space,
@@ -126,7 +127,7 @@ void hpet_init(void) {
     uint16_t vendor_id      = (caps >> 16) & 0xffff;
 
     // n_timers = (bits 8:12 of cap) + 1
-    size_t num_timers = ((hpet_regs->general_caps >> 8) & 0x1f) + 1;
+    uint64_t num_timers = ((hpet_regs->general_caps >> 8) & 0x1f) + 1;
 
     if (vendor_id == 0 || vendor_id == 0xffff) {
         errno = ENODEV;
@@ -177,7 +178,7 @@ static uint64_t time_to_ticks(uint64_t value, uint64_t fs_per_unit) {
     return (value * fs_per_unit) / clock_period_fs;
 }
 
-void hpet_ndelay(size_t ns) {
+void hpet_ndelay(uint64_t ns) {
     if (!hpet_regs) {
         errno = ENODEV;
 
@@ -189,8 +190,8 @@ void hpet_ndelay(size_t ns) {
         return;
     }
 
-    size_t start = hpet_regs->main_counter_value;
-    size_t ticks = time_to_ticks(ns, FEMTOSECONDS_PER_NS);
+    uint64_t start = hpet_regs->main_counter_value;
+    uint64_t ticks = time_to_ticks(ns, FEMTOSECONDS_PER_NS);
 
     if (ticks == 0) {
         return;
@@ -201,7 +202,7 @@ void hpet_ndelay(size_t ns) {
     }
 }
 
-void hpet_udelay(size_t us) {
+void hpet_udelay(uint64_t us) {
     if (!hpet_regs) {
         errno = ENODEV;
 
@@ -213,8 +214,8 @@ void hpet_udelay(size_t us) {
         return;
     }
 
-    size_t start = hpet_regs->main_counter_value;
-    size_t ticks = time_to_ticks(us, FEMTOSECONDS_PER_US);
+    uint64_t start = hpet_regs->main_counter_value;
+    uint64_t ticks = time_to_ticks(us, FEMTOSECONDS_PER_US);
 
     if (ticks == 0) {
         return;
@@ -225,7 +226,7 @@ void hpet_udelay(size_t us) {
     }
 }
 
-void hpet_mdelay(size_t ms) {
+void hpet_mdelay(uint64_t ms) {
     if (!hpet_regs) {
         errno = ENODEV;
 
@@ -237,8 +238,8 @@ void hpet_mdelay(size_t ms) {
         return;
     }
 
-    size_t start = hpet_regs->main_counter_value;
-    size_t ticks = time_to_ticks(ms, FEMTOSECONDS_PER_MS);
+    uint64_t start = hpet_regs->main_counter_value;
+    uint64_t ticks = time_to_ticks(ms, FEMTOSECONDS_PER_MS);
 
     if (ticks == 0) {
         return;
@@ -249,10 +250,31 @@ void hpet_mdelay(size_t ms) {
     }
 }
 
-size_t hpet_get_ticks(void) {
+uint64_t hpet_get_time_ns(void) {
+    uint64_t ticks = hpet_regs->main_counter_value;
+
+    // Formula: (ticks * period) / 1,000,000
+    return muldiv64(ticks, clock_period_fs, 1000000ul);
+}
+
+uint64_t hpet_get_time_us(void) {
+    uint64_t ticks = hpet_regs->main_counter_value;
+
+    // Formula: (ticks * period) / 1,000,000,000
+    return muldiv64(ticks, clock_period_fs, 1000000000ul);
+}
+
+uint64_t hpet_get_time_ms(void) {
+    uint64_t ticks = hpet_regs->main_counter_value;
+
+    // Formula: (ticks * period) / 1,000,000,000,000
+    return muldiv64(ticks, clock_period_fs, 1000000000000ul);
+}
+
+uint64_t hpet_get_ticks(void) {
     return hpet_regs->main_counter_value / clock_period_fs;
 }
 
-size_t hpet_get_hz(void) {
+uint64_t hpet_get_hz(void) {
     return clock_period_fs;
 }

@@ -66,7 +66,6 @@ void timer_tick(void) {
         default:
             if (!warned) {
                 warned = true;
-                errno  = EINVAL;
                 KLOG_WARN("TIMER: IRQ received with invalid clock source=%d\n", source);
             }
             break;
@@ -82,8 +81,6 @@ void timer_set_clock_source(clock_source_t src) {
             KLOG_INFO("TIMER: clock source set to %s\n", timer_clock_source_name(src));
             return;
         default:
-            errno = EINVAL;
-
             if (!warned_invalid_source) {
                 warned_invalid_source = true;
                 KLOG_WARN("TIMER: invalid clock source requested=%d\n", src);
@@ -123,7 +120,6 @@ void timer_udelay(size_t us) {
             tsc_udelay(us);
             break;
         default:
-            errno = ENODEV;
             KLOG_WARN("TIMER: udelay requested before clock source was initialized\n");
             break;
     }
@@ -132,13 +128,26 @@ void timer_udelay(size_t us) {
 size_t timer_get_time(void) {
     switch (source) {
         case CLOCK_PIT:
-            return pit_get_ticks();
+            return pit_get_time_ns();
         case CLOCK_HPET:
-            return hpet_get_ticks();
+            return hpet_get_time_ns();
         case CLOCK_TSC:
-            return tsc_get_time();
+            return tsc_get_uptime_ns();
         default:
-            errno = ENODEV;
+            KLOG_WARN("TIMER: get time requested before clock source was initialized\n");
+            return 0;
+    }
+}
+
+size_t timer_get_time_ms(void) {
+    switch (source) {
+        case CLOCK_PIT:
+            return pit_get_time_ms();
+        case CLOCK_HPET:
+            return hpet_get_time_ms();
+        case CLOCK_TSC:
+            return tsc_get_uptime_ms();
+        default:
             KLOG_WARN("TIMER: get time requested before clock source was initialized\n");
             return 0;
     }
@@ -153,7 +162,6 @@ size_t timer_get_hz(void) {
         case CLOCK_TSC:
             return tsc_get_hz();
         default:
-            errno = ENODEV;
             KLOG_WARN("TIMER: get hz requested before clock source was initialized\n");
             return 0;
     }

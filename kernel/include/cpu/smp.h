@@ -11,7 +11,6 @@
 #include "sched/process.h"
 
 #ifdef __x86_64__
-#include "cpu/gdt.h"
 #include "cpu/topology.h"
 #endif
 

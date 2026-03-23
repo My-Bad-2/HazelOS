@@ -109,10 +109,10 @@ void kernel_log(log_level_t level, const char* fmt, ...) {
     get_level_meta(level, &color, &label);
 
     uint32_t cpu_id = arch_get_core_idx();
-    size_t ts       = timer_get_time() % 100000;
+    size_t ms       = timer_get_time_ms();
 
     int offset =
-        snprintf(buf, LOG_BUF_SIZE, "%s[%6lu.%03lu] [%s]: ", color, ts / 1000, ts % 1000, label);
+        snprintf(buf, LOG_BUF_SIZE, "%s[%6lu.%03lu] [%s]: ", color, ms / 1000, ms % 1000, label);
     if (offset < 0) {
         offset = 0;
     }

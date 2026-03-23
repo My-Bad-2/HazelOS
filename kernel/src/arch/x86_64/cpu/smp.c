@@ -35,6 +35,8 @@ void arch_commit_cpu_state(per_cpu_data_t* cpu) {
     simd_init();
     syscall_init();
 
+    write_msr(X86_MSR_IA32_TSC_AUX, cpu->cpu_idx);
+
     if (cpu->is_bsp) {
         pic_init();
         ioapic_init();

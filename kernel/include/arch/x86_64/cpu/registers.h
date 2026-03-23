@@ -67,6 +67,7 @@
 #define X86_EFER_LME             0x00000100ul  // long mode enable
 #define X86_EFER_LMA             0x00000400ul  // long mode active
 #define X86_EFER_NXE             0x00000800ul  // to enable execute disable bit
+#define X86_MSR_IA32_TSC         0x00000010ul  // Time Stamp Counter
 #define X86_MSR_IA32_PLATFORM_ID 0x00000017ul  // platform id
 #define X86_MSR_IA32_APIC_BASE   0x0000001bul  // APIC base physical address
 #define X86_MSR_IA32_TSC_ADJUST  0x0000003bul  // TSC adjust

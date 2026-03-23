@@ -19,6 +19,10 @@
 #include "sched/rcu.h"
 #include "sched/scheduler.h"
 
+// #ifdef __x86_64__
+// #include "drivers/tsc.h"
+// #endif
+
 extern uint8_t bootstrap_stack[];
 
 static per_cpu_data_t* cpu_datas = nullptr;
@@ -33,6 +37,10 @@ static void ap_entry_point(struct limine_mp_info* info) {
     arch_commit_cpu_state(cpu);
     scheduler_init_per_cpu(cpu);
     atomic_store_explicit(&cpu->is_online, 1, memory_order_release);
+
+    // #ifdef __x86_64__
+    //     tsc_sync_ap();
+    // #endif
 
     arch_halt(true);
 }
@@ -123,6 +131,11 @@ void smp_init(void) {
             info->goto_address = ap_entry_point;
         }
     }
+
+    // #ifdef __x86_64__
+    // Not worth the efforts unless there's a hardware bug
+    // tsc_sync_bsp();
+    // #endif
 
     for (uint32_t i = 0; i < num_cpus; ++i) {
         while (!atomic_load_explicit(&cpu_datas[i].is_online, memory_order_acquire)) {

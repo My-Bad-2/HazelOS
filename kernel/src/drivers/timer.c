@@ -1,7 +1,5 @@
 #include "drivers/timer.h"
 
-#include <errno.h>
-
 #include "libs/hashtable.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"

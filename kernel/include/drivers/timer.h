@@ -56,6 +56,7 @@ void timer_udelay(size_t us);
 void timer_configure(timer_mode_t mode, uint8_t vector, size_t count);
 
 size_t timer_get_time(void);
+size_t timer_get_time_ms(void);
 size_t timer_get_hz(void);
 
 void timer_tick(void);
