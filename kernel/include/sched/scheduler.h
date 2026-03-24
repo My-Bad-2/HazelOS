@@ -14,6 +14,8 @@ extern "C" {
 
 struct per_cpu_data;
 
+void scheduler_arch_init(void);
+
 void scheduler_init(void);
 void scheduler_init_per_cpu(struct per_cpu_data* cpu);
 bool scheduler_is_initialized(void);

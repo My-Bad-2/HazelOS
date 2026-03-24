@@ -1,9 +1,9 @@
 #include "cpu/exception.h"
 
-#include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "arch.h"
 #include "cpu/idt.h"
@@ -14,21 +14,27 @@
 #include "cpu/smp.h"
 #include "libs/log.h"
 #include "libs/math.h"
+#include "libs/slist.h"
+#include "libs/spinlock.h"
+#include "memory/heap.h"
 #include "memory/memory.h"
-#include "memory/pagemap.h"
 #include "memory/paging.h"
 #include "memory/vma.h"
 #include "sched/scheduler.h"
 
-typedef struct {
+struct isr_action {
     isr_handler_t handler;
     void* ctx;
+    struct slist_node node;
+};
 
-    irq_trigger_mode_t trigger;
-    irq_polarity_t polarity;
-} isr_entry_t;
+struct isr_entry {
+    struct slist_head actions;
+    irq_config_t config;
+    rwlock_t lock;
+};
 
-static isr_entry_t* isr_registry = nullptr;
+static struct isr_entry* isr_registry = nullptr;
 
 static const char* const exception_messages[32] = {
     "Divide by Zero",
@@ -126,199 +132,115 @@ static void configure_legacy_irq(
 
 void init_isr_registry(void) {
     if (isr_registry != nullptr) {
-        errno = EAGAIN;
         KLOG_WARN("ISR: registry already initialized entries=%d\n", IDT_ENTRY_COUNT);
         return;
     }
 
-    size_t size = sizeof(isr_entry_t) * IDT_ENTRY_COUNT;
-    size        = align_up(size, PAGE_SIZE_SMALL);
+    KLOG_INIT_START("ISR Registry");
 
-    isr_registry = (isr_entry_t*)vmalloc(
-        kernel_space,
-        nullptr,
-        size,
-        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
-        CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
-    );
+    size_t size = align_up(sizeof(struct isr_entry) * IDT_ENTRY_COUNT, PAGE_SIZE_SMALL);
 
+    isr_registry = kmalloc(size);
     if (!isr_registry) {
-        int err = errno ? errno : ENOMEM;
-        errno   = err;
-        PANIC("ISR: registry allocation failed bytes=0x%zx errno=%d\n", size, err);
+        KLOG_INIT_FAIL();
+        PANIC("ISR: registry allocation failed bytes=0x%zx\n", size);
     }
 
-    KLOG_DEBUG("ISR: registry initialized entries=%d bytes=0x%zx\n", IDT_ENTRY_COUNT, size);
+    memset(isr_registry, 0, size);
+    for (int i = 0; i < IDT_ENTRY_COUNT; ++i) {
+        slist_init(&isr_registry[i].actions);
+    }
+
+    KLOG_INIT_OK();
 }
 
-int register_external_interrupt_handler(
-    uint8_t vector,
-    isr_handler_t handler,
-    void* ctx,
-    irq_trigger_mode_t trigger,
-    irq_polarity_t polarity,
-    apic_interrupt_delivery_mode_t delivery,
-    apic_interrupt_dest_mode_t dest,
-    uint32_t dest_apic,
-    uint32_t gsi
-) {
+int register_irq(uint8_t vector, isr_handler_t handler, void* ctx, const irq_config_t* config) {
     ASSERT(isr_registry);
 
-    if (vector > (IDT_ENTRY_COUNT - 1)) {
-        int err = errno = EINVAL;
-        KLOG_WARN("ISR: invalid vector=%u errno=%d\n", vector, err);
+    if ((uint32_t)vector >= IDT_ENTRY_COUNT || !handler) {
         return -1;
     }
 
-    if (isr_registry[vector].ctx) {
-        // In a PCI shared interrupt system, append to a linked list here
-        int err = errno = EBUSY;
-        KLOG_WARN("ISR: vector=%u already registered errno=%d\n", vector, err);
+    struct isr_action* action = kmalloc(sizeof(struct isr_action));
+    if (!action) {
         return -1;
     }
 
-    isr_registry[vector].handler  = handler;
-    isr_registry[vector].ctx      = ctx;
-    isr_registry[vector].trigger  = trigger;
-    isr_registry[vector].polarity = polarity;
+    action->handler = handler;
+    action->ctx     = ctx;
 
-    bool mask = false;
+    bool is_first_handler = slist_empty(&isr_registry[vector].actions);
+    slist_push(&action->node, &isr_registry[vector].actions);
 
-    if (gsi != GSI_NONE) {
-        configure_irq(vector, trigger, polarity, delivery, dest, dest_apic, mask, gsi);
+    if (is_first_handler && config) {
+        isr_registry[vector].config = *config;
+        if (config->is_external) {
+            configure_irq(
+                vector,
+                config->trigger,
+                config->polarity,
+                config->delivery,
+                config->dest,
+                config->dest_apic,
+                false,
+                config->gsi
+            );
+        }
     }
 
     return 0;
 }
 
-int register_external_irq_handler(
-    uint8_t vector,
-    isr_handler_t handler,
-    void* ctx,
-    apic_interrupt_delivery_mode_t delivery,
-    apic_interrupt_dest_mode_t dest,
-    uint32_t dest_apic
-) {
-    ASSERT(isr_registry);
-
-    if (vector > (IDT_ENTRY_COUNT - 1)) {
-        int err = errno = EINVAL;
-        KLOG_WARN("ISR: invalid vector=%u errno=%d\n", vector, err);
-        return -1;
-    }
-
-    if (isr_registry[vector].ctx) {
-        // In a PCI shared interrupt system, append to a linked list here
-        int err = errno = EBUSY;
-        KLOG_WARN("ISR: vector=%u already registered errno=%d\n", vector, err);
-        return -1;
-    }
-
-    isr_registry[vector].handler = handler;
-    isr_registry[vector].ctx     = ctx;
-
-    bool mask = false;
-
-    configure_legacy_irq(vector, delivery, dest, dest_apic, mask);
-
-    return 0;
-}
-
-int register_interrupt_handler(
-    uint8_t vector,
-    isr_handler_t handler,
-    void* ctx,
-    irq_trigger_mode_t trigger,
-    irq_polarity_t polarity
-) {
-    ASSERT(isr_registry);
-
-    if (vector > (IDT_ENTRY_COUNT - 1)) {
-        int err = errno = EINVAL;
-        KLOG_WARN("ISR: invalid vector=%u errno=%d\n", vector, err);
-        return -1;
-    }
-
-    if (isr_registry[vector].ctx) {
-        // In a PCI shared interrupt system, append to a linked list here
-        int err = errno = EBUSY;
-        KLOG_WARN("ISR: vector=%u already registered errno=%d\n", vector, err);
-        return -1;
-    }
-
-    isr_registry[vector].handler  = handler;
-    isr_registry[vector].ctx      = ctx;
-    isr_registry[vector].trigger  = trigger;
-    isr_registry[vector].polarity = polarity;
-
-    return 0;
-}
-
-void deregister_external_interrupt_handler(uint8_t vector) {
-    if (vector > (IDT_ENTRY_COUNT - 1)) {
-        int err = errno = EINVAL;
-        KLOG_WARN("ISR: invalid vector=%u errno=%d\n", vector, err);
+void free_irq(uint8_t vector, isr_handler_t handler, void* ctx) {
+    if ((uint32_t)vector >= IDT_ENTRY_COUNT || !isr_registry) {
         return;
     }
 
-    if (!isr_registry[vector].handler) {
-        int err = errno = ENOENT;
-        KLOG_WARN("ISR: no handler to deregister vector=%u errno=%d\n", vector, err);
-        return;
+    size_t flags = acquire_interrupt_lock(nullptr);
+    acquire_write(&isr_registry[vector].lock);
+
+    struct slist_head* head = &isr_registry[vector].actions;
+    struct slist_node* prev = nullptr;
+    struct slist_node* curr = head->first;
+
+    while (curr) {
+        struct isr_action* entry = slist_entry(curr, struct isr_action, node);
+
+        if (entry->handler == handler && entry->ctx == ctx) {
+            if (prev) {
+                slist_del_after(prev);
+            } else {
+                slist_pop(head);
+            }
+
+            kfree(entry);
+
+            if (slist_empty(head)) {
+                irq_config_t* cfg = &isr_registry[vector].config;
+
+                if (cfg->is_external) {
+                    configure_irq(
+                        vector,
+                        cfg->trigger,
+                        cfg->polarity,
+                        DELIVERY_MODE_FIXED,
+                        DESTMODE_PHYSICAL,
+                        0,
+                        true,
+                        0
+                    );
+                }
+            }
+
+            break;
+        }
+
+        prev = curr;
+        curr = curr->next;
     }
 
-    isr_registry[vector].handler = nullptr;
-    isr_registry[vector].ctx     = nullptr;
-
-    irq_trigger_mode_t trigger = isr_registry[vector].trigger;
-    irq_polarity_t polarity    = isr_registry[vector].polarity;
-
-    bool mask = true;
-
-    configure_irq(vector, trigger, polarity, DELIVERY_MODE_FIXED, DESTMODE_PHYSICAL, 0, mask, 0);
-}
-
-void deregister_interrupt_handler(uint8_t vector) {
-    if (vector > (IDT_ENTRY_COUNT - 1)) {
-        int err = errno = EINVAL;
-        KLOG_WARN("ISR: invalid vector=%u errno=%d\n", vector, err);
-        return;
-    }
-
-    if (!isr_registry[vector].handler) {
-        int err = errno = ENOENT;
-        KLOG_WARN("ISR: no handler to deregister vector=%u errno=%d\n", vector, err);
-        return;
-    }
-
-    isr_registry[vector].handler = nullptr;
-    isr_registry[vector].ctx     = nullptr;
-
-    KLOG_DEBUG("ISR: deregistered vector=%u\n", vector);
-}
-
-void deregister_external_irq_handler(uint8_t vector) {
-    if (vector > (IDT_ENTRY_COUNT - 1)) {
-        int err = errno = EINVAL;
-        KLOG_WARN("ISR: invalid vector=%u errno=%d\n", vector, err);
-        return;
-    }
-
-    if (!isr_registry[vector].handler) {
-        int err = errno = ENOENT;
-        KLOG_WARN("ISR: no handler to deregister vector=%u errno=%d\n", vector, err);
-        return;
-    }
-
-    isr_registry[vector].handler = nullptr;
-    isr_registry[vector].ctx     = nullptr;
-
-    bool mask = true;
-
-    configure_legacy_irq(vector, DELIVERY_MODE_FIXED, DESTMODE_PHYSICAL, 0, mask);
-
-    KLOG_DEBUG("ISR: deregistered vector=%u\n", vector);
+    release_write(&isr_registry[vector].lock);
+    release_interrupt_lock(nullptr, flags);
 }
 
 static void buffer_append(char** buf, size_t* remaining, const char* fmt, ...) {
@@ -460,27 +382,48 @@ static void handle_crash(interrupt_trapframe_t* tf) {
 void x86_exception_handler(interrupt_trapframe_t* tf) {
     ASSERT(isr_registry);
 
-    // Ignore APIC spurious interrupt
+    if (tf->vector >= IDT_ENTRY_COUNT) {
+        handle_crash(tf);
+        return;
+    }
+
     if (tf->vector == INTERRUPT_APIC_SPURIOUS) {
         return;
     }
 
-    per_cpu_data_t* cpu = smp_current_core();
-
-    isr_handler_t handler = isr_registry[tf->vector].handler;
-    void* ctx             = isr_registry[tf->vector].ctx;
-
-    irq_trigger_mode_t trigger = isr_registry[tf->vector].trigger;
+    per_cpu_data_t* cpu        = smp_current_core();
+    irq_trigger_mode_t trigger = isr_registry[tf->vector].config.trigger;
+    struct slist_head* head    = &isr_registry[tf->vector].actions;
 
     if (trigger == IRQ_TRIGGER_EDGE) {
         send_eoi(tf->vector);
     }
 
-    if (handler) {
-        handler(tf, ctx);
+    bool handled = false;
+    size_t flags = acquire_interrupt_lock(nullptr);
+    acquire_read(&isr_registry[tf->vector].lock);
+
+    if (!slist_empty(head)) {
+        struct isr_action* action;
+
+        slist_for_each_entry(action, head, node) {
+            if (!action) {
+                break;
+            }
+
+            if (action->handler(tf, action->ctx)) {
+                handled = true;
+            }
+        }
     } else if (tf->vector == EXCEPTION_PAGE_FAULT) {
         pf_handler(tf);
-    } else {
+        handled = true;
+    }
+
+    release_read(&isr_registry[tf->vector].lock);
+    release_interrupt_lock(nullptr, flags);
+
+    if (!handled) {
         handle_crash(tf);
     }
 

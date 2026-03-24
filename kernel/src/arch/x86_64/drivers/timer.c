@@ -11,7 +11,6 @@
 #include "drivers/pit.h"
 #include "drivers/tsc.h"
 #include "libs/log.h"
-#include "sched/process.h"
 #include "sched/rcu.h"
 #include "sched/scheduler.h"
 
@@ -33,24 +32,13 @@ static const char* timer_clock_source_name(clock_source_t src) {
     }
 }
 
-static void timer_handler(interrupt_trapframe_t*, void*) {
+static bool timer_handler(interrupt_trapframe_t*, void*) {
     per_cpu_data_t* cpu = smp_current_core();
 
     timer_tick();
     timer_manager_tick(cpu->timer_manager);
 
-    if (scheduler_is_initialized()) {
-        thread_t* curr = cpu->curr_thread;
-
-        rcu_check_callbacks();
-        schedule();
-    }
-}
-
-static void reschedule_handler(interrupt_trapframe_t*, void*) {
-    if (scheduler_is_initialized()) {
-        schedule();
-    }
+    return true;
 }
 
 void timer_tick(void) {
@@ -198,26 +186,14 @@ void timer_init(void) {
 
     lapic_timer_calibrate();
 
-    int res = register_external_irq_handler(
-        IRQ_TIMER,
-        timer_handler,
-        nullptr,
-        DELIVERY_MODE_LOWEST_PRIO,
-        DESTMODE_PHYSICAL,
-        0
-    );
+    irq_config_t config = {
+        .delivery  = DELIVERY_MODE_LOWEST_PRIO,
+        .dest      = DESTMODE_PHYSICAL,
+        .dest_apic = 0
+    };
 
-    res = register_interrupt_handler(
-        INTERRUPT_IPI_RESCHEDULE,
-        reschedule_handler,
-        nullptr,
-        IRQ_TRIGGER_EDGE,
-        IRQ_POLARITY_HIGH
-    );
-
+    int res = register_irq(IRQ_TIMER, timer_handler, nullptr, &config);
     if (res != 0) {
-        int err = errno ? errno : EIO;
-        KLOG_ERROR("TIMER: failed to register IRQ handler errno=%d\n", err);
-        errno = err;
+        KLOG_ERROR("TIMER: failed to register timer_handler!\n");
     }
 }

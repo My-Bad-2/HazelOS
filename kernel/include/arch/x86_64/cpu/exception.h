@@ -72,7 +72,7 @@ enum {
     INTERRUPT_APIC_SPURIOUS,
 };
 
-typedef void (*isr_handler_t)(interrupt_trapframe_t* tf, void* ctx);
+typedef bool (*isr_handler_t)(interrupt_trapframe_t* tf, void* ctx);
 
 typedef enum {
     IRQ_TRIGGER_EDGE = 0,
@@ -101,38 +101,18 @@ typedef enum {
 
 void init_isr_registry(void);
 
-int register_external_interrupt_handler(
-    uint8_t vector,
-    isr_handler_t handler,
-    void* ctx,
-    irq_trigger_mode_t trigger,
-    irq_polarity_t polarity,
-    apic_interrupt_delivery_mode_t delivery,
-    apic_interrupt_dest_mode_t dest,
-    uint32_t dest_apic,
-    uint32_t gsi
-);
+typedef struct {
+    irq_trigger_mode_t trigger;
+    irq_polarity_t polarity;
+    apic_interrupt_delivery_mode_t delivery;
+    apic_interrupt_dest_mode_t dest;
+    uint32_t dest_apic;
+    uint32_t gsi;
+    bool is_external;
+} irq_config_t;
 
-int register_interrupt_handler(
-    uint8_t vector,
-    isr_handler_t handler,
-    void* ctx,
-    irq_trigger_mode_t trigger,
-    irq_polarity_t polarity
-);
-
-int register_external_irq_handler(
-    uint8_t vector,
-    isr_handler_t handler,
-    void* ctx,
-    apic_interrupt_delivery_mode_t delivery,
-    apic_interrupt_dest_mode_t dest,
-    uint32_t dest_apic
-);
-
-void deregister_external_interrupt_handler(uint8_t vector);
-void deregister_interrupt_handler(uint8_t vector);
-void deregister_external_irq_handler(uint8_t vector);
+int register_irq(uint8_t vector, isr_handler_t handler, void* ctx, const irq_config_t* config);
+void free_irq(uint8_t vector, isr_handler_t handler, void* ctx);
 
 #ifdef __cplusplus
 }

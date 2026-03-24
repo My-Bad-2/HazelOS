@@ -395,6 +395,8 @@ void scheduler_init(void) {
     sched_class_register(&cfs_sched_class);
     sched_class_register(&idle_sched_class);
 
+    scheduler_arch_init();
+
     initialized = true;
 }
 

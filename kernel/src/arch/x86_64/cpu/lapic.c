@@ -55,12 +55,12 @@ static inline void lapic_wait_for_ipi_send(void) {
     }
 }
 
-static void apic_error_handler(interrupt_trapframe_t*, void*) {
+static bool apic_error_handler(interrupt_trapframe_t*, void*) {
     lapic_write(LAPIC_REG_ERROR_STATUS, 0);
     uint32_t error_flags = lapic_read(LAPIC_REG_ERROR_STATUS);
 
     if (!error_flags) {
-        return;
+        return true;
     }
 
     const size_t buf_size = 512;
@@ -115,10 +115,13 @@ static void apic_error_handler(interrupt_trapframe_t*, void*) {
     APPEND_ERR("\n");
     KLOG_ERROR("%s", buf);
 #undef APPEND_ERR
+
+    return true;
 }
 
-static void apic_timer_handler(interrupt_trapframe_t*, void*) {
+static bool apic_timer_handler(interrupt_trapframe_t*, void*) {
     timer_tick();
+    return true;
 }
 
 void lapic_init(void) {
@@ -192,21 +195,13 @@ void lapic_init(void) {
 
     create_qspinlock(&lock);
 
-    register_interrupt_handler(
-        INTERRUPT_APIC_TIMER,
-        apic_timer_handler,
-        nullptr,
-        IRQ_TRIGGER_EDGE,
-        IRQ_POLARITY_HIGH
-    );
+    irq_config_t config = {
+        .trigger  = IRQ_TRIGGER_EDGE,
+        .polarity = IRQ_POLARITY_HIGH,
+    };
 
-    register_interrupt_handler(
-        INTERRUPT_APIC_ERROR,
-        apic_error_handler,
-        nullptr,
-        IRQ_TRIGGER_EDGE,
-        IRQ_POLARITY_HIGH
-    );
+    register_irq(INTERRUPT_APIC_TIMER, apic_timer_handler, nullptr, &config);
+    register_irq(INTERRUPT_APIC_ERROR, apic_error_handler, nullptr, &config);
 
     KLOG_INIT_OK();
 }

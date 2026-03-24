@@ -2,6 +2,7 @@
 #define KERNEL_LIBS_SLIST_H 1
 
 #include <stdatomic.h>
+#include <stddef.h>
 
 #include "compiler.h"
 
