@@ -22,9 +22,8 @@ pagemap_t* vmm_get_kernel_pagemap() {
 
 static void vmm_map_memory(pagemap_t* map) {
     if (!memmap_request.response || !memmap_request.response->entries) {
-        errno = ENODEV;
-        KLOG_ERROR("VMM: Limine memory map is missing\n");
-        return;
+        KLOG_INIT_FAIL();
+        PANIC("VMM: Limine memory map is missing\n");
     }
 
     size_t memmap_count                  = memmap_request.response->entry_count;
@@ -102,16 +101,13 @@ static void vmm_map_memory(pagemap_t* map) {
             args.virt_addr = (void*)virt;
 
             if (!pagemap_map(map, &args)) {
-                int err = errno ? errno : -EIO;
-                errno   = err;
-                KLOG_ERROR(
-                    "VMM: mapping failed virt=0x%lx phys=0x%lx size=0x%zx errno=%d\n",
+                KLOG_INIT_FAIL();
+                PANIC(
+                    "VMM: mapping failed virt=0x%lx phys=0x%lx size=0x%zx\n",
                     virt,
                     curr,
-                    args.length,
-                    err
+                    args.length
                 );
-                return;
             }
 
             curr += args.length;
@@ -120,6 +116,7 @@ static void vmm_map_memory(pagemap_t* map) {
 }
 
 void vmm_init(void) {
+    KLOG_INIT_START("Virtual Memory Manager");
     pagemap_create(&kernel_pagemap);
 
     uintptr_t kernel_base = (uintptr_t)kernel_file_request.response->executable_file->address;
@@ -128,14 +125,6 @@ void vmm_init(void) {
     uintptr_t virt_base = kernel_address_request.response->virtual_base;
 
     uintptr_t phys_delta = phys_base - virt_base;
-
-    KLOG_INFO(
-        "VMM init: kernel_base=0x%lx phys_base=0x%lx virt_base=0x%lx delta=0x%lx\n",
-        kernel_base,
-        phys_base,
-        virt_base,
-        phys_delta
-    );
 
     arch_mmu_init();
     vmm_map_memory(&kernel_pagemap);
@@ -146,11 +135,5 @@ void vmm_init(void) {
     uintptr_t vma_end   = virt_base;
 
     vmm_init_space(kernel_space, &kernel_pagemap, vma_start, vma_end);
-
-    KLOG_INFO(
-        "VMM: init complete pagemap loaded vma=[0x%lx,0x%lx) highest_phys=0x%lx\n",
-        vma_start,
-        vma_end,
-        highest_address
-    );
+    KLOG_INIT_OK();
 }

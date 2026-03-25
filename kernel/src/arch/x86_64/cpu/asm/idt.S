@@ -71,6 +71,8 @@ isr_restore_path:
     addq $16, %rsp
     iretq
 .nmi_stub:
+    movq %rsp, %rdi
+
     movq $1, %rbx
     testb $3, X86_IFRAME_OFFSET_CS(%rsp)
     jnz .do_nmi_swap
@@ -79,16 +81,17 @@ isr_restore_path:
     movl $X86_MSR_IA32_GS_BASE, %ecx
     rdmsr
 
-    pushq %rbp          # Save the RBP of the interrupted code
-    movq %rsp, %rbp     # Set RBP to current stack
-
-    # If GS Base is Canonical Kernel address (0xffff...), it is negative
+    # If GS Base is Canonical Kernel address (0xffff...), sign bit is 1.
     testl %edx, %edx
     js .nmi_skip_swap
 .do_nmi_swap:
     swapgs
 .call_nmi_handler:
-    movq %rsp, %rdi
+    pushq %rbp
+    movq %rsp, %rbp
+
+    jmp .
+
     call x86_nmi_handler
 
     leave

@@ -1,6 +1,7 @@
 #include "cpu/exception.h"
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,6 +23,10 @@
 #include "memory/vma.h"
 #include "sched/scheduler.h"
 
+#define STORM_WINDOW_SIZE 100000
+// Forgive shared IRQs just in case hardware state wasn't synced when the CPU read it
+#define STORM_UNHANDLED_LIMIT 99000
+
 struct isr_action {
     isr_handler_t handler;
     void* ctx;
@@ -32,9 +37,15 @@ struct isr_entry {
     struct slist_head actions;
     irq_config_t config;
     rwlock_t lock;
+
+    uint32_t irq_count;
+    uint32_t unhandled_count;
+    bool is_masked_by_storm;
 };
 
 static struct isr_entry* isr_registry = nullptr;
+static uint64_t vector_bitmap[4]      = {0};
+static qspinlock_t allocator_lock;
 
 static const char* const exception_messages[32] = {
     "Divide by Zero",
@@ -130,6 +141,16 @@ static void configure_legacy_irq(
     }
 }
 
+static void init_vector_allocator(void) {
+    for (int i = 0; i < 4; ++i) {
+        vector_bitmap[i] = UINT64_MAX;
+    }
+
+    for (size_t i = DYNAMIC_VECTOR_BASE; i <= DYNAMIC_VECTOR_MAX; ++i) {
+        __clear_bit(i, vector_bitmap);
+    }
+}
+
 void init_isr_registry(void) {
     if (isr_registry != nullptr) {
         KLOG_WARN("ISR: registry already initialized entries=%d\n", IDT_ENTRY_COUNT);
@@ -150,6 +171,8 @@ void init_isr_registry(void) {
     for (int i = 0; i < IDT_ENTRY_COUNT; ++i) {
         slist_init(&isr_registry[i].actions);
     }
+
+    init_vector_allocator();
 
     KLOG_INIT_OK();
 }
@@ -241,6 +264,94 @@ void free_irq(uint8_t vector, isr_handler_t handler, void* ctx) {
 
     release_write(&isr_registry[vector].lock);
     release_interrupt_lock(nullptr, flags);
+}
+
+int irq_alloc_vector(void) {
+    size_t flags         = acquire_qinterrupt_lock(&allocator_lock);
+    int allocated_vector = -1;
+
+    for (int i = DYNAMIC_VECTOR_BASE; i <= DYNAMIC_VECTOR_MAX; ++i) {
+        if (!__test_bit((size_t)i, vector_bitmap)) {
+            __set_bit((size_t)i, vector_bitmap);
+            allocated_vector = i;
+            break;
+        }
+    }
+
+    release_qinterrupt_lock(&allocator_lock, flags);
+
+    if (allocated_vector == -1) {
+        KLOG_WARN("IRQ: Vector allocation failed (exhauted)\n");
+    }
+
+    return allocated_vector;
+}
+
+int irq_alloc_vectors(size_t count) {
+    if (count == 0 || count > 32 || (count & (count - 1)) != 0) {
+        return -1;
+    }
+
+    size_t flags             = acquire_qinterrupt_lock(&allocator_lock);
+    int base_vector          = -1;
+    size_t found_consecutive = 0;
+
+    for (int i = DYNAMIC_VECTOR_BASE; i <= DYNAMIC_VECTOR_MAX; ++i) {
+        if (found_consecutive == 0 && ((size_t)i % count) != 0) {
+            continue;
+        }
+
+        if (!__test_bit((size_t)i, vector_bitmap)) {
+            if (found_consecutive == 0) {
+                base_vector = i;
+            }
+
+            found_consecutive++;
+
+            if (found_consecutive == count) {
+                for (size_t j = 0; j < count; ++j) {
+                    __set_bit((size_t)base_vector + j, vector_bitmap);
+                }
+
+                break;
+            }
+        } else {
+            found_consecutive = 0;
+            base_vector       = -1;
+        }
+    }
+
+    release_qinterrupt_lock(&allocator_lock, flags);
+
+    if (found_consecutive < count) {
+        KLOG_WARN("IRQ: Contiguous vector allocation failed (Requested: %zu)\n", count);
+        return -1;
+    }
+
+    return base_vector;
+}
+
+void irq_free_vector(uint8_t vector) {
+    if (vector < DYNAMIC_VECTOR_BASE || vector > DYNAMIC_VECTOR_MAX) {
+        return;
+    }
+
+    size_t flags = acquire_qinterrupt_lock(&allocator_lock);
+    __clear_bit(vector, vector_bitmap);
+    release_qinterrupt_lock(&allocator_lock, flags);
+}
+
+void irq_free_vectors(uint8_t base, size_t count) {
+    if (base < DYNAMIC_VECTOR_BASE || (base + count - 1) > DYNAMIC_VECTOR_MAX) {
+        return;
+    }
+
+    size_t flags = acquire_qinterrupt_lock(&allocator_lock);
+    for (size_t i = 0; i < count; ++i) {
+        __clear_bit((size_t)base + i, vector_bitmap);
+    }
+
+    release_qinterrupt_lock(&allocator_lock, flags);
 }
 
 static void buffer_append(char** buf, size_t* remaining, const char* fmt, ...) {
@@ -378,6 +489,50 @@ static void handle_crash(interrupt_trapframe_t* tf) {
     PANIC("Unhandled vector (%lu)", tf->vector);
 }
 
+static void check_interrupt_storm(uint8_t vector, bool handled) {
+    struct isr_entry* entry = &isr_registry[vector];
+
+    if (vector < PLATFORM_INTERRUPT_BASE || entry->is_masked_by_storm) {
+        return;
+    }
+
+    entry->irq_count++;
+
+    if (!handled) {
+        entry->unhandled_count++;
+    }
+
+    if (entry->irq_count >= STORM_WINDOW_SIZE) {
+        if (entry->unhandled_count >= STORM_UNHANDLED_LIMIT) {
+            KLOG_ERROR(
+                "IRQ: Interrupt storm detected on vector %zu (%zu unhandled out of %zu), Masking "
+                "line to save system.\n",
+                vector,
+                entry->unhandled_count,
+                entry->irq_count
+            );
+
+            entry->is_masked_by_storm = true;
+
+            if (entry->config.is_external) {
+                configure_irq(
+                    vector,
+                    entry->config.trigger,
+                    entry->config.polarity,
+                    DELIVERY_MODE_FIXED,
+                    DESTMODE_PHYSICAL,
+                    0,
+                    true,
+                    0
+                );
+            }
+        }
+
+        entry->irq_count       = 0;
+        entry->unhandled_count = 0;
+    }
+}
+
 // NOLINTNEXTLINE(misc-use-internal-linkage)
 void x86_exception_handler(interrupt_trapframe_t* tf) {
     ASSERT(isr_registry);
@@ -420,6 +575,8 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
         handled = true;
     }
 
+    check_interrupt_storm(tf->vector, handled);
+
     release_read(&isr_registry[tf->vector].lock);
     release_interrupt_lock(nullptr, flags);
 
@@ -435,6 +592,20 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
 }
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
-void x86_nmi_handler(interrupt_trapframe_t*) {
-    PANIC("EXCEPTION: NMI called!");
+void x86_nmi_handler(interrupt_trapframe_t* tf) {
+    per_cpu_data_t* cpu = smp_current_core();
+    nmi_check_for_panic(cpu);
+
+    struct nmi_watchdog_state* wd = &cpu->watchdog;
+    uint64_t curr_ticks           = atomic_load_explicit(&wd->ticks, memory_order_relaxed);
+
+    if (curr_ticks == wd->last_nmi_tick) {
+        if (!wd->is_locked_up) {
+            wd->is_locked_up = true;
+            KLOG_ERROR("NMI Watchdog: CPU Core %u has Hard Locked up!\n", cpu->cpu_idx);
+            handle_crash(tf);
+        }
+    } else {
+        wd->last_nmi_tick = curr_ticks;
+    }
 }

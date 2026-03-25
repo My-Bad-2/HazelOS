@@ -38,6 +38,7 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
 
     if (ehdr->e_ident[EI_MAG0] != ELFMAG0 || ehdr->e_ident[EI_MAG1] != ELFMAG1 ||
         ehdr->e_ident[EI_MAG2] != ELFMAG2 || ehdr->e_ident[EI_MAG3] != ELFMAG3) {
+        KLOG_INIT_FAIL();
         PANIC("VMM: invalid kernel ELF header\n");
     }
 
@@ -62,15 +63,6 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
         size_t aligned_len = aligned_virt_end - aligned_virt_start;
         uint32_t map_flags = vmm_get_segment_flags(segment->p_flags);
 
-        KLOG_DEBUG(
-            "VMM: map kernel segment idx=%d virt=0x%lx phys=0x%lx len=0x%zx flags=0x%x\n",
-            i,
-            aligned_virt_start,
-            aligned_phys_start,
-            aligned_len,
-            map_flags
-        );
-
         pagemap_map_args_t args = {
             .virt_addr  = (void*)aligned_virt_start,
             .phys_addr  = (void*)aligned_phys_start,
@@ -88,6 +80,7 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
         }
 
         if (!pagemap_map(map, &args)) {
+            KLOG_INIT_FAIL();
             PANIC("VMM: Failed to map kernel segment %d\n", i);
         }
     }

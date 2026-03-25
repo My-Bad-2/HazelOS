@@ -424,7 +424,7 @@ uint16_t pmm_get_ref(void* ptr) {
 }
 
 void pmm_init(void) {
-    KLOG_INFO("PMM: Initializing...\n");
+    KLOG_INIT_START("Physical Memory Manager");
 
     if (!memmap_request.response) {
         PANIC("No Memory Map detected!");
@@ -465,13 +465,8 @@ void pmm_init(void) {
         PANIC("Out of Memory!");
     }
 
-    KLOG_INFO("PMM: Total detected memory: %lu KB\n", total_ram_accum / 1024);
-
     size_t used_bytes = total_ram_accum;
     section_count     = (highest_usable_addr + SECTION_SIZE - 1) >> SECTION_SHIFT;
-
-    KLOG_INFO("PMM: Section count: %lu\n", section_count);
-
     active_zone_count = sizeof(zone_config) / sizeof(zone_config[0]);
 
     if (active_zone_count > MAX_ZONES) {
@@ -481,6 +476,7 @@ void pmm_init(void) {
     size_t table_size = section_count * sizeof(struct mem_section);
 
     if (table_size > largest_region->length) {
+        KLOG_INIT_FAIL();
         PANIC("Not enough metadata memory!\n");
     }
 
@@ -516,6 +512,7 @@ void pmm_init(void) {
             size_t map_size = PAGES_PER_SECTION * sizeof(struct page);
 
             if (boot_ptr + map_size > largest_region->base + largest_region->length) {
+                KLOG_INIT_FAIL();
                 PANIC("PMM: Not enough memory in boot region for metadata!");
             }
 
@@ -657,9 +654,7 @@ void pmm_init(void) {
     atomic_store_explicit(&stat_total_bytes, total_ram_accum, memory_order_relaxed);
     atomic_store_explicit(&stat_used_bytes, used_bytes, memory_order_relaxed);
 
-    pmm_stats_t stats;
-    pmm_get_stats(&stats);
-    KLOG_INFO("PMM: Initialization complete. Free memory: %lu KB\n", stats.free_memory / 1024);
+    KLOG_INIT_OK();
 }
 
 void pmm_get_stats(pmm_stats_t* stats) {

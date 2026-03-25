@@ -20,6 +20,12 @@ extern "C" {
 
 struct cpu_topology;
 
+struct nmi_watchdog_state {
+    _Atomic(uint64_t) ticks;
+    uint64_t last_nmi_tick;
+    bool is_locked_up;
+};
+
 typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     struct per_cpu_data* self;
     thread_t* curr_thread;
@@ -58,10 +64,12 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     atomic_int is_online;
 
     struct arch_cpu_data arch;
+    struct nmi_watchdog_state watchdog;
     struct mcs_node qspin_nodes[MAX_QSPIN_NODES];
 } per_cpu_data_t;
 
 void smp_init(void);
+bool smp_is_initialized(void);
 
 void arch_init_cpu_state(per_cpu_data_t* cpu);
 void arch_commit_cpu_state(per_cpu_data_t* cpu);
@@ -75,6 +83,11 @@ void topology_init_masks(per_cpu_data_t** all_cpus, size_t count);
 void topology_map_siblings(per_cpu_data_t* all_cpus, size_t count);
 
 void smp_send_reschedule_ipi(per_cpu_data_t* cpu);
+void smp_send_panic_ipi();
+void smp_tlb_shootdown(uintptr_t vaddr, size_t pages);
+
+bool ipi_tlb_shootdown_handler(interrupt_trapframe_t*, void*);
+void nmi_check_for_panic(per_cpu_data_t* cpu);
 
 #ifdef __cplusplus
 }

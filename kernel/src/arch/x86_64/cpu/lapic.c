@@ -194,7 +194,6 @@ void lapic_init(void) {
     lapic_write(LAPIC_REG_LVT_TIMER, timer_val);
 
     create_qspinlock(&lock);
-
     irq_config_t config = {
         .trigger  = IRQ_TRIGGER_EDGE,
         .polarity = IRQ_POLARITY_HIGH,

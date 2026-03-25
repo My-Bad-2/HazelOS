@@ -172,3 +172,7 @@ per_cpu_data_t* smp_get_core(uint32_t idx) {
 
     return &cpu_datas[idx];
 }
+
+bool smp_is_initialized(void) {
+    return initialized;
+}

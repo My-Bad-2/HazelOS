@@ -1,6 +1,7 @@
 #ifndef KERNEL_CPU_EXCEPTION_H
 #define KERNEL_CPU_EXCEPTION_H 1
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define GSI_NONE 0xffffffff
@@ -62,7 +63,10 @@ enum {
 
     IRQ_TIMER = 32,
 
-    INTERRUPT_IPI_GENERIC = 248,
+    DYNAMIC_VECTOR_BASE   = 48,
+    DYNAMIC_VECTOR_MAX    = 245,
+    INTERRUPT_IPI_GENERIC = 247,
+    INTERRUPT_IPI_TLB,
     INTERRUPT_IPI_RESCHEDULE,
     INTERRUPT_IPI_INTERRUPT,
     INTERRUPT_IPI_HALT,
@@ -71,8 +75,6 @@ enum {
     INTERRUPT_APIC_PMI,
     INTERRUPT_APIC_SPURIOUS,
 };
-
-typedef bool (*isr_handler_t)(interrupt_trapframe_t* tf, void* ctx);
 
 typedef enum {
     IRQ_TRIGGER_EDGE = 0,
@@ -85,19 +87,21 @@ typedef enum {
 } irq_polarity_t;
 
 typedef enum {
-    DELIVERY_MODE_FIXED = 0,
-    DELIVERY_MODE_LOWEST_PRIO,
-    DELIVERY_MODE_SMI,
-    DELIVERY_MODE_NMI,
-    DELIVERY_MODE_INIT,
-    DELIVERY_MODE_STARTUP,
-    DELIVERY_MODE_EXT_INT,
+    DELIVERY_MODE_FIXED       = 0,
+    DELIVERY_MODE_LOWEST_PRIO = 1,
+    DELIVERY_MODE_SMI         = 2,
+    DELIVERY_MODE_NMI         = 4,
+    DELIVERY_MODE_INIT        = 5,
+    DELIVERY_MODE_STARTUP     = 6,
+    DELIVERY_MODE_EXT_INT     = 7,
 } apic_interrupt_delivery_mode_t;
 
 typedef enum {
     DESTMODE_PHYSICAL = 0,
     DESTMODE_LOGICAL  = 1,
 } apic_interrupt_dest_mode_t;
+
+typedef bool (*isr_handler_t)(interrupt_trapframe_t* tf, void* ctx);
 
 void init_isr_registry(void);
 
@@ -113,6 +117,12 @@ typedef struct {
 
 int register_irq(uint8_t vector, isr_handler_t handler, void* ctx, const irq_config_t* config);
 void free_irq(uint8_t vector, isr_handler_t handler, void* ctx);
+
+int irq_alloc_vector(void);
+int irq_alloc_vectors(size_t count);
+
+void irq_free_vector(uint8_t vector);
+void irq_free_vectors(uint8_t base, size_t count);
 
 #ifdef __cplusplus
 }

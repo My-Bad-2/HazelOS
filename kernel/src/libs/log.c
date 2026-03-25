@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "arch.h"
+#include "cpu/smp.h"
 #include "drivers/timer.h"
 #include "libs/spinlock.h"
 #include "libs/symbols.h"
@@ -219,5 +220,6 @@ void kernel_panic(const char* file, int line, const char* fmt, ...) {
 #endif
 
     dispatch_write("\nSystem Halted.\n", LOG_EMERG);
+    smp_send_panic_ipi();
     arch_halt(false);
 }

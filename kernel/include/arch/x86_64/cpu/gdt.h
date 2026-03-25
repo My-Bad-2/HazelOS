@@ -47,7 +47,7 @@ typedef struct [[gnu::packed]] {
     uint16_t iomap_base;
 } tss_t;
 
-typedef struct [[gnu::aligned(16)]] {
+typedef struct {
     gdt_entry_t entries[GDT_ENTRY_COUNT];
     tss_descriptor_t tss;
 } gdt_table_t;

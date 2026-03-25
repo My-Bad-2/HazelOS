@@ -2,7 +2,6 @@
 
 #include <errno.h>
 
-#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
 
@@ -66,10 +65,6 @@ bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args) {
         args->pkey,
         args->page_size
     );
-
-    if (status != 0) {
-        KLOG_DEBUG("status = %d\n", status);
-    }
 
     return (status == 0);
 }
@@ -175,7 +170,6 @@ bool pagemap_clone(pagemap_t* dest, pagemap_t* src) {
     release_interrupt_lock(&src->lock, flags_src);
 
     if (status != 0) {
-        KLOG_DEBUG("Clone failed!\n");
         arch_mmu_destroy(&dest->arch);
         return false;
     }

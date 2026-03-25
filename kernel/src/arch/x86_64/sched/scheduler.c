@@ -6,10 +6,8 @@
 #include "libs/log.h"
 
 static bool reschedule_handler(interrupt_trapframe_t*, void*) {
-    if (scheduler_is_initialized()) {
-        schedule();
-    }
-
+    per_cpu_data_t* cpu    = smp_current_core();
+    cpu->reschedule_needed = true;
     return true;
 }
 
