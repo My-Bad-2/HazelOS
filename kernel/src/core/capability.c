@@ -9,8 +9,10 @@
 #include "libs/slist.h"
 #include "libs/spinlock.h"
 #include "memory/memory.h"
+#include "sched/ipc.h"
 #include "sched/process.h"
 #include "sched/syscalls.h"
+#include "uapi/ipc.h"
 
 void cnode_init(struct cnode* node, struct capability* memory, size_t count) {
     node->slots    = memory;
@@ -147,8 +149,9 @@ void cap_revoke(struct cnode* pool, struct capability* target) {
 static inline size_t get_object_size(uint16_t type) {
     switch (type) {
         case CAP_TYPE_CHANNEL:
+            return sizeof(struct ipc_channel);
         case CAP_TYPE_PORT_SET:
-            return 64;
+            return sizeof(struct ipc_port_set);
         case CAP_TYPE_THREAD:
             return sizeof(thread_t);
         case CAP_TYPE_FRAME:

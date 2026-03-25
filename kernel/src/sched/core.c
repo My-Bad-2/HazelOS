@@ -8,6 +8,7 @@
 #include "drivers/timer.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
+#include "sched/ipc.h"
 #include "sched/process.h"
 #include "sched/rcu.h"
 #include "sched/sched_class.h"
@@ -396,6 +397,7 @@ void scheduler_init(void) {
     sched_class_register(&idle_sched_class);
 
     scheduler_arch_init();
+    ipc_init();
 
     initialized = true;
 }

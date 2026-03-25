@@ -1,9 +1,14 @@
 #include "memory/pagemap.h"
 
 #include <errno.h>
+#include <stdint.h>
+#include <string.h>
 
+#include "core/capability.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
+#include "memory/memory.h"
+#include "memory/vmm.h"
 
 void pagemap_create(pagemap_t* map) {
     if (!map) {
@@ -92,12 +97,31 @@ void pagemap_protect(pagemap_t* map, pagemap_protect_args_t* args) {
     );
 }
 
+bool pagemap_resolve_vaddr(
+    pagemap_t* map,
+    uintptr_t virt_addr,
+    uintptr_t* phys_addr,
+    uint32_t* flags,
+    size_t* page_size
+) {
+    if (!map) {
+        return false;
+    }
+
+    uintptr_t phys = arch_mmu_translate(&map->arch, virt_addr, flags, page_size);
+    if (phys_addr) {
+        *phys_addr = phys;
+    }
+
+    return (phys != 0);
+}
+
 uintptr_t pagemap_translate(pagemap_t* map, uintptr_t virt_addr) {
     if (!map) {
         return 0;
     }
 
-    return arch_mmu_translate(&map->arch, virt_addr, nullptr);
+    return arch_mmu_translate(&map->arch, virt_addr, nullptr, nullptr);
 }
 
 size_t pagemap_get_flags(pagemap_t* map, uintptr_t virt_addr) {
@@ -106,7 +130,7 @@ size_t pagemap_get_flags(pagemap_t* map, uintptr_t virt_addr) {
     }
 
     uint32_t generic_flags = 0;
-    arch_mmu_translate(&map->arch, virt_addr, &generic_flags);
+    arch_mmu_translate(&map->arch, virt_addr, &generic_flags, nullptr);
     return generic_flags;
 }
 
@@ -175,4 +199,72 @@ bool pagemap_clone(pagemap_t* dest, pagemap_t* src) {
     }
 
     return true;
+}
+
+int copy_between_spaces(
+    struct process* dest_proc,
+    void* dest_addr,
+    struct process* src_proc,
+    const void* src_addr,
+    size_t len
+) {
+    if (len == 0) {
+        return ERR_OK;
+    }
+
+    if (!dest_addr || !src_addr) {
+        return ERR_FAULT;
+    }
+
+    size_t copied = 0;
+
+    while (copied < len) {
+        uintptr_t current_src_vaddr = (uintptr_t)src_addr + copied;
+        uintptr_t current_dst_vaddr = (uintptr_t)dest_addr + copied;
+
+        uintptr_t src_paddr, dst_paddr;
+        uint32_t src_flags, dst_flags;
+        size_t src_page_size, dst_page_size;
+
+        if (!pagemap_resolve_vaddr(
+                &src_proc->map,
+                current_src_vaddr,
+                &src_paddr,
+                &src_flags,
+                &src_page_size
+            )) {
+            return ERR_FAULT;
+        }
+
+        if (!pagemap_resolve_vaddr(
+                &dest_proc->map,
+                current_dst_vaddr,
+                &dst_paddr,
+                &dst_flags,
+                &dst_page_size
+            )) {
+            return ERR_FAULT;
+        }
+
+        if (!(dst_flags & VMM_FLAG_WRITE) || !(dst_flags & VMM_FLAG_USER)) {
+            return ERR_DENIED;
+        }
+
+        size_t src_offset = current_src_vaddr & (src_page_size - 1);
+        size_t dst_offset = current_dst_vaddr & (dst_page_size - 1);
+
+        size_t src_remaining = src_page_size - src_offset;
+        size_t dst_remaining = dst_page_size - dst_offset;
+
+        size_t chunk = (src_remaining < dst_remaining) ? src_remaining : dst_remaining;
+        chunk        = chunk < (len - copied) ? chunk : len - copied;
+
+        void* k_src  = (void*)to_higher_half((uintptr_t)src_paddr);
+        void* k_dest = (void*)to_higher_half((uintptr_t)dst_paddr);
+
+        memcpy(k_dest, k_src, chunk);
+        copied += chunk;
+    }
+
+    return ERR_OK;
 }

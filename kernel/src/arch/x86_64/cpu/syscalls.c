@@ -55,13 +55,13 @@ typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_
 static syscall_fn_t custom_syscalls[] = {
     nullptr,
     (syscall_fn_t)sys_ipc_create_channel,
-    (syscall_fn_t)sys_ipc_create_port_set,
+    (syscall_fn_t)sys_ipc_port_create,
     (syscall_fn_t)sys_ipc_bind,
-    (syscall_fn_t)sys_ipc_notify,
+    (syscall_fn_t)sys_ipc_call,
     (syscall_fn_t)sys_ipc_wait,
     (syscall_fn_t)sys_ipc_close,
-    (syscall_fn_t)ipc_send,
-    (syscall_fn_t)ipc_recv,
+    (syscall_fn_t)sys_ipc_send,
+    (syscall_fn_t)sys_ipc_recv,
 };
 
 static uint64_t

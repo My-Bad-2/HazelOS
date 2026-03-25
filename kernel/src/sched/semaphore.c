@@ -29,9 +29,9 @@ void sema_up(struct semaphore* sem) {
         return;
     }
 
-    acquire_spinlock(&sem->wait_queue.lock);
+    acquire_qspinlock(&sem->wait_queue.lock);
     sem->count++;
-    release_spinlock(&sem->wait_queue.lock);
+    release_qspinlock(&sem->wait_queue.lock);
 
     wait_queue_wake_up_one(&sem->wait_queue);
 }
@@ -42,18 +42,18 @@ void sema_down(struct semaphore* sem) {
     }
 
     while (true) {
-        acquire_spinlock(&sem->wait_queue.lock);
+        acquire_qspinlock(&sem->wait_queue.lock);
 
         if (sem->count > 0) {
             sem->count--;
-            release_spinlock(&sem->wait_queue.lock);
+            release_qspinlock(&sem->wait_queue.lock);
             return;
         }
 
-        release_spinlock(&sem->wait_queue.lock);
+        release_qspinlock(&sem->wait_queue.lock);
 
         thread_sleep_prepare(&sem->wait_queue);
-        acquire_spinlock(&sem->wait_queue.lock);
+        acquire_qspinlock(&sem->wait_queue.lock);
 
         bool acquired = false;
         if (sem->count > 0) {
@@ -61,7 +61,7 @@ void sema_down(struct semaphore* sem) {
             acquired = true;
         }
 
-        release_spinlock(&sem->wait_queue.lock);
+        release_qspinlock(&sem->wait_queue.lock);
 
         if (acquired) {
             thread_sleep_finish(&sem->wait_queue);
@@ -80,14 +80,14 @@ bool sema_try_down(struct semaphore* sem) {
 
     bool acquired = false;
 
-    acquire_spinlock(&sem->wait_queue.lock);
+    acquire_qspinlock(&sem->wait_queue.lock);
 
     if (sem->count > 0) {
         sem->count--;
         acquired = true;
     }
 
-    release_spinlock(&sem->wait_queue.lock);
+    release_qspinlock(&sem->wait_queue.lock);
 
     return acquired;
 }

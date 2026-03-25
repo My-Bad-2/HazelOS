@@ -11,7 +11,7 @@ void thread_sleep_prepare(struct wait_queue* wq) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* curr      = cpu->curr_thread;
 
-    acquire_spinlock(&wq->lock);
+    acquire_qspinlock(&wq->lock);
 
     if (dlist_empty(&curr->wait_node)) {
         dlist_add_tail(&curr->wait_node, &wq->list);
@@ -21,14 +21,14 @@ void thread_sleep_prepare(struct wait_queue* wq) {
 
     curr->state = THREAD_BLOCKED;
 
-    release_spinlock(&wq->lock);
+    release_qspinlock(&wq->lock);
 }
 
 void thread_sleep_finish(struct wait_queue* wq) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* curr      = cpu->curr_thread;
 
-    acquire_spinlock(&wq->lock);
+    acquire_qspinlock(&wq->lock);
 
     curr->state = THREAD_RUNNING;
 
@@ -37,13 +37,13 @@ void thread_sleep_finish(struct wait_queue* wq) {
         dlist_init(&curr->wait_node);
     }
 
-    release_spinlock(&wq->lock);
+    release_qspinlock(&wq->lock);
     arch_enable_interrupts();
 }
 
 void wait_queue_wake_up_all(struct wait_queue* wq) {
     if (!wq) return;
-    acquire_spinlock(&wq->lock);
+    acquire_qspinlock(&wq->lock);
 
     while (!dlist_empty(&wq->list)) {
         struct dlist_head* node = wq->list.next;
@@ -55,7 +55,7 @@ void wait_queue_wake_up_all(struct wait_queue* wq) {
         scheduler_unblock(waiter);
     }
 
-    release_spinlock(&wq->lock);
+    release_qspinlock(&wq->lock);
 }
 
 void wait_queue_sleep(struct wait_queue* wq) {
@@ -64,7 +64,7 @@ void wait_queue_sleep(struct wait_queue* wq) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* curr      = cpu->curr_thread;
 
-    acquire_spinlock(&wq->lock);
+    acquire_qspinlock(&wq->lock);
 
     if (dlist_empty(&curr->wait_node)) {
         dlist_add_tail(&curr->wait_node, &wq->list);
@@ -72,18 +72,18 @@ void wait_queue_sleep(struct wait_queue* wq) {
 
     arch_disable_interrupts();
     curr->state = THREAD_BLOCKED;
-    release_spinlock(&wq->lock);
+    release_qspinlock(&wq->lock);
 
     scheduler_yield();
 
-    acquire_spinlock(&wq->lock);
+    acquire_qspinlock(&wq->lock);
 
     if (!dlist_empty(&curr->wait_node)) {
         dlist_del(&curr->wait_node);
         dlist_init(&curr->wait_node);
     }
 
-    release_spinlock(&wq->lock);
+    release_qspinlock(&wq->lock);
 
     arch_enable_interrupts();
 }
@@ -93,7 +93,7 @@ void wait_queue_wake_up_one(struct wait_queue* wq) {
         return;
     }
 
-    acquire_spinlock(&wq->lock);
+    acquire_qspinlock(&wq->lock);
 
     if (!dlist_empty(&wq->list)) {
         struct dlist_head* node = wq->list.next;
@@ -105,5 +105,5 @@ void wait_queue_wake_up_one(struct wait_queue* wq) {
         scheduler_unblock(curr);
     }
 
-    release_spinlock(&wq->lock);
+    release_qspinlock(&wq->lock);
 }

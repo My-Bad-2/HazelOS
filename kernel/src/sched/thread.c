@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "arch.h"
+#include "core/capability.h"
 #include "cpu/syscalls.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
@@ -11,11 +12,14 @@
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
+#include "memory/pmm.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/sched_class.h"
 #include "sched/scheduler.h"
 #include "sched/wait.h"
+
+#define INIT_CNODE_CAPACITY 1024
 
 static kmem_cache_t* thread_cache         = nullptr;
 static struct dlist_head dead_thread_list = DLIST_INIT(dead_thread_list);
@@ -56,6 +60,20 @@ static thread_t* thread_create_internal(
     t->state        = THREAD_READY;
     t->assigned_cpu = UINT32_MAX;
     t->policy       = policy;
+    t->root_cnode   = kmalloc(sizeof(struct cnode));
+
+    size_t slots_size        = INIT_CNODE_CAPACITY * sizeof(struct capability);
+    struct capability* slots = (struct capability*)kmalloc(slots_size);
+
+    cnode_init(t->root_cnode, slots, INIT_CNODE_CAPACITY);
+
+    uint32_t self_cap_id;
+    struct capability* self_cap = cap_alloc(t->root_cnode, &self_cap_id);
+
+    atomic_store_explicit(&self_cap->object_ptr, (uintptr_t)t->root_cnode, memory_order_release);
+
+    self_cap->type   = CAP_TYPE_CNODE;
+    self_cap->rights = RIGHT_ALL;
 
     dlist_init(&t->process_node);
     dlist_init(&t->wait_node);
@@ -122,6 +140,7 @@ thread_clone(process_t* target_proc, thread_t* parent, syscall_regs_t* tf, void*
     child->policy        = parent->policy;
     child->sched_class   = parent->sched_class;
     child->affinity_mask = parent->affinity_mask;
+    child->root_cnode    = kmalloc(sizeof(struct cnode));
 
     strncpy(child->name, parent->name, 31);
 

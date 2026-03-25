@@ -76,19 +76,6 @@ int fork(void);
 int ipc_create_channel(int32_t* handles);
 int ipc_create_port_set(int32_t* handle);
 
-int ipc_bind(int32_t port_set, int32_t channel, uint64_t key);
-int ipc_notify(int32_t channel);
-int ipc_wait(int32_t port_set, ipc_event_t* event, int timeout_ms);
-int ipc_close(int32_t handle);
-int ipc_send(
-    int32_t chan_handle,
-    const void* user_data,
-    size_t size,
-    int32_t* user_handles,
-    size_t num_handles
-);
-int ipc_recv(int32_t chan_handle, ipc_msg_info_t* info);
-
 #ifdef __cplusplus
 }
 #endif

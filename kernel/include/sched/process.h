@@ -12,6 +12,7 @@
 #include "libs/spinlock.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
+#include "sched/ipc.h"
 #include "sched/wait.h"
 
 #define CLONE_VM     0x100
@@ -107,6 +108,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
 
     timer_event_t sleep_timer;
     void* fpu_buffer;
+    struct thread_ipc_state ipc_state;
 } thread_t;
 
 process_t* process_create(const char* name, process_t* parent, bool is_kernel);

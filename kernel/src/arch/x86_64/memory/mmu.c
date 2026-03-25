@@ -6,7 +6,6 @@
 #include "boot/boot.h"
 #include "cpu/cpu.h"
 #include "cpu/registers.h"
-#include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
@@ -407,7 +406,8 @@ int arch_mmu_unmap(arch_pagemap_t* map, uintptr_t virt, size_t length, bool free
     return 0;
 }
 
-uintptr_t arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_flags) {
+uintptr_t
+arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_flags, size_t* page_size) {
     if (!map || !arch_is_canonical(virt, paging_max_levels)) {
         return 0;
     }
@@ -435,12 +435,20 @@ uintptr_t arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_
                 *out_flags = flags_to_generic(entry);
             }
 
+            if (page_size) {
+                *page_size = (level == 3) ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM;
+            }
+
             break;
         } else if (level == 1) {
             result_phys = (entry & X86_PAGE_ADDRESS_MASK) + (virt & (PAGE_SIZE_SMALL - 1));
 
             if (out_flags) {
                 *out_flags = flags_to_generic(entry);
+            }
+
+            if (page_size) {
+                *page_size = PAGE_SIZE_SMALL;
             }
 
             break;

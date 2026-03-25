@@ -84,6 +84,13 @@ void pagemap_protect(pagemap_t* map, pagemap_protect_args_t* args);
 bool pagemap_shatter(pagemap_t* map, uintptr_t virt_addr);
 bool pagemap_collapse(pagemap_t* map, uintptr_t virt_addr);
 
+bool pagemap_resolve_vaddr(
+    pagemap_t* map,
+    uintptr_t virt_addr,
+    uintptr_t* phys_addr,
+    uint32_t* flags,
+    size_t* page_size
+);
 uintptr_t pagemap_translate(pagemap_t* map, uintptr_t virt_addr);
 size_t pagemap_get_flags(pagemap_t* map, uintptr_t virt_addr);
 

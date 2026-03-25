@@ -1,602 +1,70 @@
 #include "sched/ipc.h"
 
 #include <errno.h>
+#include <stdalign.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
+#include "compiler.h"
+#include "core/capability.h"
 #include "cpu/smp.h"
-#include "drivers/timer.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
-#include "libs/math.h"
+#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
-#include "memory/memory.h"
-#include "memory/pagemap.h"
-#include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
 #include "sched/syscalls.h"
 #include "uapi/ipc.h"
 
-#define TIMER_FLAG_PERIODIC (1 << 0)
-
-struct ipc_timer {
-    ipc_object_t header;
-
-    timer_event_t hw_timer;
-    ipc_port_set_t* port;
-    uint64_t user_key;
-
-    ipc_kernel_event_t event_node;
-};
-
-struct ipc_shared_mem {
-    ipc_object_t header;
-
-    size_t size;
-    size_t page_count;
-    uintptr_t* pages;
-};
-
 static kmem_cache_t* channel_cache = nullptr;
-static kmem_cache_t* event_cache   = nullptr;
-static kmem_cache_t* timer_cache   = nullptr;
+static kmem_cache_t* port_cache    = nullptr;
 
-static void sys_ipc_notify_internal(ipc_channel_t* dest);
+extern int copy_between_spaces(
+    process_t* dest_proc,
+    void* dest_addr,
+    process_t* src_proc,
+    const void* src_addr,
+    size_t len
+);
 
-static inline void thread_queue_init(struct thread_queue* tq) {
-    dlist_init(&tq->list);
+void ipc_init(void) {
+    channel_cache = kmem_cache_create(
+        "channel_cache",
+        sizeof(struct ipc_channel),
+        _Alignof(struct ipc_channel),
+        0,
+        nullptr
+    );
+
+    port_cache = kmem_cache_create(
+        "port_cache",
+        sizeof(struct ipc_port_set),
+        _Alignof(struct ipc_port_set),
+        0,
+        nullptr
+    );
 }
 
-static inline bool thread_queue_empty(struct thread_queue* tq) {
-    return dlist_empty(&tq->list);
-}
-
-static inline void thread_queue_push(struct thread_queue* tq, thread_t* t) {
-    dlist_add_tail(&t->wait_node, &tq->list);
-}
-
-static thread_t* thread_queue_pop(struct thread_queue* tq) {
-    if (dlist_empty(&tq->list)) {
-        return nullptr;
-    }
-
-    struct dlist_head* first = tq->list.next;
-    thread_t* t              = dlist_entry(first, thread_t, wait_node);
-
-    dlist_del(first);
-    return t;
-}
-
-static int32_t alloc_handle(process_t* proc, ipc_object_t* obj, uint32_t rights) {
-    handle_t h = handle_alloc(&proc->handle_table, obj, rights);
-
-    if (h < 0) {
-        return -EMFILE;
-    }
-
-    atomic_fetch_add(&obj->ref_count, 1);
-    return (int32_t)h;
-}
-
-static void* get_object(process_t* proc, int32_t handle, ipc_obj_type_t type, uint32_t rights) {
-    ipc_object_t* obj = handle_lookup(&proc->handle_table, (handle_t)handle, rights);
-
-    if (!obj) {
-        return nullptr;
-    }
-
-    if ((obj->type != type) && (type != OBJ_ANY)) {
-        return nullptr;
-    }
-
-    atomic_fetch_add(&obj->ref_count, 1);
-    return obj;
-}
-
-static void put_object(process_t* proc, ipc_object_t* obj) {
-    if (!obj) {
-        return;
-    }
-
-    if (atomic_fetch_sub(&obj->ref_count, 1) == 1) {
-        if (obj->type == OBJ_CHANNEL) {
-            ipc_channel_t* chan = (ipc_channel_t*)obj;
-
-            if (chan->peer) {
-                acquire_qspinlock(&chan->peer->header.lock);
-
-                chan->peer->peer        = nullptr;
-                chan->peer->peer_closed = true;
-                sys_ipc_notify_internal(chan->peer);
-
-                release_qspinlock(&chan->peer->header.lock);
-            }
-
-            ipc_msg_t *msg, *n;
-            dlist_for_each_entry_safe(msg, n, &chan->msg_queue, node) {
-                dlist_del(&msg->node);
-
-                for (size_t i = 0; i < msg->num_handles; ++i) {
-                    put_object(proc, msg->handles[i]);
-                }
-
-                kfree(msg);
-            }
-
-            kmem_cache_free(channel_cache, chan);
-        } else if (obj->type == OBJ_TIMER) {
-            struct ipc_timer* timer = (struct ipc_timer*)obj;
-
-            timer_cancel(&timer->hw_timer);
-
-            if (timer->port) {
-                put_object(proc, (ipc_object_t*)timer->port);
-            }
-
-            kmem_cache_free(timer_cache, timer);
-        } else {
-            kfree(obj);
-        }
-    }
-}
-
-static int get_handle_rights(process_t* proc, int32_t handle, uint32_t* rights_out) {
-    return handle_get_rights(&proc->handle_table, (handle_t)handle, rights_out);
-}
-
-void sys_ipc_close(int32_t handle) {
-    process_t* me     = smp_current_core()->curr_thread->owner;
-    ipc_object_t* obj = handle_free(&me->handle_table, (handle_t)handle);
-    put_object(me, obj);
-}
-
-int sys_ipc_create_channel(int32_t* handles_out) {
-    process_t* me = smp_current_core()->curr_thread->owner;
-
-    if (!channel_cache) {
-        channel_cache = kmem_cache_create(
-            "ipc_channel_cache",
-            sizeof(ipc_channel_t),
-            sizeof(ipc_channel_t),
-            0,
-            nullptr
-        );
-    }
-
-    ipc_channel_t* ch1 = kmem_cache_alloc(channel_cache);
-    ipc_channel_t* ch2 = kmem_cache_alloc(channel_cache);
-
-    if (!ch1 || !ch2) {
-        if (ch1) {
-            kmem_cache_free(channel_cache, ch1);
-        }
-
-        if (ch2) {
-            kmem_cache_free(channel_cache, ch2);
-        }
-
-        return -ENOMEM;
-    }
-
-    memset(ch1, 0, sizeof(ipc_channel_t));
-    memset(ch2, 0, sizeof(ipc_channel_t));
-
-    ch1->header.type = OBJ_CHANNEL;
-    create_qspinlock(&ch1->header.lock);
-    dlist_init(&ch1->msg_queue);
-    ch1->max_msg_count = 1024;
-
-    ch2->header.type = OBJ_CHANNEL;
-    create_qspinlock(&ch2->header.lock);
-    dlist_init(&ch2->msg_queue);
-    ch2->max_msg_count = 1024;
-
-    ch1->peer = ch2;
-    ch2->peer = ch1;
-
-    int handle1 = alloc_handle(me, &ch1->header, IPC_RIGHTS_ALL);
-    if (handle1 < 0) {
-        kmem_cache_free(channel_cache, ch1);
-        kmem_cache_free(channel_cache, ch2);
-        return handle1;
-    }
-
-    int handle2 = alloc_handle(me, &ch2->header, IPC_RIGHTS_ALL);
-    if (handle2 < 0) {
-        put_object(me, &ch1->header);
-        kmem_cache_free(channel_cache, ch2);
-        return handle2;
-    }
-
-    if (handles_out) {
-        handles_out[0] = handle1;
-        handles_out[1] = handle2;
-    }
-    return 0;
-}
-
-int sys_ipc_create_port_set(int32_t* handle_out) {
-    process_t* me       = smp_current_core()->curr_thread->owner;
-    ipc_port_set_t* set = kmalloc(sizeof(ipc_port_set_t));
-
-    if (!set) {
-        return -ENOMEM;
-    }
-
-    memset(set, 0, sizeof(ipc_port_set_t));
-
-    set->header.type = OBJ_PORT_SET;
-    create_qspinlock(&set->header.lock);
-    dlist_init(&set->event_queue);
-    thread_queue_init(&set->waiters);
-
-    int32_t handle = alloc_handle(me, &set->header, IPC_RIGHTS_ALL);
-    if (handle == 0) {
-        kfree(set);
-        return handle;
-    }
-
-    if (handle_out) {
-        *handle_out = handle;
-    }
-
-    return 0;
-}
-
-int sys_ipc_bind(int32_t port_handle, int32_t chan_handle, uint64_t key) {
-    process_t* me = smp_current_core()->curr_thread->owner;
-
-    ipc_port_set_t* set    = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_READ);
-    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
-
-    if (!set || !channel) {
-        put_object(me, (ipc_object_t*)set);
-        put_object(me, (ipc_object_t*)channel);
-        return -EACCES;
-    }
-
-    acquire_qspinlock(&channel->header.lock);
-    channel->wait_set = set;
-    channel->user_key = key;
-    release_qspinlock(&channel->header.lock);
-
-    put_object(me, (ipc_object_t*)set);
-    put_object(me, (ipc_object_t*)channel);
-    return 0;
-}
-
-void sys_ipc_notify_internal(ipc_channel_t* dest) {
-    ipc_port_set_t* set = dest->wait_set;
-
+static void sys_ipc_notify_internal(struct ipc_channel* dest) {
+    struct ipc_port_set* set = dest->wait_set;
     if (!set) {
         return;
     }
 
     acquire_qspinlock(&set->header.lock);
 
-    ipc_kernel_event_t* event = kmem_cache_alloc(event_cache);
-    if (!event) {
-        release_qspinlock(&set->header.lock);
-        return;
-    }
-
-    event->data.key    = dest->user_key;
-    event->data.events = IPC_EVENT_READABLE;
-    event->data.handle = 0;
-    event->is_embedded = false;
-
-    dlist_add_tail(&event->node, &set->event_queue);
-
-    if (!thread_queue_empty(&set->waiters)) {
-        thread_t* t = thread_queue_pop(&set->waiters);
-        scheduler_unblock(t);
-    }
-
-    release_qspinlock(&set->header.lock);
-}
-
-int sys_ipc_notify(int32_t chan_handle) {
-    if (!event_cache) {
-        event_cache = kmem_cache_create(
-            "ipc_event_cache",
-            sizeof(ipc_kernel_event_t),
-            sizeof(ipc_kernel_event_t),
-            0,
-            nullptr
-        );
-    }
-
-    process_t* me = smp_current_core()->curr_thread->owner;
-
-    ipc_channel_t* src = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
-    if (!src) {
-        return -EBADF;
-    }
-
-    ipc_channel_t* dest = src->peer;
-    if (!dest || src->peer_closed) {
-        put_object(me, (ipc_object_t*)src);
-        return -EPIPE;
-    }
-
-    ipc_channel_t* first_lock  = (src < dest) ? src : dest;
-    ipc_channel_t* second_lock = (src < dest) ? dest : src;
-
-    acquire_qspinlock(&first_lock->header.lock);
-    acquire_qspinlock(&second_lock->header.lock);
-
-    if (!src->peer || src->peer_closed) {
-        release_qspinlock(&second_lock->header.lock);
-        release_qspinlock(&first_lock->header.lock);
-
-        put_object(me, (ipc_object_t*)src);
-        return -EPIPE;
-    }
-
-    sys_ipc_notify_internal(dest);
-
-    release_qspinlock(&second_lock->header.lock);
-    release_qspinlock(&first_lock->header.lock);
-
-    put_object(me, (ipc_object_t*)src);
-    return 0;
-}
-
-int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
-    process_t* me = smp_current_core()->curr_thread->owner;
-
-    ipc_port_set_t* set = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_READ);
-    if (!set) {
-        return -EACCES;
-    }
-
-    int ret     = 0;
-    thread_t* t = smp_current_core()->curr_thread;
-
-    acquire_qspinlock(&set->header.lock);
-
-    while (dlist_empty(&set->event_queue)) {
-        if (timeout_ms == 0) {
-            ret = -EAGAIN;
-            break;
-        }
-
-        thread_queue_push(&set->waiters, t);
-        release_qspinlock(&set->header.lock);
-
-        scheduler_sleep((uint32_t)timeout_ms);
-
-        acquire_qspinlock(&set->header.lock);
-
-        if (dlist_linked(&t->wait_node)) {
-            dlist_del(&t->wait_node);
-
-            if (dlist_empty(&set->event_queue)) {
-                ret = -EBUSY;
-                break;
-            }
-        }
-    }
-
-    if (ret == 0 && !dlist_empty(&set->event_queue)) {
-        struct dlist_head* first  = set->event_queue.next;
-        ipc_kernel_event_t* event = dlist_entry(first, ipc_kernel_event_t, node);
-
-        if (out_event) {
-            copy_to_user(out_event, &event->data, sizeof(ipc_event_t));
-        }
-
-        dlist_del_init(first);
-
-        if (!event->is_embedded) {
-            kmem_cache_free(event_cache, event);
-        }
-    }
-
-    release_qspinlock(&set->header.lock);
-    put_object(me, (ipc_object_t*)set);
-    return ret;
-}
-
-int ipc_send(
-    int32_t chan_handle,
-    const void* user_data,
-    size_t size,
-    int32_t* user_handles,
-    size_t num_handles
-) {
-    if (!event_cache) {
-        event_cache = kmem_cache_create(
-            "ipc_event_cache",
-            sizeof(ipc_kernel_event_t),
-            sizeof(ipc_kernel_event_t),
-            0,
-            nullptr
-        );
-    }
-
-    if (size > (UINT16_MAX + 1) || num_handles > IPC_MAX_MSG_HANDLES) {
-        return -EINVAL;
-    }
-
-    process_t* me      = smp_current_core()->curr_thread->owner;
-    ipc_channel_t* src = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_WRITE);
-    if (!src) {
-        return -EACCES;
-    }
-
-    ipc_msg_t* msg = kmalloc(sizeof(ipc_msg_t) + size);
-    if (!msg) {
-        put_object(me, (ipc_object_t*)src);
-        return -ENOMEM;
-    }
-
-    msg->payload_size = size;
-    msg->num_handles  = num_handles;
-
-    if (size > 0 && user_data) {
-        copy_from_user(msg->payload, user_data, size);
-    }
-
-    for (size_t i = 0; i < num_handles; ++i) {
-        if (get_handle_rights(me, user_handles[i], &msg->handle_rights[i]) < 0 ||
-            !(msg->handle_rights[i] & IPC_RIGHT_TRANSFER)) {
-            for (size_t j = 0; j < i; ++j) {
-                atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
-            }
-
-            kfree(msg);
-            put_object(me, (ipc_object_t*)src);
-            return -EACCES;
-        }
-
-        msg->handles[i] = handle_lookup(&me->handle_table, (handle_t)user_handles[i], 0);
-        atomic_fetch_add(&msg->handles[i]->ref_count, 1);
-    }
-
-    ipc_channel_t* dest = src->peer;
-    if (!dest || src->peer_closed) {
-        for (size_t i = 0; i < num_handles; ++i) {
-            atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
-        }
-
-        kfree(msg);
-        put_object(me, (ipc_object_t*)src);
-        return -EPIPE;
-    }
-
-    ipc_channel_t* first_lock  = (src < dest) ? src : dest;
-    ipc_channel_t* second_lock = (src < dest) ? dest : src;
-
-    acquire_qspinlock(&first_lock->header.lock);
-    acquire_qspinlock(&second_lock->header.lock);
-
-    if (!src->peer || src->peer_closed) {
-        release_qspinlock(&second_lock->header.lock);
-        release_qspinlock(&first_lock->header.lock);
-
-        for (size_t i = 0; i < num_handles; ++i) {
-            atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
-        }
-
-        kfree(msg);
-        put_object(me, (ipc_object_t*)src);
-        return -EPIPE;
-    }
-
-    if (dest->msg_count >= dest->max_msg_count) {
-        release_qspinlock(&second_lock->header.lock);
-        release_qspinlock(&first_lock->header.lock);
-
-        for (size_t i = 0; i < num_handles; ++i) {
-            atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
-        }
-
-        kfree(msg);
-        put_object(me, (ipc_object_t*)src);
-        return -EAGAIN;
-    }
-
-    dlist_add_tail(&msg->node, &dest->msg_queue);
-    dest->msg_count++;
-
-    sys_ipc_notify_internal(dest);
-
-    release_qspinlock(&second_lock->header.lock);
-    release_qspinlock(&first_lock->header.lock);
-
-    put_object(me, (ipc_object_t*)src);
-    return 0;
-}
-
-int ipc_recv(int32_t chan_handle, ipc_msg_info_t* user_info) {
-    if (!user_info) {
-        return -EINVAL;
-    }
-
-    process_t* me = smp_current_core()->curr_thread->owner;
-
-    ipc_msg_info_t info;
-    if (copy_from_user(&info, user_info, sizeof(ipc_msg_info_t)) > 0) {
-        return -EFAULT;
-    }
-
-    ipc_channel_t* channel = get_object(me, chan_handle, OBJ_CHANNEL, IPC_RIGHT_READ);
-    if (!channel) {
-        return -EACCES;
-    }
-
-    acquire_qspinlock(&channel->header.lock);
-    if (dlist_empty(&channel->msg_queue)) {
-        release_qspinlock(&channel->header.lock);
-        put_object(me, (ipc_object_t*)channel);
-        return channel->peer_closed ? -EPIPE : -EAGAIN;
-    }
-
-    struct dlist_head* first = channel->msg_queue.next;
-    ipc_msg_t* msg           = dlist_entry(first, ipc_msg_t, node);
-
-    dlist_del(first);
-    channel->msg_count--;
-
-    release_qspinlock(&channel->header.lock);
-
-    size_t copy_size =
-        (msg->payload_size < info.data_size_max) ? msg->payload_size : info.data_size_max;
-    if (copy_size > 0 && info.data_buffer) {
-        copy_to_user(info.data_buffer, msg->payload, copy_size);
-    }
-
-    info.data_size_actual = msg->payload_size;
-
-    size_t handle_copy =
-        (msg->num_handles < info.handles_max) ? msg->num_handles : info.handles_max;
-
-    int32_t temp_handles[IPC_MAX_MSG_HANDLES];
-    for (size_t i = 0; i < handle_copy; ++i) {
-        temp_handles[i] = alloc_handle(me, msg->handles[i], msg->handle_rights[i]);
-        atomic_fetch_sub(&msg->handles[i]->ref_count, 1);
-    }
-
-    if (handle_copy > 0 && info.handles_buffer) {
-        copy_to_user(info.handles_buffer, temp_handles, handle_copy * sizeof(int32_t));
-    }
-
-    for (size_t i = handle_copy; i < msg->num_handles; ++i) {
-        put_object(me, msg->handles[i]);
-    }
-
-    info.handles_actual = msg->num_handles;
-
-    copy_to_user(user_info, &info, sizeof(ipc_msg_info_t));
-
-    kfree(msg);
-    put_object(me, (ipc_object_t*)channel);
-    return (copy_size < msg->payload_size || handle_copy < msg->num_handles) ? -E2BIG : 0;
-}
-
-static void ipc_timer_callback(void* ctx) {
-    struct ipc_timer* timer = (struct ipc_timer*)ctx;
-    ipc_port_set_t* set     = timer->port;
-
-    if (!set) {
-        return;
-    }
-
-    acquire_qspinlock(&set->header.lock);
-
-    if (!dlist_linked(&timer->event_node.node)) {
-        timer->event_node.data.key    = timer->user_key;
-        timer->event_node.data.events = IPC_EVENT_READABLE;
-        timer->event_node.data.handle = 0;
-
-        dlist_add_tail(&timer->event_node.node, &set->event_queue);
-
-        if (!dlist_empty(&set->waiters.list)) {
-            thread_t* t = thread_queue_pop(&set->waiters);
+    if (!dest->is_in_port_set) {
+        dest->is_in_port_set = true;
+        dlist_add_tail(&dest->port_node, &set->event_queue);
+
+        // Wake up one waiting thread
+        if (!dlist_empty(&set->waiters)) {
+            struct dlist_head* first = set->waiters.next;
+            thread_t* t              = dlist_entry(first, thread_t, wait_node);
+            dlist_del(first);
             scheduler_unblock(t);
         }
     }
@@ -604,231 +72,449 @@ static void ipc_timer_callback(void* ctx) {
     release_qspinlock(&set->header.lock);
 }
 
-int sys_ipc_timer_arm(
-    int32_t port_handle,
-    uint64_t user_key,
-    uint64_t deadline_ms,
-    int flags,
-    int32_t* handle_out
-) {
-    if (deadline_ms == 0) {
-        return -EINVAL;
-    }
-
-    process_t* me        = smp_current_core()->curr_thread->owner;
-    ipc_port_set_t* set  = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_WRITE);
-    timer_manager_t* mgr = smp_current_core()->timer_manager;
-
-    if (!set) {
-        return -EACCES;
-    }
-
-    if (!timer_cache) {
-        timer_cache = kmem_cache_create(
-            "ipc_timer_cache",
-            sizeof(struct ipc_timer),
-            sizeof(struct ipc_timer),
-            0,
-            nullptr
-        );
-    }
-
-    struct ipc_timer* t = kmem_cache_alloc(timer_cache);
-    if (!t) {
-        put_object(me, (ipc_object_t*)set);
-        return -ENOMEM;
-    }
-
-    memset(t, 0, sizeof(struct ipc_timer));
-
-    t->header.type = OBJ_TIMER;
-    create_qspinlock(&t->header.lock);
-
-    t->port                   = set;
-    t->user_key               = user_key;
-    t->event_node.is_embedded = true;
-
-    dlist_init(&t->event_node.node);
-
-    atomic_fetch_add(&set->header.ref_count, 1);
-
-    size_t ticks = (deadline_ms * timer_get_hz()) / 1000;
-    if (ticks == 0) {
-        ticks = 1;
-    }
-
-    if (flags & TIMER_FLAG_PERIODIC) {
-        timer_arm(mgr, &t->hw_timer, 0, ticks, ipc_timer_callback, t);
-    } else {
-        timer_arm(mgr, &t->hw_timer, ticks, 0, ipc_timer_callback, t);
-    }
-
-    int32_t handle = alloc_handle(me, &t->header, IPC_RIGHTS_ALL);
-    if (handle < 0) {
-        timer_cancel(&t->hw_timer);
-        kmem_cache_free(timer_cache, t);
-
-        atomic_fetch_sub(&set->header.ref_count, 1);
-        put_object(me, (ipc_object_t*)set);
-        return handle;
-    }
-
-    if (handle_out) {
-        *handle_out = handle;
-    }
-
-    put_object(me, (ipc_object_t*)set);
-    return 0;
-}
-
-static void ipc_shm_free(process_t* proc, struct ipc_shared_mem* shm) {
-    if (!shm) {
+static void destroy_channel(struct ipc_channel* chan) {
+    if (!chan) {
         return;
     }
 
-    for (size_t i = 0; i < shm->page_count; ++i) {
-        if (shm->pages[i]) {
-            vmfree(&proc->space, (void*)shm->pages[i], PAGE_SIZE_SMALL);
+    if (chan->peer) {
+        acquire_qspinlock(&chan->peer->header.lock);
+        chan->peer->peer        = nullptr;
+        chan->peer->peer_closed = true;
+
+        // Wake up anyone blocked waiting for the dead peer
+        thread_t *t, *n;
+        dlist_for_each_entry_safe(t, n, &chan->peer->blocked_senders, wait_node) {
+            dlist_del(&t->wait_node);
+            t->ipc_state.status = ERR_FAULT;
+            scheduler_unblock(t);
+        }
+
+        dlist_for_each_entry_safe(t, n, &chan->peer->blocked_receivers, wait_node) {
+            dlist_del(&t->wait_node);
+            t->ipc_state.status = ERR_FAULT;
+            scheduler_unblock(t);
+        }
+
+        sys_ipc_notify_internal(chan->peer);
+        release_qspinlock(&chan->peer->header.lock);
+    }
+
+    // Cleanup any dangling threads in our own queues
+    thread_t *t, *n;
+    dlist_for_each_entry_safe(t, n, &chan->blocked_senders, wait_node) {
+        dlist_del(&t->wait_node);
+        t->ipc_state.status = ERR_FAULT;
+        scheduler_unblock(t);
+    }
+
+    dlist_for_each_entry_safe(t, n, &chan->blocked_receivers, wait_node) {
+        dlist_del(&t->wait_node);
+        t->ipc_state.status = ERR_FAULT;
+        scheduler_unblock(t);
+    }
+
+    // Unlink from our own port set
+    if (chan->wait_set) {
+        acquire_qspinlock(&chan->wait_set->header.lock);
+
+        if (chan->is_in_port_set) {
+            dlist_del(&chan->port_node);
+        }
+
+        release_qspinlock(&chan->wait_set->header.lock);
+    }
+
+    kmem_cache_free(channel_cache, chan);
+}
+
+int sys_ipc_create_channel(uint32_t* cap_id_out) {
+    thread_t* me    = smp_current_core()->curr_thread;
+    process_t* proc = me->owner;
+
+    struct ipc_channel* ch1 = kmem_cache_alloc(channel_cache);
+    if (!ch1) {
+        return ERR_NO_MEM;
+    }
+
+    struct ipc_channel* ch2 = kmem_cache_alloc(channel_cache);
+    if (!ch2) {
+        kmem_cache_free(channel_cache, ch1);
+        return ERR_NO_MEM;
+    }
+
+    memset(ch1, 0, sizeof(struct ipc_channel));
+    memset(ch2, 0, sizeof(struct ipc_channel));
+
+    ch1->header.type = OBJ_CHANNEL;
+    create_qspinlock(&ch1->header.lock);
+    dlist_init(&ch1->blocked_senders);
+    dlist_init(&ch1->blocked_receivers);
+    dlist_init(&ch1->port_node);
+
+    ch2->header.type = OBJ_CHANNEL;
+    create_qspinlock(&ch2->header.lock);
+    dlist_init(&ch2->blocked_senders);
+    dlist_init(&ch2->blocked_receivers);
+    dlist_init(&ch2->port_node);
+
+    ch1->peer = ch2;
+    ch2->peer = ch1;
+
+    uint32_t cap1, cap2;
+    struct capability* c1 = cap_alloc(me->root_cnode, &cap1);
+    struct capability* c2 = cap_alloc(me->root_cnode, &cap2);
+
+    if (!c1 || !c2) {
+        if (c1) {
+            cap_revoke(me->root_cnode, c1);
+        }
+
+        kmem_cache_free(channel_cache, ch1);
+        kmem_cache_free(channel_cache, ch2);
+        return ERR_NO_MEM;
+    }
+
+    atomic_store_explicit(&c1->object_ptr, (uintptr_t)ch1, memory_order_release);
+    c1->type   = CAP_TYPE_CHANNEL;
+    c1->rights = RIGHT_ALL;
+
+    atomic_store_explicit(&c2->object_ptr, (uintptr_t)ch2, memory_order_release);
+    c2->type   = CAP_TYPE_CHANNEL;
+    c2->rights = RIGHT_ALL;
+
+    if (cap_id_out) {
+        uint32_t out[2] = {cap1, cap2};
+        copy_to_user(cap_id_out, out, sizeof(out));
+    }
+
+    return ERR_OK;
+}
+
+int sys_ipc_port_create(uint32_t* cap_id_out) {
+    thread_t* me = smp_current_core()->curr_thread;
+
+    struct ipc_port_set* set = kmem_cache_alloc(port_cache);
+    if (!set) {
+        return ERR_NO_MEM;
+    }
+
+    memset(set, 0, sizeof(struct ipc_port_set));
+    set->header.type = OBJ_PORT_SET;
+    create_qspinlock(&set->header.lock);
+    dlist_init(&set->event_queue);
+    dlist_init(&set->waiters);
+
+    uint32_t cap;
+    struct capability* c = cap_alloc(me->root_cnode, &cap);
+    if (!c) {
+        kmem_cache_free(port_cache, set);
+        return ERR_NO_MEM;
+    }
+
+    atomic_store_explicit(&c->object_ptr, (uintptr_t)set, memory_order_release);
+    c->type   = CAP_TYPE_PORT_SET;
+    c->rights = RIGHT_ALL;
+
+    if (cap_id_out) {
+        copy_to_user(cap_id_out, &cap, sizeof(uint32_t));
+    }
+
+    return ERR_OK;
+}
+
+int sys_ipc_close(uint32_t cap_id) {
+    thread_t* me = smp_current_core()->curr_thread;
+
+    struct capability* cap = cap_lookup(me->root_cnode, cap_id, 0);
+    if (!cap) {
+        return ERR_INVALID_CAP;
+    }
+
+    uint16_t type = cap->type;
+    uintptr_t obj = atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
+
+    sys_cap_revoke(me->root_cnode, cap_id);
+
+    if (type == CAP_TYPE_CHANNEL) {
+        destroy_channel((struct ipc_channel*)obj);
+    } else if (type == CAP_TYPE_PORT_SET) {
+        kmem_cache_free(port_cache, (void*)obj);
+    }
+
+    return ERR_OK;
+}
+
+static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
+    process_t* proc_tx = sender->owner;
+    process_t* proc_rx = receiver->owner;
+
+    struct ipc_msg_info* tx = &sender->ipc_state.msg_info;
+    struct ipc_msg_info* rx = &receiver->ipc_state.msg_info;
+
+    size_t copy_len =
+        (tx->data_size_max < rx->data_size_max) ? tx->data_size_max : rx->data_size_max;
+    if (copy_len > 0) {
+        if (copy_between_spaces(proc_rx, rx->data_buffer, proc_tx, tx->data_buffer, copy_len) !=
+            0) {
+            return ERR_FAULT;
+        }
+    }
+    rx->data_size_actual = copy_len;
+    tx->data_size_actual = copy_len;
+
+    size_t cap_copy         = (tx->caps_max < rx->caps_max) ? tx->caps_max : rx->caps_max;
+    size_t transferred_caps = 0;
+
+    for (size_t i = 0; i < cap_copy; ++i) {
+        uint32_t src_cap_id;
+        if (copy_between_spaces(
+                proc_tx,
+                &src_cap_id,
+                proc_tx,
+                &tx->caps_buffer[i],
+                sizeof(uint32_t)
+            ) != 0) {
+            continue;
+        }
+
+        // Lookup sender's capability from the sender thread's cnode
+        struct capability* src_cap = cap_lookup(sender->root_cnode, src_cap_id, RIGHT_GRANT);
+        if (!src_cap) {
+            continue;
+        }
+
+        // Allocate the received capability into the receiver thread's cnode
+        uint32_t dest_cap_id;
+        struct capability* dest_cap = cap_alloc(receiver->root_cnode, &dest_cap_id);
+        if (!dest_cap) {
+            continue;
+        }
+
+        if (cap_delegate(src_cap, dest_cap, src_cap->rights) == ERR_OK) {
+            copy_between_spaces(
+                proc_rx,
+                &rx->caps_buffer[transferred_caps],
+                proc_tx,
+                &dest_cap_id,
+                sizeof(uint32_t)
+            );
+            transferred_caps++;
+        } else {
+            cap_revoke(receiver->root_cnode, dest_cap);
         }
     }
 
-    kfree(shm->pages);
-    kfree(shm);
+    rx->caps_actual = transferred_caps;
+    tx->caps_actual = transferred_caps;
+
+    return (copy_len < tx->data_size_max || transferred_caps < tx->caps_max) ? ERR_DENIED : ERR_OK;
 }
 
-int sys_ipc_shm_alloc(size_t size, int flags, int32_t* handle_out, uintptr_t* vaddr_out) {
-    if (size == 0) {
-        return -EINVAL;
+int sys_ipc_bind(uint32_t port_cap_id, uint32_t chan_cap_id, uint64_t key) {
+    thread_t* me = smp_current_core()->curr_thread;
+
+    struct capability* p_cap = cap_lookup(me->root_cnode, port_cap_id, RIGHT_WRITE);
+    struct capability* c_cap = cap_lookup(me->root_cnode, chan_cap_id, RIGHT_WRITE);
+
+    if (!p_cap || !c_cap || p_cap->type != CAP_TYPE_PORT_SET || c_cap->type != CAP_TYPE_CHANNEL) {
+        return ERR_INVALID_CAP;
     }
 
-    process_t* me = smp_current_core()->curr_thread->owner;
+    struct ipc_port_set* set =
+        (struct ipc_port_set*)atomic_load_explicit(&p_cap->object_ptr, memory_order_acquire);
+    struct ipc_channel* chan =
+        (struct ipc_channel*)atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
 
-    size_t aligned_size = align_up(size, PAGE_SIZE_SMALL);
-    size_t page_count   = aligned_size / PAGE_SIZE_SMALL;
+    acquire_qspinlock(&chan->header.lock);
+    chan->wait_set = set;
+    chan->user_key = key;
+    release_qspinlock(&chan->header.lock);
 
-    struct ipc_shared_mem* shm = kmalloc(sizeof(struct ipc_shared_mem));
-    if (!shm) {
-        return -ENOMEM;
+    return ERR_OK;
+}
+
+int sys_ipc_send(uint32_t chan_cap_id, struct ipc_msg_info* user_info) {
+    thread_t* me = smp_current_core()->curr_thread;
+
+    if (unlikely(
+            !user_info ||
+            copy_from_user(&me->ipc_state.msg_info, user_info, sizeof(struct ipc_msg_info)) != 0
+        )) {
+        return ERR_FAULT;
     }
 
-    shm->header.type = OBJ_SHARED_MEM;
-    create_qspinlock(&shm->header.lock);
-    shm->size       = aligned_size;
-    shm->page_count = page_count;
-    shm->pages      = kmalloc(sizeof(uintptr_t) * page_count);
-
-    if (!shm->pages) {
-        kfree(shm);
-        return -ENOMEM;
+    struct capability* c_cap = cap_lookup(me->root_cnode, chan_cap_id, RIGHT_SEND);
+    if (unlikely(!c_cap || c_cap->type != CAP_TYPE_CHANNEL)) {
+        return ERR_INVALID_CAP;
     }
 
-    acquire_qspinlock(&shm->header.lock);
+    struct ipc_channel* chan =
+        (struct ipc_channel*)atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
+    struct ipc_channel* dest = chan->peer;
 
-    for (size_t i = 0; i < page_count; ++i) {
-        void* virt_addr = vmalloc(
-            &me->space,
-            nullptr,
-            PAGE_SIZE_SMALL,
-            (uint32_t)flags,
-            CACHE_WRITE_BACK,
-            PAGE_SIZE_SMALL
-        );
+    if (unlikely(!dest || chan->peer_closed)) {
+        return ERR_FAULT;
+    }
 
-        if (!virt_addr) {
-            shm->page_count = i;
-            release_qspinlock(&shm->header.lock);
-            ipc_shm_free(me, shm);
-            return -ENOMEM;
+    struct ipc_channel* first_lock  = (chan < dest) ? chan : dest;
+    struct ipc_channel* second_lock = (chan < dest) ? dest : chan;
+
+    acquire_qspinlock(&first_lock->header.lock);
+    acquire_qspinlock(&second_lock->header.lock);
+
+    if (unlikely(!chan->peer || chan->peer_closed)) {
+        release_qspinlock(&second_lock->header.lock);
+        release_qspinlock(&first_lock->header.lock);
+        return ERR_FAULT;
+    }
+
+    if (!dlist_empty(&dest->blocked_receivers)) {
+        struct dlist_head* first = dest->blocked_receivers.next;
+        thread_t* receiver       = dlist_entry(first, thread_t, wait_node);
+        dlist_del(first);
+
+        int status = ipc_do_transfer(me, receiver);
+
+        receiver->ipc_state.status = status;
+        scheduler_unblock(receiver);
+
+        release_qspinlock(&second_lock->header.lock);
+        release_qspinlock(&first_lock->header.lock);
+
+        copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+        return status;
+    }
+
+    dlist_add_tail(&me->wait_node, &dest->blocked_senders);
+    sys_ipc_notify_internal(dest);
+
+    scheduler_block();
+
+    release_qspinlock(&second_lock->header.lock);
+    release_qspinlock(&first_lock->header.lock);
+
+    copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+    return me->ipc_state.status;
+}
+
+int sys_ipc_recv(uint32_t chan_cap_id, struct ipc_msg_info* user_info) {
+    thread_t* me = smp_current_core()->curr_thread;
+
+    if (unlikely(
+            !user_info ||
+            copy_from_user(&me->ipc_state.msg_info, user_info, sizeof(struct ipc_msg_info)) != 0
+        )) {
+        return ERR_FAULT;
+    }
+
+    struct capability* c_cap = cap_lookup(me->root_cnode, chan_cap_id, RIGHT_RECEIVE);
+    if (unlikely(!c_cap || c_cap->type != CAP_TYPE_CHANNEL)) {
+        return ERR_INVALID_CAP;
+    }
+
+    struct ipc_channel* chan =
+        (struct ipc_channel*)atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
+
+    acquire_qspinlock(&chan->header.lock);
+
+    if (unlikely(chan->peer_closed && dlist_empty(&chan->blocked_senders))) {
+        release_qspinlock(&chan->header.lock);
+        return ERR_FAULT;
+    }
+
+    if (!dlist_empty(&chan->blocked_senders)) {
+        struct dlist_head* first = chan->blocked_senders.next;
+        thread_t* sender         = dlist_entry(first, thread_t, wait_node);
+        dlist_del(first);
+
+        int status = ipc_do_transfer(sender, me);
+
+        sender->ipc_state.status = status;
+        scheduler_unblock(sender);
+
+        release_qspinlock(&chan->header.lock);
+
+        copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+        return status;
+    }
+
+    dlist_add_tail(&me->wait_node, &chan->blocked_receivers);
+
+    scheduler_block();
+    release_qspinlock(&chan->header.lock);
+
+    copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+    return me->ipc_state.status;
+}
+
+int sys_ipc_call(
+    uint32_t chan_cap_id,
+    struct ipc_msg_info* send_info,
+    struct ipc_msg_info* recv_info
+) {
+    int ret = sys_ipc_send(chan_cap_id, send_info);
+
+    if (unlikely(ret != ERR_OK)) {
+        return ret;
+    }
+
+    return sys_ipc_recv(chan_cap_id, recv_info);
+}
+
+int sys_ipc_wait(uint32_t port_cap_id, struct ipc_event* out_event, int timeout_ms) {
+    thread_t* me = smp_current_core()->curr_thread;
+
+    struct capability* p_cap = cap_lookup(me->root_cnode, port_cap_id, RIGHT_WAIT);
+    if (unlikely(!p_cap || p_cap->type != CAP_TYPE_PORT_SET)) {
+        return ERR_INVALID_CAP;
+    }
+
+    struct ipc_port_set* set =
+        (struct ipc_port_set*)atomic_load_explicit(&p_cap->object_ptr, memory_order_acquire);
+
+    int ret = ERR_OK;
+    acquire_qspinlock(&set->header.lock);
+
+    while (dlist_empty(&set->event_queue)) {
+        if (timeout_ms == 0) {
+            ret = ERR_DENIED;
+            break;
         }
 
-        memset(virt_addr, 0, PAGE_SIZE_SMALL);
-        shm->pages[i] = (uintptr_t)virt_addr;
-    }
+        dlist_add_tail(&me->wait_node, &set->waiters);
+        release_qspinlock(&set->header.lock);
 
-    release_qspinlock(&shm->header.lock);
+        scheduler_sleep((uint32_t)timeout_ms);
 
-    int32_t handle = alloc_handle(me, &shm->header, IPC_RIGHTS_ALL);
-    if (handle == 0) {
-        ipc_shm_free(me, shm);
-        return handle;
-    }
+        acquire_qspinlock(&set->header.lock);
 
-    acquire_qspinlock(&shm->header.lock);
-    *handle_out = handle;
-    *vaddr_out  = shm->pages[0];
-    release_qspinlock(&shm->header.lock);
-
-    return 0;
-}
-
-int sys_ipc_inspect(int32_t handle, struct ipc_info* info) {
-    if (!info) {
-        return -EINVAL;
-    }
-
-    process_t* me = smp_current_core()->curr_thread->owner;
-
-    uint32_t rights = 0;
-    if (get_handle_rights(me, handle, &rights) < 0) {
-        return -EBADF;
-    }
-
-    ipc_object_t* obj = get_object(me, handle, OBJ_ANY, IPC_RIGHT_INSPECT);
-
-    if (!obj) {
-        return -EACCES;
-    }
-
-    memset(info, 0, sizeof(struct ipc_info));
-    info->type      = obj->type;
-    info->ref_count = atomic_load(&obj->ref_count);
-    info->rights    = rights;
-
-    acquire_qspinlock(&obj->lock);
-
-    switch (obj->type) {
-        case OBJ_CHANNEL: {
-            ipc_channel_t* chan          = (ipc_channel_t*)obj;
-            info->channel.user_key       = chan->user_key;
-            info->channel.queued_handles = chan->msg_count;
-
-            if (chan->peer) {
-                info->channel.peer_alive  = true;
-                info->channel.peer_handle = 1;
-            } else {
-                info->channel.peer_alive  = false;
-                info->channel.peer_handle = -1;
+        if (dlist_linked(&me->wait_node)) {
+            dlist_del_init(&me->wait_node);
+            if (dlist_empty(&set->event_queue)) {
+                ret = ERR_DENIED;
+                break;
             }
-            break;
         }
-
-        case OBJ_PORT_SET: {
-            ipc_port_set_t* set           = (ipc_port_set_t*)obj;
-            info->port_set.pending_events = dlist_count(&set->event_queue);
-            info->port_set.active_threads = dlist_count(&set->waiters.list);
-            break;
-        }
-
-        case OBJ_SHARED_MEM: {
-            struct ipc_shared_mem* shm = (struct ipc_shared_mem*)obj;
-            info->shm.size_bytes       = shm->size;
-            info->shm.page_count       = shm->page_count;
-            break;
-        }
-
-        case OBJ_TIMER: {
-            struct ipc_timer* t = (struct ipc_timer*)obj;
-
-            info->timer.deadline = t->hw_timer.expires_at;
-            break;
-        }
-
-        case OBJ_ANY:
-        default:
-            break;
     }
 
-    release_qspinlock(&obj->lock);
-    put_object(me, obj);
-    return 0;
+    if (ret == ERR_OK && !dlist_empty(&set->event_queue)) {
+        struct dlist_head* first = set->event_queue.next;
+        struct ipc_channel* chan = dlist_entry(first, struct ipc_channel, port_node);
+
+        if (out_event) {
+            struct ipc_event evt = {
+                .key    = chan->user_key,
+                .events = IPC_EVENT_READABLE | (chan->peer_closed ? IPC_EVENT_CLOSED : 0)
+            };
+
+            copy_to_user(out_event, &evt, sizeof(struct ipc_event));
+        }
+
+        dlist_del_init(first);
+        chan->is_in_port_set = false;
+    }
+
+    release_qspinlock(&set->header.lock);
+    return ret;
 }

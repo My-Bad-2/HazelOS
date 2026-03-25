@@ -64,7 +64,8 @@ int arch_mmu_protect(
     uint32_t cache,
     uint8_t pkey
 );
-uintptr_t arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_flags);
+uintptr_t
+arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_flags, size_t* page_size);
 
 void arch_mmu_load(arch_pagemap_t* map);
 void arch_mmu_flush_tlb(arch_pagemap_t* map, uintptr_t virt, size_t length);
