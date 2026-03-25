@@ -101,7 +101,14 @@ typedef enum {
     DESTMODE_LOGICAL  = 1,
 } apic_interrupt_dest_mode_t;
 
-typedef bool (*isr_handler_t)(interrupt_trapframe_t* tf, void* ctx);
+typedef enum {
+    IRQ_NONE = 0,     // This interrupt wasn't from my device
+    IRQ_HANDLED,      // I handled it completely in the Hard IRQ context
+    IRQ_WAKE_THREAD,  // It's mine, wake up my dedicated thread to process it
+} irq_return_t;
+
+typedef irq_return_t (*isr_primary_handler_t)(interrupt_trapframe_t* tf, void* ctx);
+typedef void (*isr_threaded_handler_t)(void* ctx);
 
 void init_isr_registry(void);
 
@@ -115,8 +122,22 @@ typedef struct {
     bool is_external;
 } irq_config_t;
 
-int register_irq(uint8_t vector, isr_handler_t handler, void* ctx, const irq_config_t* config);
-void free_irq(uint8_t vector, isr_handler_t handler, void* ctx);
+int register_irq(
+    uint8_t vector,
+    isr_primary_handler_t handler,
+    void* ctx,
+    const irq_config_t* config
+);
+int register_threaded_irq(
+    uint8_t vector,
+    isr_primary_handler_t primary_handler,
+    isr_threaded_handler_t threaded_handler,
+    void* ctx,
+    const irq_config_t* config,
+    const char* thread_name
+);
+
+void free_irq(uint8_t vector, isr_primary_handler_t handler, void* ctx);
 
 int irq_alloc_vector(void);
 int irq_alloc_vectors(size_t count);

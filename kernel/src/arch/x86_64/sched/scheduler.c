@@ -5,19 +5,19 @@
 #include "cpu/smp.h"
 #include "libs/log.h"
 
-static bool reschedule_handler(interrupt_trapframe_t*, void*) {
+static irq_return_t reschedule_handler(interrupt_trapframe_t*, void*) {
     per_cpu_data_t* cpu    = smp_current_core();
     cpu->reschedule_needed = true;
-    return true;
+    return IRQ_HANDLED;
 }
 
-static bool scheduler_tick(interrupt_trapframe_t*, void*) {
+static irq_return_t scheduler_tick(interrupt_trapframe_t*, void*) {
     thread_t* curr = smp_current_core()->curr_thread;
 
     rcu_check_callbacks();
     schedule();
 
-    return true;
+    return IRQ_HANDLED;
 }
 
 void scheduler_check_reschedule(interrupt_trapframe_t* tf) {

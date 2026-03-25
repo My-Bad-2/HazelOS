@@ -17,7 +17,7 @@ int ipc_send_msg(
         return -EINVAL;
     }
 
-    return sys_ipc_send_msg(chan_handle, (void*)data, len, handles, handle_count);
+    return ipc_send(chan_handle, (void*)data, len, handles, handle_count);
 }
 
 int ipc_recv_msg(
@@ -40,7 +40,7 @@ int ipc_recv_msg(
     };
 
     while (1) {
-        int ret = sys_ipc_recv_msg(chan_handle, &info);
+        int ret = ipc_recv(chan_handle, &info);
 
         if (ret == -EAGAIN && port_set >= 0) {
             ipc_event_t event;

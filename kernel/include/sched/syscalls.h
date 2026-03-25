@@ -11,6 +11,24 @@
 extern "C" {
 #endif
 
+#define SYS_CATEGORY_CAP 0x0100
+#define SYS_CATEGORY_IPC 0x0200
+
+#define SYS_CAP_RETYPE   (SYS_CATEGORY_CAP | 0x01)  // Carve objects from untyped memory
+#define SYS_CAP_DELEGATE (SYS_CATEGORY_CAP | 0x02)  // Grant a capability to another CNode
+#define SYS_CAP_REVOKE   (SYS_CATEGORY_CAP | 0x03)  // Recursively destroy derived caps
+#define SYS_CAP_COPY     (SYS_CATEGORY_CAP | 0x04)  // Duplicate a cap within the same CNode
+#define SYS_CAP_MINT     (SYS_CATEGORY_CAP | 0x05)  // Copy a cap but downgrade its rights
+
+#define SYS_IPC_CHANNEL_CREATE (SYS_CATEGORY_IPC | 0x01)
+#define SYS_IPC_PORT_CREATE    (SYS_CATEGORY_IPC | 0x02)
+#define SYS_IPC_BIND           (SYS_CATEGORY_IPC | 0x03)
+#define SYS_IPC_CALL           (SYS_CATEGORY_IPC | 0x04)
+#define SYS_IPC_WAIT           (SYS_CATEGORY_IPC | 0x05)
+#define SYS_IPC_CLOSE          (SYS_CATEGORY_IPC | 0x06)
+#define SYS_IPC_SEND           (SYS_CATEGORY_IPC | 0x07)
+#define SYS_IPC_RECV           (SYS_CATEGORY_IPC | 0x08)
+
 #define SYS_WRITE    0x01
 #define SYS_MMAP     0x09
 #define SYS_MPROTECT 0x0a
@@ -20,17 +38,6 @@ extern "C" {
 #define SYS_FORK     0x39
 #define SYS_VFORK    0x3a
 #define SYS_EXIT     0x3c
-
-#define SYS_IPC_CREATE_CHANNEL  500
-#define SYS_IPC_CREATE_PORT_SET 501
-#define SYS_IPC_BIND            502
-#define SYS_IPC_NOTIFY          503
-#define SYS_IPC_WAIT            504
-#define SYS_HANDLE_CLOSE        505
-#define SYS_IPC_SEND_HANDLES    506
-#define SYS_IPC_RECV_HANDLES    507
-#define SYS_TIMER_ARM           508
-#define SYS_IPC_SHM_ALLOC       509
 
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2

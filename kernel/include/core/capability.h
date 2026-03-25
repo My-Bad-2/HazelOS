@@ -1,0 +1,150 @@
+#ifndef KERNEL_CORE_CAPABILITY_H
+#define KERNEL_CORE_CAPABILITY_H 1
+
+#include <stdalign.h>
+#include <stdatomic.h>
+#include <stdint.h>
+
+#include "compiler.h"
+#include "libs/dlist.h"
+#include "libs/slist.h"
+#include "libs/spinlock.h"
+
+// Error codes
+#define ERR_OK          (0)
+#define ERR_INVALID_CAP (-1)
+#define ERR_NO_MEM      (-2)
+#define ERR_DENIED      (-3)
+#define ERR_FAULT       (-4)
+
+#define CAP_TYPE_NONE          0
+#define CAP_TYPE_UNTYPED       1
+#define CAP_TYPE_FRAME         2
+#define CAP_TYPE_VSPACE        3
+#define CAP_TYPE_THREAD        4
+#define CAP_TYPE_SCHED_CONTEXT 5
+#define CAP_TYPE_CHANNEL       6
+#define CAP_TYPE_REPLY         7
+#define CAP_TYPE_PORT_SET      8
+#define CAP_TYPE_CNODE         9
+#define CAP_TYPE_IRQ_CONTROL   10
+#define CAP_TYPE_IRQ_HANDLER   11
+#define CAP_TYPE_IO_PORT       12
+#define CAP_TYPE_SHM           13
+#define CAP_TYPE_TIMER         14
+
+#define RIGHT_READ              (1 << 0)
+#define RIGHT_WRITE             (1 << 1)
+#define RIGHT_EXECUTE           (1 << 2)
+#define RIGHT_SEND              (1 << 4)
+#define RIGHT_RECEIVE           (1 << 5)
+#define RIGHT_GRANT             (1 << 6)
+#define RIGHT_GRANT_REPLY       (1 << 7)
+#define RIGHT_THREAD_SUSPEND    (1 << 8)
+#define RIGHT_THREAD_RESUME     (1 << 9)
+#define RIGHT_THREAD_READ_REGS  (1 << 10)
+#define RIGHT_THREAD_WRITE_REGS (1 << 11)
+#define RIGHT_SIGNAL            (1 << 12)
+#define RIGHT_WAIT              (1 << 13)
+#define RIGHT_CNODE_MUTATE      (1 << 14)
+#define RIGHT_CNODE_READ        (1 << 15)
+#define RIGHT_ALL               (0xffffffff)
+
+struct [[gnu::aligned(64)]] capability {
+    atomic_uintptr_t object_ptr;
+    uint32_t rights;
+    uint16_t type;
+    _Atomic(uint16_t) generation;
+
+    union {
+        struct {
+            struct capability* parent;
+            struct dlist_head children;
+            struct dlist_head sibling;
+        };
+
+        struct slist_node free_node;
+    };
+
+    qspinlock_t lock;
+};
+
+struct cnode {
+    struct capability* slots;
+    size_t capacity;
+    struct slist_head free_list;
+    qspinlock_t lock;
+};
+
+struct untyped_node {
+    uintptr_t base_paddr;
+    size_t total_size;
+    size_t free_offset;
+    qspinlock_t lock;
+};
+
+static inline struct capability*
+cap_lookup(struct cnode* node, uint32_t cap_id, uint32_t required_rights) {
+    uint16_t index        = cap_id & 0xffff;
+    uint16_t expected_gen = (cap_id >> 16) & 0xffff;
+
+    if (unlikely(index >= node->capacity)) {
+        return nullptr;
+    }
+
+    struct capability* cap = &node->slots[index];
+    uint16_t current_gen   = atomic_load_explicit(&cap->generation, memory_order_acquire);
+
+    if (unlikely(
+            current_gen != expected_gen || (cap->rights & required_rights) != required_rights
+        )) {
+        return nullptr;
+    }
+
+    return cap;
+}
+
+void cnode_init(struct cnode* node, struct capability* memory, size_t count);
+struct capability* cap_alloc(struct cnode* node, uint32_t* out_cap_id);
+int cap_delegate(struct capability* parent, struct capability* child, uint32_t reduced_rights);
+void cap_revoke(struct cnode* pool, struct capability* target);
+int cap_retype(
+    struct capability* untyped_cap,
+    uint16_t target_type,
+    size_t count,
+    struct cnode* dest_cnode,
+    uint32_t* out_cap_ids
+);
+
+void sys_cap_revoke_untyped(struct cnode* pool, struct capability* untyped_cap);
+int sys_cap_retype(
+    struct cnode* root_cnode,
+    uint32_t untyped_id,
+    uint16_t target_type,
+    size_t count,
+    uint32_t dest_cnode_id,
+    uint32_t* out_array
+);
+int sys_cap_delegate(
+    struct cnode* root_cnode,
+    uint32_t dest_cnode_id,
+    uint32_t src_cap_id,
+    uint32_t reduced_rights,
+    uint32_t* new_cap_id
+);
+int sys_cap_revoke(struct cnode* root_cnode, uint32_t target_id);
+int sys_cap_copy(
+    struct cnode* root_cnode,
+    uint32_t dest_cnode_id,
+    uint32_t src_cap_id,
+    uint32_t* new_cap_id
+);
+int sys_cap_mint(
+    struct cnode* root_cnode,
+    uint32_t dest_cnode_id,
+    uint32_t src_cap_id,
+    uint32_t new_rights,
+    uint32_t* new_cap_id
+);
+
+#endif

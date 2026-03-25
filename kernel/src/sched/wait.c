@@ -77,11 +77,33 @@ void wait_queue_sleep(struct wait_queue* wq) {
     scheduler_yield();
 
     acquire_spinlock(&wq->lock);
+
     if (!dlist_empty(&curr->wait_node)) {
         dlist_del(&curr->wait_node);
         dlist_init(&curr->wait_node);
     }
+
     release_spinlock(&wq->lock);
 
     arch_enable_interrupts();
+}
+
+void wait_queue_wake_up_one(struct wait_queue* wq) {
+    if (!wq) {
+        return;
+    }
+
+    acquire_spinlock(&wq->lock);
+
+    if (!dlist_empty(&wq->list)) {
+        struct dlist_head* node = wq->list.next;
+        thread_t* curr          = dlist_entry(node, thread_t, wait_node);
+
+        dlist_del(node);
+        dlist_init(&curr->wait_node);
+
+        scheduler_unblock(curr);
+    }
+
+    release_spinlock(&wq->lock);
 }

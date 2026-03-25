@@ -32,13 +32,13 @@ static const char* timer_clock_source_name(clock_source_t src) {
     }
 }
 
-static bool timer_handler(interrupt_trapframe_t*, void*) {
+static irq_return_t timer_handler(interrupt_trapframe_t*, void*) {
     per_cpu_data_t* cpu = smp_current_core();
 
     timer_tick();
     timer_manager_tick(cpu->timer_manager);
 
-    return true;
+    return IRQ_HANDLED;
 }
 
 void timer_tick(void) {

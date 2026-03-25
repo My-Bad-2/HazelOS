@@ -86,7 +86,7 @@ void smp_send_reschedule_ipi(per_cpu_data_t* cpu);
 void smp_send_panic_ipi();
 void smp_tlb_shootdown(uintptr_t vaddr, size_t pages);
 
-bool ipi_tlb_shootdown_handler(interrupt_trapframe_t*, void*);
+irq_return_t ipi_tlb_shootdown_handler(interrupt_trapframe_t*, void*);
 void nmi_check_for_panic(per_cpu_data_t* cpu);
 
 #ifdef __cplusplus

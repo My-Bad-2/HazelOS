@@ -74,6 +74,7 @@ typedef struct {
 typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     char name[32];
     process_t* owner;
+    struct cnode* root_cnode;
 
     int tid;
     uint32_t assigned_cpu;
@@ -143,8 +144,6 @@ void thread_join(thread_t* t, int* exit_code);
 
 void thread_sleep_prepare(struct wait_queue* wq);
 void thread_sleep_finish(struct wait_queue* wq);
-void wait_queue_wake_up_all(struct wait_queue* wq);
-void wait_queue_sleep(struct wait_queue* wq);
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
 void arch_thread_destroy(thread_t* t);

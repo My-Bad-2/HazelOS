@@ -120,14 +120,14 @@ int sys_ipc_bind(int32_t port_handle, int32_t chan_handle, uint64_t key);
 int sys_ipc_notify(int32_t chan_handle);
 int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms);
 
-int sys_ipc_send_msg(
+int ipc_send(
     int32_t chan_handle,
     const void* user_data,
     size_t size,
     int32_t* user_handles,
     size_t num_handles
 );
-int sys_ipc_recv_msg(int32_t chan_handle, ipc_msg_info_t* info);
+int ipc_recv(int32_t chan_handle, ipc_msg_info_t* info);
 
 int sys_ipc_inspect(int32_t handle, struct ipc_info* info);
 

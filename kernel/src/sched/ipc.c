@@ -128,8 +128,15 @@ static void put_object(process_t* proc, ipc_object_t* obj) {
 
             kmem_cache_free(channel_cache, chan);
         } else if (obj->type == OBJ_TIMER) {
-            timer_cancel(&((struct ipc_timer*)obj)->hw_timer);
-            kmem_cache_free(timer_cache, obj);
+            struct ipc_timer* timer = (struct ipc_timer*)obj;
+
+            timer_cancel(&timer->hw_timer);
+
+            if (timer->port) {
+                put_object(proc, (ipc_object_t*)timer->port);
+            }
+
+            kmem_cache_free(timer_cache, timer);
         } else {
             kfree(obj);
         }
@@ -339,9 +346,9 @@ int sys_ipc_notify(int32_t chan_handle) {
 }
 
 int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
-    process_t* me       = smp_current_core()->curr_thread->owner;
-    ipc_port_set_t* set = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_READ);
+    process_t* me = smp_current_core()->curr_thread->owner;
 
+    ipc_port_set_t* set = get_object(me, port_handle, OBJ_PORT_SET, IPC_RIGHT_READ);
     if (!set) {
         return -EACCES;
     }
@@ -351,7 +358,12 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
 
     acquire_qspinlock(&set->header.lock);
 
-    while (true) {
+    while (dlist_empty(&set->event_queue)) {
+        if (timeout_ms == 0) {
+            ret = -EAGAIN;
+            break;
+        }
+
         thread_queue_push(&set->waiters, t);
         release_qspinlock(&set->header.lock);
 
@@ -359,11 +371,11 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
 
         acquire_qspinlock(&set->header.lock);
 
-        if (!dlist_empty(&t->wait_node)) {
+        if (dlist_linked(&t->wait_node)) {
             dlist_del(&t->wait_node);
 
             if (dlist_empty(&set->event_queue)) {
-                ret = -EAGAIN;
+                ret = -EBUSY;
                 break;
             }
         }
@@ -374,10 +386,10 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
         ipc_kernel_event_t* event = dlist_entry(first, ipc_kernel_event_t, node);
 
         if (out_event) {
-            *out_event = event->data;
+            copy_to_user(out_event, &event->data, sizeof(ipc_event_t));
         }
 
-        dlist_del(first);
+        dlist_del_init(first);
 
         if (!event->is_embedded) {
             kmem_cache_free(event_cache, event);
@@ -389,7 +401,7 @@ int sys_ipc_wait(int32_t port_handle, ipc_event_t* out_event, int timeout_ms) {
     return ret;
 }
 
-int sys_ipc_send_msg(
+int ipc_send(
     int32_t chan_handle,
     const void* user_data,
     size_t size,
@@ -500,7 +512,7 @@ int sys_ipc_send_msg(
     return 0;
 }
 
-int sys_ipc_recv_msg(int32_t chan_handle, ipc_msg_info_t* user_info) {
+int ipc_recv(int32_t chan_handle, ipc_msg_info_t* user_info) {
     if (!user_info) {
         return -EINVAL;
     }
@@ -567,8 +579,8 @@ int sys_ipc_recv_msg(int32_t chan_handle, ipc_msg_info_t* user_info) {
 }
 
 static void ipc_timer_callback(void* ctx) {
-    struct ipc_timer* t = (struct ipc_timer*)ctx;
-    ipc_port_set_t* set = t->port;
+    struct ipc_timer* timer = (struct ipc_timer*)ctx;
+    ipc_port_set_t* set     = timer->port;
 
     if (!set) {
         return;
@@ -576,12 +588,16 @@ static void ipc_timer_callback(void* ctx) {
 
     acquire_qspinlock(&set->header.lock);
 
-    if (t->event_node.node.next == nullptr) {
-        dlist_add_tail(&t->event_node.node, &set->event_queue);
+    if (!dlist_linked(&timer->event_node.node)) {
+        timer->event_node.data.key    = timer->user_key;
+        timer->event_node.data.events = IPC_EVENT_READABLE;
+        timer->event_node.data.handle = 0;
+
+        dlist_add_tail(&timer->event_node.node, &set->event_queue);
 
         if (!dlist_empty(&set->waiters.list)) {
-            thread_t* thread = thread_queue_pop(&set->waiters);
-            scheduler_unblock(thread);
+            thread_t* t = thread_queue_pop(&set->waiters);
+            scheduler_unblock(t);
         }
     }
 
@@ -631,7 +647,8 @@ int sys_ipc_timer_arm(
     t->port                   = set;
     t->user_key               = user_key;
     t->event_node.is_embedded = true;
-    t->event_node.node.next   = nullptr;
+
+    dlist_init(&t->event_node.node);
 
     atomic_fetch_add(&set->header.ref_count, 1);
 
@@ -647,16 +664,19 @@ int sys_ipc_timer_arm(
     }
 
     int32_t handle = alloc_handle(me, &t->header, IPC_RIGHTS_ALL);
-
     if (handle < 0) {
         timer_cancel(&t->hw_timer);
         kmem_cache_free(timer_cache, t);
+
         atomic_fetch_sub(&set->header.ref_count, 1);
         put_object(me, (ipc_object_t*)set);
         return handle;
     }
 
-    *handle_out = handle;
+    if (handle_out) {
+        *handle_out = handle;
+    }
+
     put_object(me, (ipc_object_t*)set);
     return 0;
 }

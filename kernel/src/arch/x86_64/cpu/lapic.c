@@ -55,12 +55,12 @@ static inline void lapic_wait_for_ipi_send(void) {
     }
 }
 
-static bool apic_error_handler(interrupt_trapframe_t*, void*) {
+static irq_return_t apic_error_handler(interrupt_trapframe_t*, void*) {
     lapic_write(LAPIC_REG_ERROR_STATUS, 0);
     uint32_t error_flags = lapic_read(LAPIC_REG_ERROR_STATUS);
 
     if (!error_flags) {
-        return true;
+        return IRQ_NONE;
     }
 
     const size_t buf_size = 512;
@@ -116,12 +116,12 @@ static bool apic_error_handler(interrupt_trapframe_t*, void*) {
     KLOG_ERROR("%s", buf);
 #undef APPEND_ERR
 
-    return true;
+    return IRQ_HANDLED;
 }
 
-static bool apic_timer_handler(interrupt_trapframe_t*, void*) {
+static irq_return_t apic_timer_handler(interrupt_trapframe_t*, void*) {
     timer_tick();
-    return true;
+    return IRQ_HANDLED;
 }
 
 void lapic_init(void) {

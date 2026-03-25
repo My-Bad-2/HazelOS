@@ -16,7 +16,6 @@
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 #include "sched/process.h"
-#include "sched/scheduler.h"
 
 extern void kernel_thread_entry(void);
 extern void isr_restore_path(void);

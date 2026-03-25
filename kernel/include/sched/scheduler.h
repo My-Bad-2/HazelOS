@@ -1,9 +1,9 @@
-#include "sched/sched_class.h"
 #ifndef KERNEL_SCHED_SCHEDULER_H
 #define KERNEL_SCHED_SCHEDULER_H 1
 
 #include "cpu/exception.h"
 #include "sched/process.h"
+#include "sched/sched_class.h"
 
 #ifdef __cplusplus
 extern "C" {

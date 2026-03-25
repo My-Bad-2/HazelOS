@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "compiler.h"
+#include "core/capability.h"
 #include "cpu/cpu.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
@@ -9,6 +11,7 @@
 #include "libs/log.h"
 #include "memory/vma.h"
 #include "sched/ipc.h"
+#include "sched/process.h"
 #include "sched/syscalls.h"
 
 // AMD64 Technology 24593—Rev. 3.42—March 2024 Pg. no. 175 System Instructions
@@ -50,22 +53,133 @@ void syscall_init(void) {
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 static syscall_fn_t custom_syscalls[] = {
+    nullptr,
     (syscall_fn_t)sys_ipc_create_channel,
     (syscall_fn_t)sys_ipc_create_port_set,
     (syscall_fn_t)sys_ipc_bind,
     (syscall_fn_t)sys_ipc_notify,
     (syscall_fn_t)sys_ipc_wait,
     (syscall_fn_t)sys_ipc_close,
-    (syscall_fn_t)sys_ipc_send_msg,
-    (syscall_fn_t)sys_ipc_recv_msg,
-    (syscall_fn_t)sys_ipc_timer_arm,
-    (syscall_fn_t)sys_ipc_shm_alloc,
+    (syscall_fn_t)ipc_send,
+    (syscall_fn_t)ipc_recv,
 };
+
+static uint64_t
+dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, syscall_regs_t* regs) {
+    struct cnode* root_cnode = cpu->curr_thread->root_cnode;
+
+    if (unlikely(!root_cnode)) {
+        return (uint64_t)ERR_DENIED;
+    }
+
+    int status          = ERR_DENIED;
+    uint32_t out_cap_id = 0;
+
+    switch (operation) {
+        case 0x01:  // SYS_CAP_RETYPE
+        {
+            status = sys_cap_retype(
+                root_cnode,
+                (uint32_t)regs->rdi,  // untyped_id
+                (uint16_t)regs->rsi,  // target_type
+                (size_t)regs->rdx,    // count
+                (uint32_t)regs->r10,  // dest_cnode_id
+                (uint32_t*)regs->r8   // out_array
+            );
+            break;
+        }
+        case 0x02:  // SYS_CAP_DELEGATE
+        {
+            status = sys_cap_delegate(
+                root_cnode,
+                (uint32_t)regs->rdi,  // dest_cnode_id
+                (uint32_t)regs->rsi,  // src_cap_id
+                (uint32_t)regs->rdx,  // reduced_rights
+                &out_cap_id
+            );
+
+            if (status == ERR_OK) {
+                regs->rdx = out_cap_id;
+            }
+
+            break;
+        }
+        case 0x03:  // SYS_CAP_REVOKE
+        {
+            status = sys_cap_revoke(
+                root_cnode,
+                (uint32_t)regs->rdi  // target_id
+            );
+            break;
+        }
+        case 0x04:  // SYS_CAP_COPY
+        {
+            status = sys_cap_copy(
+                root_cnode,
+                (uint32_t)regs->rdi,  // dest_cnode_id
+                (uint32_t)regs->rsi,  // src_cap_id
+                &out_cap_id
+            );
+
+            if (status == ERR_OK) {
+                regs->rdx = out_cap_id;
+            }
+
+            break;
+        }
+        case 0x05:  // SYS_CAP_MINT
+        {
+            status = sys_cap_mint(
+                root_cnode,
+                (uint32_t)regs->rdi,  // dest_cnode_id
+                (uint32_t)regs->rsi,  // src_cap_id
+                (uint32_t)regs->rdx,  // new_rights
+                &out_cap_id
+            );
+
+            if (status == ERR_OK) {
+                regs->rdx = out_cap_id;
+            }
+
+            break;
+        }
+        default:
+            status = ERR_DENIED;
+            break;
+    }
+
+    return (uint64_t)regs;
+}
+
+static uint64_t dispatch_ipc_syscall(uint64_t operation, syscall_regs_t* regs) {
+    if (operation < 0 || operation >= sizeof(custom_syscalls) / sizeof(syscall_fn_t)) {
+        return (uint64_t)-1;
+    }
+
+    syscall_fn_t func = custom_syscalls[operation];
+    return func(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
+}
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
 uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
-    uint64_t res    = 0;
-    process_t* proc = smp_current_core()->curr_thread->owner;
+    uint64_t res = 0;
+
+    uint64_t sys_num   = regs->rax;
+    uint64_t category  = sys_num & 0xff00;
+    uint64_t operation = sys_num & 0x00ff;
+
+    per_cpu_data_t* cpu = smp_current_core();
+    process_t* proc     = cpu->curr_thread->owner;
+
+    switch (category) {
+        case SYS_CATEGORY_CAP:
+            res = dispatch_cap_syscall(operation, cpu, regs);
+            break;
+        case SYS_CATEGORY_IPC:
+            res = dispatch_ipc_syscall(operation, regs);
+        default:
+            break;
+    }
 
     if (regs->rax < 450) {
         switch (regs->rax) {
@@ -114,15 +228,6 @@ uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
                 KLOG_DEBUG("Syscall %lu called!\n", num);
                 break;
         }
-    } else if (regs->rax >= 500) {
-        int idx = (int)regs->rax - 500;
-
-        if (idx < 0 || idx >= sizeof(custom_syscalls) / sizeof(syscall_fn_t)) {
-            return (uint64_t)-1;
-        }
-
-        syscall_fn_t func = custom_syscalls[idx];
-        res               = func(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
     }
 
     regs->rax = res;

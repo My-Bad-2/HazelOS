@@ -21,15 +21,23 @@
 #include "memory/memory.h"
 #include "memory/paging.h"
 #include "memory/vma.h"
+#include "sched/process.h"
 #include "sched/scheduler.h"
+#include "sched/semaphore.h"
 
 #define STORM_WINDOW_SIZE 100000
 // Forgive shared IRQs just in case hardware state wasn't synced when the CPU read it
 #define STORM_UNHANDLED_LIMIT 99000
 
 struct isr_action {
-    isr_handler_t handler;
+    isr_primary_handler_t primary_handler;
+    isr_threaded_handler_t threaded_handler;
     void* ctx;
+
+    thread_t* thread;
+    struct semaphore* wakeup_semaphore;
+    atomic_bool thread_pending;
+
     struct slist_node node;
 };
 
@@ -151,6 +159,20 @@ static void init_vector_allocator(void) {
     }
 }
 
+static void irq_thread_runner(void* arg) {
+    struct isr_action* action = (struct isr_action*)arg;
+
+    while (true) {
+        sema_down(action->wakeup_semaphore);
+
+        atomic_store_explicit(&action->thread_pending, false, memory_order_release);
+
+        if (action->threaded_handler) {
+            action->threaded_handler(action->ctx);
+        }
+    }
+}
+
 void init_isr_registry(void) {
     if (isr_registry != nullptr) {
         KLOG_WARN("ISR: registry already initialized entries=%d\n", IDT_ENTRY_COUNT);
@@ -177,7 +199,12 @@ void init_isr_registry(void) {
     KLOG_INIT_OK();
 }
 
-int register_irq(uint8_t vector, isr_handler_t handler, void* ctx, const irq_config_t* config) {
+int register_irq(
+    uint8_t vector,
+    isr_primary_handler_t handler,
+    void* ctx,
+    const irq_config_t* config
+) {
     ASSERT(isr_registry);
 
     if ((uint32_t)vector >= IDT_ENTRY_COUNT || !handler) {
@@ -189,14 +216,15 @@ int register_irq(uint8_t vector, isr_handler_t handler, void* ctx, const irq_con
         return -1;
     }
 
-    action->handler = handler;
-    action->ctx     = ctx;
+    action->primary_handler = handler;
+    action->ctx             = ctx;
 
     bool is_first_handler = slist_empty(&isr_registry[vector].actions);
     slist_push(&action->node, &isr_registry[vector].actions);
 
     if (is_first_handler && config) {
         isr_registry[vector].config = *config;
+
         if (config->is_external) {
             configure_irq(
                 vector,
@@ -214,7 +242,63 @@ int register_irq(uint8_t vector, isr_handler_t handler, void* ctx, const irq_con
     return 0;
 }
 
-void free_irq(uint8_t vector, isr_handler_t handler, void* ctx) {
+int register_threaded_irq(
+    uint8_t vector,
+    isr_primary_handler_t primary_handler,
+    isr_threaded_handler_t threaded_handler,
+    void* ctx,
+    const irq_config_t* config,
+    const char* thread_name
+) {
+    if ((size_t)vector >= IDT_ENTRY_COUNT || !primary_handler) {
+        return -1;
+    }
+
+    struct isr_action* action = kmalloc(sizeof(struct isr_action));
+    if (!action) {
+        return -1;
+    }
+
+    action->primary_handler  = primary_handler;
+    action->threaded_handler = threaded_handler;
+    action->ctx              = ctx;
+    atomic_init(&action->thread_pending, false);
+
+    action->wakeup_semaphore = sema_create(0);
+
+    action->thread =
+        thread_create(thread_name, get_kernel_process(), SCHED_FIFO, irq_thread_runner, action);
+    scheduler_add_thread(action->thread);
+
+    size_t flags = acquire_interrupt_lock(nullptr);
+    acquire_write(&isr_registry[vector].lock);
+
+    bool is_first = slist_empty(&isr_registry[vector].actions);
+    slist_push(&action->node, &isr_registry[vector].actions);
+
+    if (is_first && config) {
+        isr_registry[vector].config = *config;
+
+        if (config->is_external) {
+            configure_irq(
+                vector,
+                config->trigger,
+                config->polarity,
+                config->delivery,
+                config->dest,
+                config->dest_apic,
+                false,
+                config->gsi
+            );
+        }
+    }
+
+    release_write(&isr_registry[vector].lock);
+    release_interrupt_lock(nullptr, flags);
+    return 0;
+}
+
+void free_irq(uint8_t vector, isr_primary_handler_t handler, void* ctx) {
     if ((uint32_t)vector >= IDT_ENTRY_COUNT || !isr_registry) {
         return;
     }
@@ -229,7 +313,7 @@ void free_irq(uint8_t vector, isr_handler_t handler, void* ctx) {
     while (curr) {
         struct isr_action* entry = slist_entry(curr, struct isr_action, node);
 
-        if (entry->handler == handler && entry->ctx == ctx) {
+        if (entry->primary_handler == handler && entry->ctx == ctx) {
             if (prev) {
                 slist_del_after(prev);
             } else {
@@ -548,7 +632,6 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
 
     per_cpu_data_t* cpu        = smp_current_core();
     irq_trigger_mode_t trigger = isr_registry[tf->vector].config.trigger;
-    struct slist_head* head    = &isr_registry[tf->vector].actions;
 
     if (trigger == IRQ_TRIGGER_EDGE) {
         send_eoi(tf->vector);
@@ -558,6 +641,8 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
     size_t flags = acquire_interrupt_lock(nullptr);
     acquire_read(&isr_registry[tf->vector].lock);
 
+    struct slist_head* head = &isr_registry[tf->vector].actions;
+
     if (!slist_empty(head)) {
         struct isr_action* action;
 
@@ -566,8 +651,17 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
                 break;
             }
 
-            if (action->handler(tf, action->ctx)) {
+            irq_return_t ret = action->primary_handler(tf, action->ctx);
+
+            if (ret == IRQ_HANDLED) {
                 handled = true;
+            } else if (ret == IRQ_WAKE_THREAD) {
+                handled = true;
+
+                bool expected = false;
+                if (atomic_compare_exchange_strong(&action->thread_pending, &expected, true)) {
+                    sema_up(action->wakeup_semaphore);
+                }
             }
         }
     } else if (tf->vector == EXCEPTION_PAGE_FAULT) {

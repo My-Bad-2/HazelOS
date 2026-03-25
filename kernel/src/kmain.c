@@ -1,4 +1,5 @@
 #include "arch.h"
+#include "core/capability.h"
 #include "cpu/cpu.h"
 #include "cpu/smp.h"
 #include "drivers/drivers.h"
@@ -6,7 +7,6 @@
 #include "libs/log.h"
 #include "memory/memory.h"
 #include "sched/rcu.h"
-#include "sched/scheduler.h"
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
 void kmain(void) {

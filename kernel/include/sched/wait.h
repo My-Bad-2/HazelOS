@@ -14,4 +14,8 @@ static inline void wait_queue_init(struct wait_queue* wq) {
     dlist_init(&wq->list);
 }
 
+void wait_queue_wake_up_one(struct wait_queue* wq);
+void wait_queue_wake_up_all(struct wait_queue* wq);
+void wait_queue_sleep(struct wait_queue* wq);
+
 #endif

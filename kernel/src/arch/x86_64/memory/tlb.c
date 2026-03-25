@@ -39,7 +39,7 @@ void smp_tlb_shootdown(uintptr_t vaddr, size_t pages) {
     release_qspinlock(&tlb_lock);
 }
 
-bool ipi_tlb_shootdown_handler(interrupt_trapframe_t*, void*) {
+irq_return_t ipi_tlb_shootdown_handler(interrupt_trapframe_t*, void*) {
     arch_mmu_flush_tlb(
         &current_shootdown.map->arch,
         current_shootdown.vaddr,
@@ -47,5 +47,5 @@ bool ipi_tlb_shootdown_handler(interrupt_trapframe_t*, void*) {
     );
 
     atomic_fetch_add(&current_shootdown.ack_count, 1);
-    return true;
+    return IRQ_HANDLED;
 }
