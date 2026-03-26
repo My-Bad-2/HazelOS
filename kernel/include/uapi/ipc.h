@@ -13,9 +13,11 @@ struct ipc_msg_info {
     size_t data_size_max;
     size_t data_size_actual;
 
-    uint32_t* caps_buffer;
+    uint64_t* caps_buffer;
     size_t caps_max;
     size_t caps_actual;
+
+    uint32_t sender_badge;
 };
 
 struct ipc_event {

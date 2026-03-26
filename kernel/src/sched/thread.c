@@ -12,7 +12,6 @@
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
-#include "memory/pmm.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/sched_class.h"
@@ -33,6 +32,29 @@ static void process_insert_thread(process_t* p, thread_t* t) {
     }
 
     dlist_add_tail(&t->process_node, &p->thread_list);
+}
+
+static void bootstrap_init_thread_cspace(thread_t* init_thread) {
+    size_t l1_capacity = 1024;
+    size_t slots_size  = l1_capacity * sizeof(struct capability);
+
+    struct capability* slots_mem = (struct capability*)kmalloc(slots_size);
+    struct cnode* root_cnode     = (struct cnode*)kmalloc(0x1000);
+
+    uint64_t root_prefix = 0;
+    cnode_init(root_cnode, slots_mem, l1_capacity, root_prefix, CSPACE_L1_SHIFT);
+
+    init_thread->root_cnode = root_cnode;
+
+    uint64_t self_cap_id;
+    struct capability* self_cap = cap_alloc(root_cnode, &self_cap_id);
+
+    acquire_qspinlock(&self_cap->lock);
+    atomic_store_explicit(&self_cap->object_ptr, (uintptr_t)root_cnode, memory_order_release);
+    self_cap->type   = CAP_TYPE_CNODE;
+    self_cap->rights = RIGHT_ALL;
+    self_cap->badge  = 0;
+    release_qspinlock(&self_cap->lock);
 }
 
 static thread_t* thread_create_internal(
@@ -60,20 +82,7 @@ static thread_t* thread_create_internal(
     t->state        = THREAD_READY;
     t->assigned_cpu = UINT32_MAX;
     t->policy       = policy;
-    t->root_cnode   = kmalloc(sizeof(struct cnode));
-
-    size_t slots_size        = INIT_CNODE_CAPACITY * sizeof(struct capability);
-    struct capability* slots = (struct capability*)kmalloc(slots_size);
-
-    cnode_init(t->root_cnode, slots, INIT_CNODE_CAPACITY);
-
-    uint32_t self_cap_id;
-    struct capability* self_cap = cap_alloc(t->root_cnode, &self_cap_id);
-
-    atomic_store_explicit(&self_cap->object_ptr, (uintptr_t)t->root_cnode, memory_order_release);
-
-    self_cap->type   = CAP_TYPE_CNODE;
-    self_cap->rights = RIGHT_ALL;
+    bootstrap_init_thread_cspace(t);
 
     dlist_init(&t->process_node);
     dlist_init(&t->wait_node);
@@ -121,7 +130,7 @@ thread_t* thread_create(
 }
 
 thread_t*
-thread_clone(process_t* target_proc, thread_t* parent, syscall_regs_t* tf, void* child_stack) {
+thread_clone(process_t* target_proc, thread_t* parent, struct syscall_regs* tf, void* child_stack) {
     if (!target_proc || !parent || !tf) {
         return nullptr;
     }
@@ -322,7 +331,7 @@ void reaper_task_entry(void*) {
     }
 }
 
-int thread_vclone(thread_t* parent, syscall_regs_t* tf) {
+int thread_vclone(thread_t* parent, struct syscall_regs* tf) {
     process_t* child_proc = process_clone(parent->owner, CLONE_VM);
     if (!child_proc) {
         return -ENOMEM;

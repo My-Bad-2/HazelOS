@@ -50,7 +50,7 @@ int64_t sys_write(uint32_t fd, const char* user_buf, size_t count) {
     return (int64_t)bytes_processed;
 }
 
-int sys_fork(syscall_regs_t* tf) {
+int sys_fork(struct syscall_regs* tf) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* parent    = cpu->curr_thread;
 
@@ -71,14 +71,14 @@ int sys_fork(syscall_regs_t* tf) {
     return child_proc->pid;
 }
 
-int sys_vfork(syscall_regs_t* tf) {
+int sys_vfork(struct syscall_regs* tf) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* parent    = cpu->curr_thread;
 
     return thread_vclone(parent, tf);
 }
 
-int sys_clone(uint64_t flags, void* child_stack, syscall_regs_t* tf) {
+int sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf) {
     per_cpu_data_t* cpu     = smp_current_core();
     thread_t* parent_thread = cpu->curr_thread;
     process_t* target_proc  = parent_thread->owner;

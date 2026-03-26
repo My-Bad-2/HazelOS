@@ -36,7 +36,7 @@ struct user_stack_layout {
 
 struct fork_stack_layout {
     switch_context_t ctx;
-    syscall_regs_t regs;
+    struct syscall_regs regs;
     uint64_t thread_exit;
 };
 
@@ -149,7 +149,7 @@ void arch_thread_destroy(thread_t* t) {
     }
 }
 
-void arch_thread_clone(thread_t* child, syscall_regs_t* tf, void* child_stack) {
+void arch_thread_clone(thread_t* child, struct syscall_regs* tf, void* child_stack) {
     if (!child || !tf) {
         errno = EINVAL;
         KLOG_WARN("THREAD: clone called with nullptr args child=%p tf=%p\n", child, tf);
@@ -185,8 +185,8 @@ void arch_thread_clone(thread_t* child, syscall_regs_t* tf, void* child_stack) {
     child->context_rsp = (uint64_t)&layout->ctx;
 
     if (child_stack) {
-        syscall_regs_t* child_tf = (syscall_regs_t*)child->context_rsp;
-        child_tf->rsp            = (uintptr_t)child_stack;
+        struct syscall_regs* child_tf = (struct syscall_regs*)child->context_rsp;
+        child_tf->rsp                 = (uintptr_t)child_stack;
     }
 }
 

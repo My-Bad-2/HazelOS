@@ -7,14 +7,14 @@
 extern "C" {
 #endif
 
-typedef struct {
+struct syscall_regs {
     uint64_t rbx;
-    uint64_t rdx;
-    uint64_t rsi;
-    uint64_t rdi;
-    uint64_t r8;
-    uint64_t r9;
-    uint64_t r10;  // Holds 4th arg
+    uint64_t rdx;  // 3rd argument
+    uint64_t rsi;  // 2nd argument
+    uint64_t rdi;  // 1st argument
+    uint64_t r8;   // 5th argument
+    uint64_t r9;   // 6th argument
+    uint64_t r10;  // 4th argument
     uint64_t r12;
     uint64_t r13;
     uint64_t r14;
@@ -25,7 +25,7 @@ typedef struct {
     uint64_t rip;     // User Return Address
     uint64_t rflags;  // User Flags
     uint64_t rsp;     // User Stack Pointer
-} syscall_regs_t;
+};
 
 void syscall_init(void);
 

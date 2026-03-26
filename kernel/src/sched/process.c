@@ -6,7 +6,6 @@
 
 #include "libs/dlist.h"
 #include "libs/handles.h"
-#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/vma.h"

@@ -5,8 +5,8 @@
 #include "api/syscalls.h"
 
 static int ipc_test(void) {
-    uint32_t chan_read, chan_write;
-    uint32_t port_cap;
+    uint64_t chan_read, chan_write;
+    uint64_t port_cap = 0;
 
     write(1, "Creating endpoints...\n", 23);
 
@@ -22,7 +22,8 @@ static int ipc_test(void) {
 
     write(1, "Binding port...\n", 17);
 
-    if (ipc_bind(port_cap, chan_read, 0xDEADBEEF) < 0) {
+    int res = ipc_bind(port_cap, chan_read, 0xDEADBEEF);
+    if (res < 0) {
         write(1, "FAIL: Port binding\n", 20);
         return 1;
     }

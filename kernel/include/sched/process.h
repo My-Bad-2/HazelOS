@@ -132,8 +132,8 @@ thread_t* thread_create(
 );
 void thread_destroy(thread_t* t);
 thread_t*
-thread_clone(process_t* target_proc, thread_t* parent, syscall_regs_t* tf, void* child_stack);
-int thread_vclone(thread_t* parent, syscall_regs_t* tf);
+thread_clone(process_t* target_proc, thread_t* parent, struct syscall_regs* tf, void* child_stack);
+int thread_vclone(thread_t* parent, struct syscall_regs* tf);
 int thread_change_exec(
     thread_t* t,
     vm_space_t* new_space,
@@ -149,7 +149,7 @@ void thread_sleep_finish(struct wait_queue* wq);
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
 void arch_thread_destroy(thread_t* t);
-void arch_thread_clone(thread_t* child, syscall_regs_t* tf, void* child_stack);
+void arch_thread_clone(thread_t* child, struct syscall_regs* tf, void* child_stack);
 
 void reaper_task_entry(void* args);
 

@@ -1,6 +1,5 @@
 #include "sched/ipc.h"
 
-#include <errno.h>
 #include <stdalign.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -8,10 +7,11 @@
 
 #include "compiler.h"
 #include "core/capability.h"
+#include "core/errors.h"
 #include "cpu/smp.h"
+#include "cpu/syscalls.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
-#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "sched/process.h"
@@ -128,7 +128,7 @@ static void destroy_channel(struct ipc_channel* chan) {
     kmem_cache_free(channel_cache, chan);
 }
 
-int sys_ipc_create_channel(uint32_t* cap_id_out) {
+int sys_ipc_create_channel(uint64_t* cap_id_out) {
     thread_t* me    = smp_current_core()->curr_thread;
     process_t* proc = me->owner;
 
@@ -161,7 +161,7 @@ int sys_ipc_create_channel(uint32_t* cap_id_out) {
     ch1->peer = ch2;
     ch2->peer = ch1;
 
-    uint32_t cap1, cap2;
+    uint64_t cap1, cap2;
     struct capability* c1 = cap_alloc(me->root_cnode, &cap1);
     struct capability* c2 = cap_alloc(me->root_cnode, &cap2);
 
@@ -184,14 +184,14 @@ int sys_ipc_create_channel(uint32_t* cap_id_out) {
     c2->rights = RIGHT_ALL;
 
     if (cap_id_out) {
-        uint32_t out[2] = {cap1, cap2};
+        uint64_t out[2] = {cap1, cap2};
         copy_to_user(cap_id_out, out, sizeof(out));
     }
 
     return ERR_OK;
 }
 
-int sys_ipc_port_create(uint32_t* cap_id_out) {
+int sys_ipc_port_create(uint64_t* cap_id_out) {
     thread_t* me = smp_current_core()->curr_thread;
 
     struct ipc_port_set* set = kmem_cache_alloc(port_cache);
@@ -205,7 +205,7 @@ int sys_ipc_port_create(uint32_t* cap_id_out) {
     dlist_init(&set->event_queue);
     dlist_init(&set->waiters);
 
-    uint32_t cap;
+    uint64_t cap         = 0;
     struct capability* c = cap_alloc(me->root_cnode, &cap);
     if (!c) {
         kmem_cache_free(port_cache, set);
@@ -217,13 +217,13 @@ int sys_ipc_port_create(uint32_t* cap_id_out) {
     c->rights = RIGHT_ALL;
 
     if (cap_id_out) {
-        copy_to_user(cap_id_out, &cap, sizeof(uint32_t));
+        copy_to_user(cap_id_out, &cap, sizeof(uint64_t));
     }
 
     return ERR_OK;
 }
 
-int sys_ipc_close(uint32_t cap_id) {
+int sys_ipc_close(uint64_t cap_id) {
     thread_t* me = smp_current_core()->curr_thread;
 
     struct capability* cap = cap_lookup(me->root_cnode, cap_id, 0);
@@ -246,6 +246,18 @@ int sys_ipc_close(uint32_t cap_id) {
 }
 
 static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
+    receiver->ipc_state.sender_badge = sender->ipc_state.sender_badge;
+
+    // Pure Register-to-Register Transfer
+    if (!sender->ipc_state.use_memory && !receiver->ipc_state.use_memory) {
+        receiver->ipc_state.msg_regs[0] = sender->ipc_state.msg_regs[0];
+        receiver->ipc_state.msg_regs[1] = sender->ipc_state.msg_regs[1];
+        receiver->ipc_state.msg_regs[2] = sender->ipc_state.msg_regs[2];
+        receiver->ipc_state.msg_regs[3] = sender->ipc_state.msg_regs[3];
+
+        return ERR_OK;
+    }
+
     process_t* proc_tx = sender->owner;
     process_t* proc_rx = receiver->owner;
 
@@ -260,6 +272,7 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
             return ERR_FAULT;
         }
     }
+
     rx->data_size_actual = copy_len;
     tx->data_size_actual = copy_len;
 
@@ -267,13 +280,13 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
     size_t transferred_caps = 0;
 
     for (size_t i = 0; i < cap_copy; ++i) {
-        uint32_t src_cap_id;
+        uint64_t src_cap_id;
         if (copy_between_spaces(
                 proc_tx,
                 &src_cap_id,
                 proc_tx,
                 &tx->caps_buffer[i],
-                sizeof(uint32_t)
+                sizeof(uint64_t)
             ) != 0) {
             continue;
         }
@@ -285,7 +298,7 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
         }
 
         // Allocate the received capability into the receiver thread's cnode
-        uint32_t dest_cap_id;
+        uint64_t dest_cap_id;
         struct capability* dest_cap = cap_alloc(receiver->root_cnode, &dest_cap_id);
         if (!dest_cap) {
             continue;
@@ -297,8 +310,9 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
                 &rx->caps_buffer[transferred_caps],
                 proc_tx,
                 &dest_cap_id,
-                sizeof(uint32_t)
+                sizeof(uint64_t)
             );
+
             transferred_caps++;
         } else {
             cap_revoke(receiver->root_cnode, dest_cap);
@@ -311,7 +325,7 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
     return (copy_len < tx->data_size_max || transferred_caps < tx->caps_max) ? ERR_DENIED : ERR_OK;
 }
 
-int sys_ipc_bind(uint32_t port_cap_id, uint32_t chan_cap_id, uint64_t key) {
+int sys_ipc_bind(uint64_t port_cap_id, uint64_t chan_cap_id, uint64_t key) {
     thread_t* me = smp_current_core()->curr_thread;
 
     struct capability* p_cap = cap_lookup(me->root_cnode, port_cap_id, RIGHT_WRITE);
@@ -334,14 +348,21 @@ int sys_ipc_bind(uint32_t port_cap_id, uint32_t chan_cap_id, uint64_t key) {
     return ERR_OK;
 }
 
-int sys_ipc_send(uint32_t chan_cap_id, struct ipc_msg_info* user_info) {
+int sys_ipc_send(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct syscall_regs* regs) {
     thread_t* me = smp_current_core()->curr_thread;
 
-    if (unlikely(
-            !user_info ||
-            copy_from_user(&me->ipc_state.msg_info, user_info, sizeof(struct ipc_msg_info)) != 0
-        )) {
-        return ERR_FAULT;
+    if (!user_info) {
+        me->ipc_state.use_memory = false;
+
+        arch_sys_ipc_send(regs, &me->ipc_state);
+    } else {
+        me->ipc_state.use_memory = true;
+
+        if (unlikely(
+                copy_from_user(&me->ipc_state.msg_info, user_info, sizeof(struct ipc_msg_info)) != 0
+            )) {
+            return ERR_FAULT;
+        }
     }
 
     struct capability* c_cap = cap_lookup(me->root_cnode, chan_cap_id, RIGHT_SEND);
@@ -349,10 +370,11 @@ int sys_ipc_send(uint32_t chan_cap_id, struct ipc_msg_info* user_info) {
         return ERR_INVALID_CAP;
     }
 
+    me->ipc_state.sender_badge = c_cap->badge;
+
     struct ipc_channel* chan =
         (struct ipc_channel*)atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
     struct ipc_channel* dest = chan->peer;
-
     if (unlikely(!dest || chan->peer_closed)) {
         return ERR_FAULT;
     }
@@ -382,7 +404,10 @@ int sys_ipc_send(uint32_t chan_cap_id, struct ipc_msg_info* user_info) {
         release_qspinlock(&second_lock->header.lock);
         release_qspinlock(&first_lock->header.lock);
 
-        copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+        if (me->ipc_state.use_memory) {
+            copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+        }
+
         return status;
     }
 
@@ -394,18 +419,26 @@ int sys_ipc_send(uint32_t chan_cap_id, struct ipc_msg_info* user_info) {
     release_qspinlock(&second_lock->header.lock);
     release_qspinlock(&first_lock->header.lock);
 
-    copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+    if (me->ipc_state.use_memory) {
+        copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+    }
+
     return me->ipc_state.status;
 }
 
-int sys_ipc_recv(uint32_t chan_cap_id, struct ipc_msg_info* user_info) {
+int sys_ipc_recv(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct syscall_regs* regs) {
     thread_t* me = smp_current_core()->curr_thread;
 
-    if (unlikely(
-            !user_info ||
-            copy_from_user(&me->ipc_state.msg_info, user_info, sizeof(struct ipc_msg_info)) != 0
-        )) {
-        return ERR_FAULT;
+    if (user_info == nullptr) {
+        me->ipc_state.use_memory = false;
+    } else {
+        me->ipc_state.use_memory = true;
+
+        if (unlikely(
+                copy_from_user(&me->ipc_state.msg_info, user_info, sizeof(struct ipc_msg_info)) != 0
+            )) {
+            return ERR_FAULT;
+        }
     }
 
     struct capability* c_cap = cap_lookup(me->root_cnode, chan_cap_id, RIGHT_RECEIVE);
@@ -435,7 +468,12 @@ int sys_ipc_recv(uint32_t chan_cap_id, struct ipc_msg_info* user_info) {
 
         release_qspinlock(&chan->header.lock);
 
-        copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+        if (me->ipc_state.use_memory) {
+            copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+        } else {
+            arch_sys_ipc_recv(regs, &me->ipc_state);
+        }
+
         return status;
     }
 
@@ -444,25 +482,32 @@ int sys_ipc_recv(uint32_t chan_cap_id, struct ipc_msg_info* user_info) {
     scheduler_block();
     release_qspinlock(&chan->header.lock);
 
-    copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+    if (me->ipc_state.use_memory) {
+        me->ipc_state.msg_info.sender_badge = me->ipc_state.sender_badge;
+        copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+    } else {
+        arch_sys_ipc_recv(regs, &me->ipc_state);
+    }
+
     return me->ipc_state.status;
 }
 
 int sys_ipc_call(
-    uint32_t chan_cap_id,
+    uint64_t chan_cap_id,
     struct ipc_msg_info* send_info,
-    struct ipc_msg_info* recv_info
+    struct ipc_msg_info* recv_info,
+    struct syscall_regs* regs
 ) {
-    int ret = sys_ipc_send(chan_cap_id, send_info);
+    int ret = sys_ipc_send(chan_cap_id, send_info, regs);
 
     if (unlikely(ret != ERR_OK)) {
         return ret;
     }
 
-    return sys_ipc_recv(chan_cap_id, recv_info);
+    return sys_ipc_recv(chan_cap_id, recv_info, regs);
 }
 
-int sys_ipc_wait(uint32_t port_cap_id, struct ipc_event* out_event, int timeout_ms) {
+int sys_ipc_wait(uint64_t port_cap_id, struct ipc_event* out_event, int timeout_ms) {
     thread_t* me = smp_current_core()->curr_thread;
 
     struct capability* p_cap = cap_lookup(me->root_cnode, port_cap_id, RIGHT_WAIT);

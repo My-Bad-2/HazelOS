@@ -13,6 +13,7 @@
 #include "sched/ipc.h"
 #include "sched/process.h"
 #include "sched/syscalls.h"
+#include "uapi/ipc.h"
 
 // AMD64 Technology 24593—Rev. 3.42—March 2024 Pg. no. 175 System Instructions
 #define STAR_SET_KERNEL_BASE(base) ((uint64_t)(base) << 32)
@@ -52,20 +53,8 @@ void syscall_init(void) {
 
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
-static syscall_fn_t custom_syscalls[] = {
-    nullptr,
-    (syscall_fn_t)sys_ipc_create_channel,
-    (syscall_fn_t)sys_ipc_port_create,
-    (syscall_fn_t)sys_ipc_bind,
-    (syscall_fn_t)sys_ipc_call,
-    (syscall_fn_t)sys_ipc_wait,
-    (syscall_fn_t)sys_ipc_close,
-    (syscall_fn_t)sys_ipc_send,
-    (syscall_fn_t)sys_ipc_recv,
-};
-
 static uint64_t
-dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, syscall_regs_t* regs) {
+dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, struct syscall_regs* regs) {
     struct cnode* root_cnode = cpu->curr_thread->root_cnode;
 
     if (unlikely(!root_cnode)) {
@@ -73,30 +62,24 @@ dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, syscall_regs_t* re
     }
 
     int status          = ERR_DENIED;
-    uint32_t out_cap_id = 0;
+    uint64_t out_cap_id = 0;
 
     switch (operation) {
         case 0x01:  // SYS_CAP_RETYPE
         {
             status = sys_cap_retype(
                 root_cnode,
-                (uint32_t)regs->rdi,  // untyped_id
-                (uint16_t)regs->rsi,  // target_type
-                (size_t)regs->rdx,    // count
-                (uint32_t)regs->r10,  // dest_cnode_id
-                (uint32_t*)regs->r8   // out_array
+                regs->rdi,
+                regs->rsi,
+                regs->rdx,
+                regs->r10,
+                (uint64_t*)regs->r8
             );
             break;
         }
         case 0x02:  // SYS_CAP_DELEGATE
         {
-            status = sys_cap_delegate(
-                root_cnode,
-                (uint32_t)regs->rdi,  // dest_cnode_id
-                (uint32_t)regs->rsi,  // src_cap_id
-                (uint32_t)regs->rdx,  // reduced_rights
-                &out_cap_id
-            );
+            status = sys_cap_delegate(root_cnode, regs->rdi, regs->rsi, regs->rdx, &out_cap_id);
 
             if (status == ERR_OK) {
                 regs->rdx = out_cap_id;
@@ -106,20 +89,12 @@ dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, syscall_regs_t* re
         }
         case 0x03:  // SYS_CAP_REVOKE
         {
-            status = sys_cap_revoke(
-                root_cnode,
-                (uint32_t)regs->rdi  // target_id
-            );
+            status = sys_cap_revoke(root_cnode, regs->rdi);
             break;
         }
         case 0x04:  // SYS_CAP_COPY
         {
-            status = sys_cap_copy(
-                root_cnode,
-                (uint32_t)regs->rdi,  // dest_cnode_id
-                (uint32_t)regs->rsi,  // src_cap_id
-                &out_cap_id
-            );
+            status = sys_cap_copy(root_cnode, regs->rdi, regs->rsi, &out_cap_id);
 
             if (status == ERR_OK) {
                 regs->rdx = out_cap_id;
@@ -129,13 +104,8 @@ dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, syscall_regs_t* re
         }
         case 0x05:  // SYS_CAP_MINT
         {
-            status = sys_cap_mint(
-                root_cnode,
-                (uint32_t)regs->rdi,  // dest_cnode_id
-                (uint32_t)regs->rsi,  // src_cap_id
-                (uint32_t)regs->rdx,  // new_rights
-                &out_cap_id
-            );
+            status =
+                sys_cap_mint(root_cnode, regs->rdi, regs->rsi, regs->rdx, regs->r10, &out_cap_id);
 
             if (status == ERR_OK) {
                 regs->rdx = out_cap_id;
@@ -148,20 +118,52 @@ dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, syscall_regs_t* re
             break;
     }
 
-    return (uint64_t)regs;
+    return (uint64_t)status;
 }
 
-static uint64_t dispatch_ipc_syscall(uint64_t operation, syscall_regs_t* regs) {
-    if (operation < 0 || operation >= sizeof(custom_syscalls) / sizeof(syscall_fn_t)) {
-        return (uint64_t)-1;
+static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* regs) {
+    int status = 0;
+
+    switch (operation) {
+        case 0x01:  // SYS_IPC_CHANNEL_CREATE
+            status = sys_ipc_create_channel((uint64_t*)regs->rdi);
+            break;
+        case 0x02:  // SYS_IPC_PORT_CREATE
+            status = sys_ipc_port_create((uint64_t*)regs->rdi);
+            break;
+        case 0x03:  // SYS_IPC_BIND
+            status = sys_ipc_bind(regs->rdi, regs->rsi, regs->rdx);
+            break;
+        case 0x04:  // SYS_IPC_CALL
+            status = sys_ipc_call(
+                regs->rdi,
+                (struct ipc_msg_info*)regs->rsi,
+                (struct ipc_msg_info*)regs->rdx,
+                regs
+            );
+            break;
+        case 0x05:  // SYS_IPC_WAIT
+            status = sys_ipc_wait(regs->rdi, (struct ipc_event*)regs->rsi, (int)regs->rdx);
+            break;
+        case 0x06:  // SYS_IPC_CLOSE
+            status = sys_ipc_close(regs->rdi);
+            break;
+        case 0x07:  // SYS_IPC_SEND
+            status = sys_ipc_send(regs->rdi, (struct ipc_msg_info*)regs->rsi, regs);
+            break;
+        case 0x08:  // SYS_IPC_RECV
+            status = sys_ipc_recv(regs->rdi, (struct ipc_msg_info*)regs->rsi, regs);
+            break;
+        default:
+            status = ERR_DENIED;
+            break;
     }
 
-    syscall_fn_t func = custom_syscalls[operation];
-    return func(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
+    return (uint64_t)status;
 }
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
-uint64_t syscall_dispatcher(syscall_regs_t* regs, uint64_t num) {
+uint64_t syscall_dispatcher(struct syscall_regs* regs, uint64_t num) {
     uint64_t res = 0;
 
     uint64_t sys_num   = regs->rax;

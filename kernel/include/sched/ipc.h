@@ -7,22 +7,11 @@
 #include "libs/spinlock.h"
 #include "uapi/ipc.h"
 
-#define IPC_RIGHT_NONE      0
-#define IPC_RIGHT_READ      (1 << 0)  // Can read / wait
-#define IPC_RIGHT_WRITE     (1 << 1)  // Can write / notify
-#define IPC_RIGHT_TRANSFER  (1 << 2)  // Can send this handle to others
-#define IPC_RIGHT_MAP       (1 << 3)  // Can Map (for Shared Mem)
-#define IPC_RIGHT_DUPLICATE (1 << 4)  // Can Clone the Handle
-
-#define IPC_RIGHTS_ALL UINT32_MAX
-#define IPC_RIGHTS_READ_ONLY \
-    (IPC_RIGHT_READ | IPC_RIGHT_TRANSFER | IPC_RIGHT_MAP | IPC_RIGHT_DUPLICATE | IPC_RIGHT_INSPECT)
-#define IPC_RIGHTS_WRITE_ONLY (IPC_RIGHT_WRITE | IPC_RIGHT_TRANSFER | IPC_RIGHT_INSPECT)
-
-#define IPC_MAX_MSG_HANDLES 8
+#define IPC_MAX_MSG_REGS 4  // 4 registers * 8 bytes = 32 bytes
 
 struct process;
 struct thread;
+struct syscall_regs;
 
 typedef enum {
     OBJ_CHANNEL,
@@ -48,35 +37,43 @@ struct ipc_channel {
     struct ipc_channel* peer;  // The other end of the pipe
     struct ipc_port_set* wait_set;
     uint64_t user_key;
-    bool peer_closed;
 
     // Rendezvous Queues: Hold blocked threads
     struct dlist_head blocked_senders;
     struct dlist_head blocked_receivers;
-
     struct dlist_head port_node;
+
+    bool peer_closed;
     bool is_in_port_set;
 };
 
 struct thread_ipc_state {
-    struct ipc_msg_info msg_info;
     int status;
+    bool use_memory;
+
+    struct ipc_msg_info msg_info;
+    uint64_t msg_regs[IPC_MAX_MSG_REGS];
+    uint32_t sender_badge;
 };
 
 void ipc_init(void);
 
-int sys_ipc_create_channel(uint32_t* cap_id_out);
-int sys_ipc_port_create(uint32_t* cap_id_out);
-int sys_ipc_bind(uint32_t port_cap_id, uint32_t chan_cap_id, uint64_t key);
-int sys_ipc_wait(uint32_t port_cap_id, struct ipc_event* out_event, int timeout_ms);
-int sys_ipc_close(uint32_t handle);
+int sys_ipc_create_channel(uint64_t* cap_id_out);
+int sys_ipc_port_create(uint64_t* cap_id_out);
+int sys_ipc_bind(uint64_t port_cap_id, uint64_t chan_cap_id, uint64_t key);
+int sys_ipc_wait(uint64_t port_cap_id, struct ipc_event* out_event, int timeout_ms);
+int sys_ipc_close(uint64_t handle);
 
 int sys_ipc_call(
-    uint32_t chan_cap_id,
+    uint64_t chan_cap_id,
     struct ipc_msg_info* send_info,
-    struct ipc_msg_info* recv_info
+    struct ipc_msg_info* recv_info,
+    struct syscall_regs* regs
 );
-int sys_ipc_send(uint32_t chan_cap_id, struct ipc_msg_info* info);
-int sys_ipc_recv(uint32_t chan_cap_id, struct ipc_msg_info* info);
+int sys_ipc_send(uint64_t chan_cap_id, struct ipc_msg_info* info, struct syscall_regs* regs);
+int sys_ipc_recv(uint64_t chan_cap_id, struct ipc_msg_info* info, struct syscall_regs* regs);
+
+void arch_sys_ipc_send(struct syscall_regs* regs, struct thread_ipc_state* state);
+void arch_sys_ipc_recv(struct syscall_regs* regs, struct thread_ipc_state* state);
 
 #endif
