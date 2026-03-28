@@ -9,6 +9,7 @@
 #include "boot/boot.h"
 #include "drivers/acpi.h"
 #include "drivers/timer.h"
+#include "libs/kobject.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
@@ -96,6 +97,8 @@ void smp_init(void) {
     if (num_cpus == 0) {
         num_cpus = 1;
     }
+
+    koid_init();
 
     cpu_datas = kmalloc(sizeof(per_cpu_data_t) * num_cpus);
     memset(cpu_datas, 0, num_cpus * sizeof(per_cpu_data_t));

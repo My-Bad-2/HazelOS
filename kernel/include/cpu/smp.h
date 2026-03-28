@@ -1,3 +1,4 @@
+#include "libs/kobject.h"
 #include "sched/rcu.h"
 #ifndef KERNEL_SMP_H
 #define KERNEL_SMP_H 1
@@ -65,6 +66,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
 
     struct arch_cpu_data arch;
     struct nmi_watchdog_state watchdog;
+    struct koid_allocator allocator;
     struct mcs_node qspin_nodes[MAX_QSPIN_NODES];
 } per_cpu_data_t;
 

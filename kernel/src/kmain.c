@@ -1,5 +1,4 @@
 #include "arch.h"
-#include "core/capability.h"
 #include "cpu/cpu.h"
 #include "cpu/smp.h"
 #include "drivers/drivers.h"

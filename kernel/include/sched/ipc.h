@@ -1,4 +1,4 @@
-#include "libs/kref.h"
+#include "libs/kobject.h"
 #ifndef KERNEL_SCHED_IPC_H
 #define KERNEL_SCHED_IPC_H 1
 
@@ -29,7 +29,7 @@ struct ipc_object_header {
 };
 
 struct ipc_port_set {
-    struct kref refcount;
+    struct kobject refcount;
     qspinlock_t lock;
 
     struct dlist_head event_queue;
@@ -38,7 +38,7 @@ struct ipc_port_set {
 
 struct ipc_notification {
     struct ipc_object_header header;
-    struct kref refcount;
+    struct kobject refcount;
     qspinlock_t lock;
 
     uint64_t state;
@@ -48,7 +48,7 @@ struct ipc_notification {
 struct ipc_channel {
     struct ipc_object_header header;
 
-    struct kref refcount;
+    struct kobject refcount;
     bool peer_closed;
     qspinlock_t lock;
 
@@ -80,20 +80,31 @@ int sys_ipc_bind(uint64_t port_cap_id, uint64_t chan_cap_id, uint64_t key);
 int sys_ipc_wait(uint64_t port_cap_id, struct ipc_event* out_event, int timeout_ms);
 int sys_ipc_notify(uint64_t notif_cap_id, uint64_t bits);
 
-int sys_ipc_send(uint64_t chan_cap_id, struct ipc_msg_info* info, struct syscall_regs* regs);
-int sys_ipc_recv(uint64_t chan_cap_id, struct ipc_msg_info* info, struct syscall_regs* regs);
+int sys_ipc_send(
+    uint64_t chan_cap_id,
+    struct ipc_msg_info* info,
+    int timeout_ms,
+    struct syscall_regs* regs
+);
+int sys_ipc_recv(
+    uint64_t chan_cap_id,
+    struct ipc_msg_info* info,
+    int timeout_ms,
+    struct syscall_regs* regs
+);
 int sys_ipc_call(
     uint64_t chan_cap_id,
     struct ipc_msg_info* send_info,
     struct ipc_msg_info* recv_info,
+    int timeout_ms,
     struct syscall_regs* regs
 );
 
 void arch_sys_ipc_send(struct syscall_regs* regs, struct thread_ipc_state* state);
 void arch_sys_ipc_recv(struct syscall_regs* regs, struct thread_ipc_state* state);
 
-void ipc_channel_release(struct kref* ref);
-void ipc_port_set_release(struct kref* ref);
-void ipc_notification_release(struct kref* ref);
+void ipc_channel_release(struct kobject* ref);
+void ipc_port_set_release(struct kobject* ref);
+void ipc_notification_release(struct kobject* ref);
 
 #endif

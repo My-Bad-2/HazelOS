@@ -13,7 +13,7 @@
 #include "cpu/syscalls.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
-#include "libs/kref.h"
+#include "libs/kobject.h"
 #include "libs/slist.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
@@ -83,7 +83,7 @@ static void sys_ipc_notify_internal(struct ipc_port_set* set, struct ipc_object_
     release_qspinlock(&set->lock);
 }
 
-void ipc_channel_release(struct kref* ref) {
+void ipc_channel_release(struct kobject* ref) {
     struct ipc_channel* chan = kref_entry(ref, struct ipc_channel, refcount);
 
     acquire_qspinlock(&chan->lock);
@@ -151,7 +151,7 @@ retry_release:
     kmem_cache_free(channel_cache, chan);
 }
 
-void ipc_notification_release(struct kref* ref) {
+void ipc_notification_release(struct kobject* ref) {
     struct ipc_notification* notif = kref_entry(ref, struct ipc_notification, refcount);
 
     if (notif->wait_set) {
@@ -168,7 +168,7 @@ void ipc_notification_release(struct kref* ref) {
     kmem_cache_free(notification_cache, notif);
 }
 
-void ipc_port_set_release(struct kref* ref) {
+void ipc_port_set_release(struct kobject* ref) {
     struct ipc_port_set* set = kref_entry(ref, struct ipc_port_set, refcount);
 
     thread_t *t, *n;
@@ -471,7 +471,12 @@ int sys_ipc_notify(uint64_t notif_cap_id, uint64_t bits) {
     return ERR_OK;
 }
 
-int sys_ipc_send(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct syscall_regs* regs) {
+int sys_ipc_send(
+    uint64_t chan_cap_id,
+    struct ipc_msg_info* user_info,
+    int timeout_ms,
+    struct syscall_regs* regs
+) {
     thread_t* me = smp_current_core()->curr_thread;
 
     if (!user_info) {
@@ -558,13 +563,37 @@ retry_send:
         return status;
     }
 
+    // Non-blocking try-send
+    if (timeout_ms == 0) {
+        release_qspinlock(&dest->lock);
+        release_qspinlock(&chan->lock);
+        return ERR_DENIED;
+    }
+
     dlist_add_tail(&me->wait_node, &dest->blocked_senders);
     sys_ipc_notify_internal(dest->wait_set, &dest->header);
 
-    scheduler_block();
-
     release_qspinlock(&dest->lock);
     release_qspinlock(&chan->lock);
+
+    if (timeout_ms > 0) {
+        scheduler_sleep((uint32_t)timeout_ms);
+
+        acquire_qspinlock(&chan->lock);
+        acquire_qspinlock(&dest->lock);
+
+        if (dlist_linked(&me->wait_node)) {
+            dlist_del_init(&me->wait_node);
+            release_qspinlock(&dest->lock);
+            release_qspinlock(&chan->lock);
+            return ERR_TIMEOUT;
+        }
+
+        release_qspinlock(&dest->lock);
+        release_qspinlock(&chan->lock);
+    } else {
+        scheduler_block();
+    }
 
     if (me->ipc_state.use_memory) {
         copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
@@ -573,7 +602,12 @@ retry_send:
     return me->ipc_state.status;
 }
 
-int sys_ipc_recv(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct syscall_regs* regs) {
+int sys_ipc_recv(
+    uint64_t chan_cap_id,
+    struct ipc_msg_info* user_info,
+    int timeout_ms,
+    struct syscall_regs* regs
+) {
     thread_t* me = smp_current_core()->curr_thread;
 
     if (user_info == nullptr) {
@@ -624,10 +658,28 @@ int sys_ipc_recv(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct sy
         return status;
     }
 
-    dlist_add_tail(&me->wait_node, &chan->blocked_receivers);
+    if (timeout_ms == 0) {
+        release_qspinlock(&chan->lock);
+        return ERR_DENIED;
+    }
 
-    scheduler_block();
+    dlist_add_tail(&me->wait_node, &chan->blocked_receivers);
     release_qspinlock(&chan->lock);
+
+    if (timeout_ms > 0) {
+        scheduler_sleep((uint32_t)timeout_ms);
+
+        acquire_qspinlock(&chan->lock);
+        if (dlist_linked(&me->wait_node)) {
+            dlist_del_init(&me->wait_node);
+            release_qspinlock(&chan->lock);
+            return ERR_TIMEOUT;
+        }
+
+        release_qspinlock(&chan->lock);
+    } else {
+        scheduler_block();
+    }
 
     if (me->ipc_state.use_memory) {
         me->ipc_state.msg_info.sender_badge = me->ipc_state.sender_badge;
@@ -643,19 +695,20 @@ int sys_ipc_call(
     uint64_t chan_cap_id,
     struct ipc_msg_info* send_info,
     struct ipc_msg_info* recv_info,
+    int timeout_ms,
     struct syscall_regs* regs
 ) {
     thread_t* me = smp_current_core()->curr_thread;
 
     me->ipc_state.is_doing_call = true;
-    int ret                     = sys_ipc_send(chan_cap_id, send_info, regs);
+    int ret                     = sys_ipc_send(chan_cap_id, send_info, timeout_ms, regs);
     me->ipc_state.is_doing_call = false;
 
     if (unlikely(ret != ERR_OK)) {
         return ret;
     }
 
-    return sys_ipc_recv(chan_cap_id, recv_info, regs);
+    return sys_ipc_recv(chan_cap_id, recv_info, timeout_ms, regs);
 }
 
 int sys_ipc_wait(uint64_t port_cap_id, struct ipc_event* out_event, int timeout_ms) {

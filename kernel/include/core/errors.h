@@ -7,5 +7,6 @@
 #define ERR_NO_MEM      (-2)
 #define ERR_DENIED      (-3)
 #define ERR_FAULT       (-4)
+#define ERR_TIMEOUT     (-5)
 
 #endif

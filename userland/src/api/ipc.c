@@ -121,7 +121,8 @@ int ipc_send(
     const void* data,
     size_t len,
     const uint64_t* caps,
-    size_t num_caps
+    size_t num_caps,
+    int timeout_ms
 ) {
     if (len <= 32 && num_caps == 0) {
         uint64_t mr[4] = {0};
@@ -149,7 +150,7 @@ int ipc_send(
         .caps_actual      = 0
     };
 
-    return (int)syscall(SYS_IPC_SEND, (long)chan_cap, (long)&info);
+    return (int)syscall(SYS_IPC_SEND, (long)chan_cap, (long)&info, (long)timeout_ms);
 }
 
 int ipc_recv(
@@ -160,7 +161,8 @@ int ipc_recv(
     uint64_t* cap_buffer,
     size_t max_caps,
     size_t* actual_caps,
-    uint32_t* badge_out
+    uint32_t* badge_out,
+    int timeout_ms
 ) {
     if (max_len <= 32 && max_caps == 0) {
         uint64_t mr[4] = {0};
@@ -190,7 +192,7 @@ int ipc_recv(
         .caps_actual      = 0
     };
 
-    int ret = (int)syscall(SYS_IPC_RECV, (long)chan_cap, (long)&info);
+    int ret = (int)syscall(SYS_IPC_RECV, (long)chan_cap, (long)&info, (long)timeout_ms);
 
     if (actual_len) {
         *actual_len = info.data_size_actual;
@@ -215,7 +217,8 @@ int ipc_call(
     uint64_t* resp_cap_buffer,
     size_t resp_max_caps,
     size_t* resp_actual_caps,
-    uint32_t* badge_out
+    uint32_t* badge_out,
+    int timeout_ms
 ) {
     if (req_len <= 32 && req_num_caps == 0 && resp_max_len <= 32 && resp_max_caps == 0) {
         uint64_t tx_mr[4] = {0};
@@ -257,7 +260,8 @@ int ipc_call(
         .caps_actual      = 0
     };
 
-    int ret = (int)syscall(SYS_IPC_CALL, (long)chan_cap, (long)&tx_info, (long)&rx_info);
+    int ret = (int)
+        syscall(SYS_IPC_CALL, (long)chan_cap, (long)&tx_info, (long)&rx_info, (long)timeout_ms);
 
     if (resp_actual_len) {
         *resp_actual_len = rx_info.data_size_actual;
@@ -277,7 +281,7 @@ int ipc_send_msg(
     const uint64_t* caps,
     size_t cap_count
 ) {
-    return ipc_send(chan_cap, data, len, caps, cap_count);
+    return ipc_send(chan_cap, data, len, caps, cap_count, 10);
 }
 
 int ipc_recv_msg(
@@ -301,7 +305,16 @@ int ipc_recv_msg(
 
     uint32_t badge_out;
 
-    int ret =
-        ipc_recv(chan_cap, buffer, max_len, recv_len, caps_out, max_caps, recv_caps, &badge_out);
+    int ret = ipc_recv(
+        chan_cap,
+        buffer,
+        max_len,
+        recv_len,
+        caps_out,
+        max_caps,
+        recv_caps,
+        &badge_out,
+        10
+    );
     return ret;
 }

@@ -57,7 +57,8 @@ int ipc_send(
     const void* data,
     size_t len,
     const uint64_t* caps,
-    size_t num_caps
+    size_t num_caps,
+    int timeout_ms
 );
 
 int ipc_recv(
@@ -68,7 +69,8 @@ int ipc_recv(
     uint64_t* cap_buffer,
     size_t max_caps,
     size_t* actual_caps,
-    uint32_t* badge_out
+    uint32_t* badge_out,
+    int timeout_ms
 );
 
 int ipc_call(
@@ -83,7 +85,8 @@ int ipc_call(
     uint64_t* resp_cap_buffer,
     size_t resp_max_caps,
     size_t* resp_actual_caps,
-    uint32_t* badge_out
+    uint32_t* badge_out,
+    int timeout_ms
 );
 
 int ipc_send_msg(

@@ -137,6 +137,7 @@ static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* re
                 regs->rdi,
                 (struct ipc_msg_info*)regs->rsi,
                 (struct ipc_msg_info*)regs->rdx,
+                (int)regs->rdx,
                 regs
             );
             break;
@@ -144,10 +145,10 @@ static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* re
             status = sys_ipc_wait(regs->rdi, (struct ipc_event*)regs->rsi, (int)regs->rdx);
             break;
         case 0x06:  // SYS_IPC_SEND
-            status = sys_ipc_send(regs->rdi, (struct ipc_msg_info*)regs->rsi, regs);
+            status = sys_ipc_send(regs->rdi, (struct ipc_msg_info*)regs->rsi, (int)regs->rdx, regs);
             break;
         case 0x07:  // SYS_IPC_RECV
-            status = sys_ipc_recv(regs->rdi, (struct ipc_msg_info*)regs->rsi, regs);
+            status = sys_ipc_recv(regs->rdi, (struct ipc_msg_info*)regs->rsi, (int)regs->rdx, regs);
             break;
         case 0x08:  // SYS_IPC_NOTIFICATION_CREATE
             status = sys_ipc_notification_create((uint64_t*)regs->rdi);
