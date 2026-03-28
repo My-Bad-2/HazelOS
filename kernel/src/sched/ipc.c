@@ -14,7 +14,6 @@
 #include "libs/dlist.h"
 #include "libs/handles.h"
 #include "libs/kobject.h"
-#include "libs/slist.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "sched/process.h"
@@ -577,7 +576,7 @@ retry_send:
     release_qspinlock(&chan->lock);
 
     if (timeout_ms > 0) {
-        scheduler_sleep((uint32_t)timeout_ms);
+        scheduler_sleep(timeout_ms);
 
         acquire_qspinlock(&chan->lock);
         acquire_qspinlock(&dest->lock);
@@ -667,7 +666,7 @@ int sys_ipc_recv(
     release_qspinlock(&chan->lock);
 
     if (timeout_ms > 0) {
-        scheduler_sleep((uint32_t)timeout_ms);
+        scheduler_sleep(timeout_ms);
 
         acquire_qspinlock(&chan->lock);
         if (dlist_linked(&me->wait_node)) {
@@ -734,7 +733,7 @@ int sys_ipc_wait(uint64_t port_cap_id, struct ipc_event* out_event, int timeout_
         dlist_add_tail(&me->wait_node, &set->waiters);
 
         release_qspinlock(&set->lock);
-        scheduler_sleep((uint32_t)timeout_ms);
+        scheduler_sleep(timeout_ms);
         acquire_qspinlock(&set->lock);
 
         if (dlist_linked(&me->wait_node)) {

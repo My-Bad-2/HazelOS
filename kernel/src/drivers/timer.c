@@ -1,10 +1,12 @@
 #include "drivers/timer.h"
 
+#include <stdint.h>
+
 #include "libs/hashtable.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
 
-#define time_before_eq(a, b) ((int32_t)((a) - (b)) <= 0)
+#define time_before_eq(a, b) ((a) <= (b))
 
 void timer_manager_init(timer_manager_t* manager) {
     if (!manager) {
@@ -19,7 +21,7 @@ void timer_manager_init(timer_manager_t* manager) {
     ht_init_table(manager->tv4, TVN_SIZE);
     ht_init_table(manager->tv5, TVN_SIZE);
 
-    manager->curr_ticks      = timer_get_time();
+    manager->curr_ticks      = timer_get_time_ms();
     manager->next_expires_at = manager->curr_ticks;
     manager->active_timers   = 0;
 
@@ -47,11 +49,11 @@ static void internal_add_timer(timer_manager_t* manager, timer_event_t* timer) {
     }
 }
 
-void timer_arm(
+static void __timer_arm(
     timer_manager_t* manager,
     timer_event_t* timer,
-    uint64_t delay_ns,
-    uint64_t interval_ticks,
+    int64_t delay_ms,
+    int64_t interval_ms,
     timer_callback_t callback,
     void* ctx
 ) {
@@ -64,9 +66,9 @@ void timer_arm(
     ht_init_node(&timer->node);
     timer->callback   = callback;
     timer->ctx        = ctx;
-    timer->interval   = interval_ticks;
+    timer->interval   = interval_ms;
     timer->owner      = manager;
-    timer->expires_at = manager->curr_ticks + delay_ns;
+    timer->expires_at = manager->curr_ticks + (uint64_t)delay_ms;
 
     if (manager->active_timers == 0 ||
         time_before_eq(timer->expires_at, manager->next_expires_at)) {
@@ -77,6 +79,26 @@ void timer_arm(
     manager->active_timers++;
 
     release_qspinlock(&manager->lock);
+}
+
+void timer_arm_oneshot(
+    timer_manager_t* manager,
+    timer_event_t* timer,
+    int64_t delay_ms,
+    timer_callback_t callback,
+    void* ctx
+) {
+    __timer_arm(manager, timer, delay_ms, 0, callback, ctx);
+}
+
+void timer_arm_periodic(
+    timer_manager_t* manager,
+    timer_event_t* timer,
+    int64_t interval_ms,
+    timer_callback_t callback,
+    void* ctx
+) {
+    __timer_arm(manager, timer, 0, interval_ms, callback, ctx);
 }
 
 bool timer_cancel(timer_event_t* timer) {
@@ -96,8 +118,13 @@ bool timer_cancel(timer_event_t* timer) {
     timer->owner = nullptr;
     manager->active_timers--;
 
+    bool ret = false;
+    if (timer->expires_at < timer_get_time_ms()) {
+        ret = true;
+    }
+
     release_qspinlock(&manager->lock);
-    return true;
+    return ret;
 }
 
 static void cascade(timer_manager_t* manager, struct hlist_head* tv, int index) {
@@ -123,7 +150,7 @@ void timer_manager_tick(timer_manager_t* manager) {
         return;
     }
 
-    uint32_t now = timer_get_time();
+    uint32_t now = timer_get_time_ms();
 
     if (manager->active_timers == 0 || time_before_eq(now, manager->next_expires_at)) {
         return;
@@ -171,7 +198,7 @@ void timer_manager_tick(timer_manager_t* manager) {
 
             acquire_qspinlock(&manager->lock);
             if (timer->interval > 0 && timer->owner == manager) {
-                timer->expires_at = manager->curr_ticks + timer->interval;
+                timer->expires_at = manager->curr_ticks + (uint64_t)timer->interval;
                 internal_add_timer(manager, timer);
 
                 if (time_before_eq(timer->expires_at, manager->next_expires_at)) {

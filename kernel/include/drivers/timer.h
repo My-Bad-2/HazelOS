@@ -41,8 +41,8 @@ typedef struct {
 typedef struct {
     struct hlist_node node;
 
-    size_t expires_at;
-    size_t interval;
+    uint64_t expires_at;
+    int64_t interval;
 
     timer_callback_t callback;
     void* ctx;
@@ -63,11 +63,17 @@ void timer_tick(void);
 void timer_init(void);
 
 void timer_manager_init(timer_manager_t* manager);
-void timer_arm(
+void timer_arm_oneshot(
     timer_manager_t* manager,
     timer_event_t* timer,
-    uint64_t delay,
-    uint64_t interval_ticks,
+    int64_t delay_ms,
+    timer_callback_t callback,
+    void* ctx
+);
+void timer_arm_periodic(
+    timer_manager_t* manager,
+    timer_event_t* timer,
+    int64_t interval_ms,
     timer_callback_t callback,
     void* ctx
 );

@@ -14,19 +14,18 @@ extern "C" {
 
 struct per_cpu_data;
 
-void scheduler_arch_init(void);
-
 void scheduler_init(void);
+void scheduler_arch_init(void);
 void scheduler_init_per_cpu(struct per_cpu_data* cpu);
 bool scheduler_is_initialized(void);
 
 void scheduler_add_thread(thread_t* t);
 void scheduler_remove_thread(thread_t* t);
 
-void scheduler_renice(thread_t* t, int nice);
+int scheduler_renice(thread_t* t, int nice);
 void scheduler_block(void);
 void scheduler_unblock(thread_t* t);
-void scheduler_sleep(size_t ms);
+int scheduler_sleep(int64_t timeout_ms);
 
 void schedule(void);
 void scheduler_yield(void);

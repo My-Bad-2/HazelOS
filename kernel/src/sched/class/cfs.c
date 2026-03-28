@@ -1,4 +1,5 @@
 #include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "compiler.h"
@@ -100,6 +101,10 @@ static void cfs_renice_task(per_cpu_data_t* rq, thread_t* t, int nice) {
     CFS_NICE_IDX(t) = nice + 20;
 }
 
+static inline bool vruntime_less(uint64_t a, uint64_t b) {
+    return (int64_t)(a - b) < 0;
+}
+
 static void cfs_enqueue_task(per_cpu_data_t* rq, thread_t* t) {
     struct rb_node** link  = &rq->cfs_tree.rb_root.rb_node;
     struct rb_node* parent = nullptr;
@@ -109,7 +114,7 @@ static void cfs_enqueue_task(per_cpu_data_t* rq, thread_t* t) {
         parent          = *link;
         thread_t* entry = rb_entry(parent, thread_t, rb_node);
 
-        if (CFS_VRUNTIME(t) < CFS_VRUNTIME(entry) ||
+        if (vruntime_less(CFS_VRUNTIME(t), CFS_VRUNTIME(entry)) ||
             (CFS_VRUNTIME(t) == CFS_VRUNTIME(entry) && t->kobj.koid < entry->kobj.koid)) {
             link = &parent->rb_left;
         } else {

@@ -1,3 +1,4 @@
+#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdatomic.h>
 
 #include "arch.h"
@@ -484,7 +485,6 @@ void scheduler_remove_thread(thread_t* t) {
 
 static thread_t* pick_next_task(per_cpu_data_t* cpu, size_t* flags) {
     struct sched_class* sc = sched_classes_head;
-
     while (sc) {
         if (sc->pick_next_task) {
             thread_t* next = sc->pick_next_task(cpu);
@@ -532,7 +532,6 @@ void schedule(void) {
     size_t now     = get_time_now();
 
     if (curr->preempt_count > 0) {
-        // Thread wants to keep running, we'll defer preemption until preempt_enable() is called.
         cpu->reschedule_needed = true;
         return;
     }
@@ -542,7 +541,6 @@ void schedule(void) {
     }
 
     size_t flags = acquire_qinterrupt_lock(&cpu->lock);
-
     update_cpu_load(cpu, now);
 
     if (curr && curr != cpu->idle_thread) {
@@ -605,17 +603,17 @@ void schedule(void) {
 }
 
 void scheduler_block(void) {
-    per_cpu_data_t* cpu = smp_current_core();
-    size_t flags        = acquire_qinterrupt_lock(&cpu->lock);
+    arch_disable_interrupts();
 
-    thread_t* curr = cpu->curr_thread;
+    per_cpu_data_t* cpu = smp_current_core();
+    thread_t* curr      = cpu->curr_thread;
     if (curr && curr != cpu->idle_thread) {
         curr->state            = THREAD_BLOCKED;
         cpu->reschedule_needed = true;
     }
 
-    release_qinterrupt_lock(&cpu->lock, flags);
     schedule();
+    arch_enable_interrupts();
 }
 
 void scheduler_unblock(thread_t* t) {
@@ -628,8 +626,7 @@ void scheduler_unblock(thread_t* t) {
     }
 
     per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
-
-    size_t flags = acquire_qinterrupt_lock(&cpu->lock);
+    size_t flags        = acquire_qinterrupt_lock(&cpu->lock);
 
     if (t->state != THREAD_BLOCKED && t->state != THREAD_SLEEPING) {
         release_qinterrupt_lock(&cpu->lock, flags);
@@ -655,10 +652,10 @@ void scheduler_unblock(thread_t* t) {
 }
 
 void scheduler_yield(void) {
-    per_cpu_data_t* cpu = smp_current_core();
-    size_t flags        = acquire_qinterrupt_lock(&cpu->lock);
+    arch_disable_interrupts();
 
-    thread_t* curr = cpu->curr_thread;
+    per_cpu_data_t* cpu = smp_current_core();
+    thread_t* curr      = cpu->curr_thread;
     if (curr && curr != cpu->idle_thread) {
         if (curr->sched_class->yield_task) {
             curr->sched_class->yield_task(cpu, curr);
@@ -667,7 +664,7 @@ void scheduler_yield(void) {
         cpu->reschedule_needed = true;
     }
 
-    release_qinterrupt_lock(&cpu->lock, flags);
+    arch_enable_interrupts();
     schedule();
 }
 
@@ -675,27 +672,52 @@ static void sleep_callback(void* ctx) {
     scheduler_unblock(ctx);
 }
 
-void scheduler_sleep(size_t ms) {
+int scheduler_sleep(int64_t timeout_ms) {
+    if (timeout_ms < 0) {
+        return -EINVAL;
+    }
+
+    if (timeout_ms == 0) {
+        scheduler_yield();
+        return 0;
+    }
+
+    arch_disable_interrupts();
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* curr      = cpu->curr_thread;
 
     if (!curr || curr == cpu->idle_thread) {
-        return;
+        arch_enable_interrupts();
+        return -EPERM;
     }
 
-    arch_disable_interrupts();
-    curr->state = THREAD_SLEEPING;
+    acquire_qspinlock(&cpu->lock);
 
-    timer_event_t event;
-    timer_arm(cpu->timer_manager, &event, ms * 1000000, 0, sleep_callback, curr);
+    curr->state            = THREAD_SLEEPING;
+    cpu->reschedule_needed = true;
 
+    timer_arm_oneshot(cpu->timer_manager, &curr->sleep_timer, timeout_ms, sleep_callback, curr);
     release_qspinlock(&cpu->lock);
-    scheduler_yield();
+
+    schedule();
+
+    arch_disable_interrupts();
+
+    cpu                = smp_current_core();
+    bool woke_up_early = timer_cancel(&curr->sleep_timer);
+
+    arch_enable_interrupts();
+
+    if (woke_up_early) {
+        return -EINTR;
+    }
+
+    return 0;
 }
 
-void scheduler_renice(thread_t* t, int nice) {
+int scheduler_renice(thread_t* t, int nice) {
     if (!t) {
-        return;
+        return -EINVAL;
     }
 
     if (nice < -20) {
@@ -707,7 +729,7 @@ void scheduler_renice(thread_t* t, int nice) {
     }
 
     if (!t->sched_class || !t->sched_class->renice_task) {
-        return;
+        return -EINVAL;
     }
 
     per_cpu_data_t* cpu = nullptr;
@@ -717,7 +739,7 @@ void scheduler_renice(thread_t* t, int nice) {
         uint32_t expected_cpu = *(volatile uint32_t*)&t->assigned_cpu;
         if (expected_cpu == UINT32_MAX) {
             t->sched_class->renice_task(nullptr, t, nice);
-            return;
+            return 0;
         }
 
         cpu   = smp_get_core(expected_cpu);
@@ -738,7 +760,6 @@ void scheduler_renice(thread_t* t, int nice) {
     }
 
     t->sched_class->renice_task(cpu, t, nice);
-
     if (was_on_rq) {
         t->sched_class->enqueue_task(cpu, t);
 
@@ -752,6 +773,7 @@ void scheduler_renice(thread_t* t, int nice) {
     }
 
     release_qinterrupt_lock(&cpu->lock, flags);
+    return 0;
 }
 
 bool scheduler_is_initialized(void) {
@@ -764,7 +786,6 @@ process_t* get_kernel_process(void) {
 
 void preempt_disable(void) {
     per_cpu_data_t* cpu = smp_current_core();
-
     if (cpu && cpu->curr_thread) {
         cpu->curr_thread->preempt_count++;
     }
