@@ -45,7 +45,13 @@ void user_start() {
     size_t len      = strlen(str) + 1;
 
     ipc_test();
+
     write(1, str, len);
+
+    uint64_t ret = fork();
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Hello from Process (0x%lx)\n", ret);
+    write(1, buf, sizeof(buf));
 
     while (true);
 }

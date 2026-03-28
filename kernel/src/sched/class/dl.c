@@ -28,7 +28,7 @@ static void dl_init_task(thread_t* t, va_list args) {
 }
 
 static void dl_renice_task(per_cpu_data_t*, thread_t* t, int) {
-    KLOG_WARN("SCHED: Ignoring renice on Deadline task TID=%d\n", t->tid);
+    KLOG_WARN("SCHED: Ignoring renice on Deadline task KOID=%d\n", t->kobj.koid);
 }
 
 static void dl_enqueue_task(per_cpu_data_t* rq, thread_t* t) {

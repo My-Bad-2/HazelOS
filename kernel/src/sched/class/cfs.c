@@ -110,7 +110,7 @@ static void cfs_enqueue_task(per_cpu_data_t* rq, thread_t* t) {
         thread_t* entry = rb_entry(parent, thread_t, rb_node);
 
         if (CFS_VRUNTIME(t) < CFS_VRUNTIME(entry) ||
-            (CFS_VRUNTIME(t) == CFS_VRUNTIME(entry) && t->tid < entry->tid)) {
+            (CFS_VRUNTIME(t) == CFS_VRUNTIME(entry) && t->kobj.koid < entry->kobj.koid)) {
             link = &parent->rb_left;
         } else {
             link        = &parent->rb_right;

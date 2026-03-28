@@ -23,6 +23,6 @@ int munmmap(void* addr, size_t length) {
     return (int)syscall(SYS_MUNMAP, (long)addr, (long)length);
 }
 
-int fork(void) {
-    return syscall(SYS_FORK, 0);
+uint64_t fork(void) {
+    return (uint64_t)syscall(SYS_FORK, 0);
 }

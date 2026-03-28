@@ -1,4 +1,3 @@
-#include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
@@ -8,6 +7,7 @@
 #include "cpu/syscalls.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
+#include "libs/kobject.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
@@ -18,43 +18,13 @@
 #include "sched/scheduler.h"
 #include "sched/wait.h"
 
-#define INIT_CNODE_CAPACITY 1024
-
 static kmem_cache_t* thread_cache         = nullptr;
 static struct dlist_head dead_thread_list = DLIST_INIT(dead_thread_list);
+static struct wait_queue reaper_wait_queue;
 static qspinlock_t dead_thread_lock;
 
-static struct wait_queue reaper_wait_queue;
-
 static void process_insert_thread(process_t* p, thread_t* t) {
-    if (!p || !t) {
-        return;
-    }
-
     dlist_add_tail(&t->process_node, &p->thread_list);
-}
-
-static void bootstrap_init_thread_cspace(thread_t* init_thread) {
-    size_t l1_capacity = 1024;
-    size_t slots_size  = l1_capacity * sizeof(struct capability);
-
-    struct capability* slots_mem = (struct capability*)kmalloc(slots_size);
-    struct cnode* root_cnode     = (struct cnode*)kmalloc(0x1000);
-
-    uint64_t root_prefix = 0;
-    cnode_init(root_cnode, slots_mem, l1_capacity, root_prefix, CSPACE_L1_SHIFT);
-
-    init_thread->root_cnode = root_cnode;
-
-    uint64_t self_cap_id;
-    struct capability* self_cap = cap_alloc(root_cnode, &self_cap_id);
-
-    acquire_qspinlock(&self_cap->lock);
-    atomic_store_explicit(&self_cap->object_ptr, (uintptr_t)root_cnode, memory_order_release);
-    self_cap->type   = CAP_TYPE_CNODE;
-    self_cap->rights = RIGHT_ALL;
-    self_cap->badge  = 0;
-    release_qspinlock(&self_cap->lock);
 }
 
 static thread_t* thread_create_internal(
@@ -75,14 +45,17 @@ static thread_t* thread_create_internal(
     }
 
     memset(t, 0, sizeof(thread_t));
-    memcpy(t->name, name, sizeof(t->name));
 
-    t->tid          = (int)handle_alloc(&tid_handle_tbl, t, 0);
+    kref_init(&t->kobj, CAP_TYPE_THREAD);
     t->owner        = proc;
     t->state        = THREAD_READY;
     t->assigned_cpu = UINT32_MAX;
     t->policy       = policy;
-    bootstrap_init_thread_cspace(t);
+#if KERNEL_DEBUG
+    strncpy(t->name, name, sizeof(t->name) - 1);
+#else
+    (void)name;
+#endif
 
     dlist_init(&t->process_node);
     dlist_init(&t->wait_node);
@@ -90,7 +63,6 @@ static thread_t* thread_create_internal(
 
     struct sched_class* sc = get_sched_class(policy);
     t->sched_class         = sc;
-
     if (sc->init_task) {
         sc->init_task(t, arg);
     }
@@ -129,9 +101,13 @@ thread_t* thread_create(
     return t;
 }
 
-thread_t*
-thread_clone(process_t* target_proc, thread_t* parent, struct syscall_regs* tf, void* child_stack) {
-    if (!target_proc || !parent || !tf) {
+thread_t* thread_clone(
+    process_t* target_proc,
+    thread_t* parent,
+    struct syscall_regs* regs,
+    void* child_stack
+) {
+    if (!target_proc || !parent || !regs) {
         return nullptr;
     }
 
@@ -142,21 +118,20 @@ thread_clone(process_t* target_proc, thread_t* parent, struct syscall_regs* tf, 
 
     memset(child, 0, sizeof(thread_t));
 
-    child->tid           = (int)handle_alloc(&tid_handle_tbl, child, 0);
+    kref_init(&child->kobj, CAP_TYPE_THREAD);
     child->owner         = target_proc;
     child->assigned_cpu  = UINT32_MAX;
     child->state         = THREAD_READY;
     child->policy        = parent->policy;
     child->sched_class   = parent->sched_class;
     child->affinity_mask = parent->affinity_mask;
-    child->root_cnode    = kmalloc(sizeof(struct cnode));
-
+#if KERNEL_DEBUG
     strncpy(child->name, parent->name, 31);
+#endif
 
     dlist_init(&child->process_node);
     dlist_init(&child->wait_node);
     wait_queue_init(&child->join_queue);
-
     memcpy(&child->sched, &parent->sched, sizeof(sched_entity_t));
 
     child->kernel_stack = vmalloc(
@@ -167,16 +142,13 @@ thread_clone(process_t* target_proc, thread_t* parent, struct syscall_regs* tf, 
         CACHE_WRITE_BACK,
         PAGE_SIZE_SMALL
     );
-
     if (!child->kernel_stack) {
-        handle_free(&tid_handle_tbl, (handle_t)child->tid);
         kmem_cache_free(thread_cache, child);
         return nullptr;
     }
 
     child->kernel_stack_top = (uintptr_t)child->kernel_stack + KSTACK_SIZE;
-
-    arch_thread_clone(child, tf, child_stack);
+    arch_thread_clone(child, regs, child_stack);
 
     acquire_qspinlock(&target_proc->lock);
     process_insert_thread(target_proc, child);
@@ -186,57 +158,40 @@ thread_clone(process_t* target_proc, thread_t* parent, struct syscall_regs* tf, 
     return child;
 }
 
-static void reaper_enqueue_dead_thread(thread_t* t) {
-    if (!t) {
-        return;
+uint64_t thread_vclone(
+    thread_t* parent,
+    struct syscall_regs* tf,
+    uint64_t* parent_proc_cap_id,
+    uint64_t* parent_cnode_cap_id
+) {
+    process_t* child_proc =
+        process_clone(parent->owner, CLONE_VM, parent_proc_cap_id, parent_cnode_cap_id);
+    if (!child_proc) {
+        return 0;
     }
 
-    acquire_qspinlock(&dead_thread_lock);
-    dlist_add_tail(&t->wait_node, &dead_thread_list);
-    release_qspinlock(&dead_thread_lock);
-
-    wait_queue_wake_up_all(&reaper_wait_queue);
-}
-
-void thread_destroy(thread_t* t) {
-    if (!t) {
-        return;
+    thread_t* child_thread = thread_clone(child_proc, parent, tf, nullptr);
+    if (!child_thread) {
+        kref_put(&child_proc->kobj, process_release);
+        return 0;
     }
 
-    scheduler_remove_thread(t);
+    scheduler_add_thread(child_thread);
 
-    wait_queue_wake_up_all(&t->join_queue);
+    while (true) {
+        thread_sleep_prepare(&child_proc->vfork_wait_queue);
 
-    if (t->owner) {
-        acquire_qspinlock(&t->owner->lock);
-
-        if (!dlist_empty(&t->process_node)) {
-            dlist_del(&t->process_node);
-            dlist_init(&t->process_node);
-            t->owner->thread_count--;
+        if (child_proc->state == PROCESS_DEAD || child_proc->state == PROCESS_ZOMBIE ||
+            child_proc->map.arch.phys_root != parent->owner->map.arch.phys_root) {
+            thread_sleep_finish(&child_proc->vfork_wait_queue);
+            break;
         }
 
-        release_qspinlock(&t->owner->lock);
-    }
-
-    if (t == smp_current_core()->curr_thread) {
-        t->state = THREAD_TERMINATED;
-        reaper_enqueue_dead_thread(t);
         scheduler_yield();
-        PANIC("THREAD: execution continue after self-destruction");
+        thread_sleep_finish(&child_proc->vfork_wait_queue);
     }
 
-    arch_thread_destroy(t);
-    if (t->kernel_stack) {
-        vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
-    }
-
-    if (t->fpu_buffer) {
-        kfree(t->fpu_buffer);
-    }
-
-    handle_free(&tid_handle_tbl, (handle_t)t->tid);
-    kmem_cache_free(thread_cache, t);
+    return child_proc->kobj.koid;
 }
 
 void thread_exit(int exit_code) {
@@ -264,9 +219,13 @@ void thread_exit(int exit_code) {
 
     curr->state = THREAD_TERMINATED;
     scheduler_remove_thread(curr);
-    reaper_enqueue_dead_thread(curr);
-    scheduler_yield();
 
+    acquire_qspinlock(&dead_thread_lock);
+    dlist_add_tail(&curr->wait_node, &dead_thread_list);
+    release_qspinlock(&dead_thread_lock);
+    wait_queue_wake_up_all(&reaper_wait_queue);
+
+    scheduler_yield();
     PANIC("THREAD: Escaped the afterlife");
 }
 
@@ -291,6 +250,23 @@ void thread_join(thread_t* t, int* exit_code) {
     if (exit_code) {
         *exit_code = t->exit_code;
     }
+
+    kref_put(&t->kobj, thread_release);
+}
+
+void thread_release(struct kobject* obj) {
+    if (!obj) {
+        return;
+    }
+
+    thread_t* t = kref_entry(obj, struct thread, kobj);
+
+    arch_thread_destroy(t);
+    if (t->kernel_stack) {
+        vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
+    }
+
+    kmem_cache_free(thread_cache, t);
 }
 
 void reaper_task_entry(void*) {
@@ -301,62 +277,22 @@ void reaper_task_entry(void*) {
 
         acquire_qspinlock(&dead_thread_lock);
         bool has_work = !dlist_empty(&dead_thread_list);
-        release_qspinlock(&dead_thread_lock);
 
         if (!has_work) {
+            release_qspinlock(&dead_thread_lock);
             scheduler_yield();
             thread_sleep_finish(&reaper_wait_queue);
             continue;
         }
 
         thread_sleep_finish(&reaper_wait_queue);
-        acquire_qspinlock(&dead_thread_lock);
-
-        if (dlist_empty(&dead_thread_list)) {
-            release_qspinlock(&dead_thread_lock);
-            continue;
-        }
 
         struct dlist_head* node = dead_thread_list.next;
         dlist_del(node);
-
         release_qspinlock(&dead_thread_lock);
 
         thread_t* dead_thread = dlist_entry(node, thread_t, wait_node);
-        KLOG_DEBUG("REAPER: cleaning up dead thread tid=%u\n", dead_thread->tid);
 
-        arch_thread_destroy(dead_thread);
-        handle_free(&tid_handle_tbl, (handle_t)dead_thread->tid);
-        kmem_cache_free(thread_cache, dead_thread);
+        kref_put(&dead_thread->kobj, thread_release);
     }
-}
-
-int thread_vclone(thread_t* parent, struct syscall_regs* tf) {
-    process_t* child_proc = process_clone(parent->owner, CLONE_VM);
-    if (!child_proc) {
-        return -ENOMEM;
-    }
-
-    thread_t* child_thread = thread_clone(child_proc, parent, tf, nullptr);
-    if (!child_thread) {
-        process_destroy(child_proc);
-        return -ENOMEM;
-    }
-
-    scheduler_add_thread(child_thread);
-
-    while (true) {
-        thread_sleep_prepare(&child_proc->vfork_wait_queue);
-
-        if (child_proc->state == PROCESS_DEAD || child_proc->state == PROCESS_ZOMBIE ||
-            child_proc->map.arch.phys_root != parent->owner->map.arch.phys_root) {
-            thread_sleep_finish(&child_proc->vfork_wait_queue);
-            break;
-        }
-
-        scheduler_yield();
-        thread_sleep_finish(&child_proc->vfork_wait_queue);
-    }
-
-    return child_proc->pid;
 }

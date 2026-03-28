@@ -5,9 +5,14 @@
 
 #include "compiler.h"
 #include "core/errors.h"
+#include "libs/kobject.h"
 #include "libs/slist.h"
 #include "libs/spinlock.h"
+#include "memory/heap.h"
 #include "sched/ipc.h"
+#include "sched/process.h"
+
+static kmem_cache_t* cnode_cache = nullptr;
 
 static void cap_object_ref(uint8_t type, void* obj) {
     if (!obj) {
@@ -25,7 +30,12 @@ static void cap_object_ref(uint8_t type, void* obj) {
             kref_get(&((struct ipc_notification*)obj)->refcount);
             break;
         case CAP_TYPE_REPLY:
-            // TODO: kref_get to thread struct
+        case CAP_TYPE_THREAD:
+            kref_get(&((struct thread*)obj)->kobj);
+            break;
+        case CAP_TYPE_PROCESS:
+            kref_get(&((struct process*)obj)->kobj);
+            break;
         default:
             break;
     }
@@ -47,7 +57,12 @@ static void cap_object_unref(uint8_t type, void* obj) {
             kref_put(&((struct ipc_notification*)obj)->refcount, ipc_notification_release);
             break;
         case CAP_TYPE_REPLY:
-            // TODO: kref_put to thread struct
+        case CAP_TYPE_THREAD:
+            kref_put(&((struct thread*)obj)->kobj, thread_release);
+            break;
+        case CAP_TYPE_PROCESS:
+            kref_put(&((struct process*)obj)->kobj, process_release);
+            break;
         default:
             break;
     }
@@ -79,6 +94,72 @@ void cnode_init(
         create_qspinlock(&cap->lock);
         slist_push(&cap->free_node, &node->free_list);
     }
+}
+
+struct cnode* create_cspace(void) {
+    const size_t l1_capacity = 1024;
+    size_t slots_size        = l1_capacity * sizeof(struct capability);
+
+    if (!cnode_cache) {
+        cnode_cache = kmem_cache_create(
+            "cnode_cache",
+            sizeof(struct cnode),
+            _Alignof(struct cnode),
+            0,
+            nullptr
+        );
+    }
+
+    struct cnode* root_cnode = (struct cnode*)kmem_cache_alloc(cnode_cache);
+    if (unlikely(!root_cnode)) {
+        return nullptr;
+    }
+
+    struct capability* slots_mem = (struct capability*)kmalloc(slots_size);
+    if (unlikely(!slots_mem)) {
+        kfree(root_cnode);
+        return nullptr;
+    }
+
+    cnode_init(root_cnode, slots_mem, l1_capacity, 0, CSPACE_L1_SHIFT);
+
+    // Burn Slot 0 (the NULL Capability)
+    uint64_t burned_id;
+    cap_alloc(root_cnode, &burned_id);
+
+    uint64_t self_cap_id;
+    struct capability* self_cap = cap_alloc(root_cnode, &self_cap_id);
+
+    acquire_qspinlock(&self_cap->lock);
+    atomic_store_explicit(&self_cap->object_ptr, (uintptr_t)root_cnode, memory_order_release);
+    self_cap->type   = CAP_TYPE_CNODE;
+    self_cap->rights = RIGHT_ALL;
+    self_cap->badge  = 0;
+    release_qspinlock(&self_cap->lock);
+
+    return root_cnode;
+}
+
+void destroy_cspace(struct cnode* root) {
+    if (!root) {
+        return;
+    }
+
+    for (size_t i = 1; i < root->capacity; ++i) {
+        struct capability* cap = &root->slots[i];
+
+        uint8_t type = cap->type;
+
+        if (type != CAP_TYPE_NONE && type != CAP_TYPE_WEAK) {
+            uint8_t gen     = atomic_load_explicit(&cap->generation, memory_order_relaxed);
+            uint64_t cap_id = ((uint64_t)gen << 56) | root->path_prefix | (i << root->index_shift);
+
+            cap_close(root, cap_id);
+        }
+    }
+
+    kfree(root->slots);
+    kmem_cache_free(cnode_cache, root);
 }
 
 struct capability* cap_alloc(struct cnode* node, uint64_t* out_cap_id) {

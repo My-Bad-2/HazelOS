@@ -17,23 +17,27 @@ struct koid_allocator {
 };
 
 struct kobject {
+    uint64_t koid;
     atomic_int ref_count;
 };
 
 void koid_init(void);
+struct koid_allocator* koid_get_current_allocator(void);
 uint64_t generate_koid(struct koid_allocator* core, uint8_t object_type);
 
-static inline void kref_init(struct kobject* kfref) {
-    atomic_init(&kfref->ref_count, 1);
+static inline void kref_init(struct kobject* obj, uint8_t type) {
+    obj->koid = generate_koid(koid_get_current_allocator(), type);
+
+    atomic_init(&obj->ref_count, 1);
 }
 
-static inline void kref_get(struct kobject* kref) {
-    atomic_fetch_add_explicit(&kref->ref_count, 1, memory_order_relaxed);
+static inline void kref_get(struct kobject* obj) {
+    atomic_fetch_add_explicit(&obj->ref_count, 1, memory_order_relaxed);
 }
 
-static inline int kref_put(struct kobject* kref, void (*release)(struct kobject* kref)) {
-    if (atomic_fetch_sub_explicit(&kref->ref_count, 1, memory_order_acq_rel) == 1) {
-        release(kref);
+static inline int kref_put(struct kobject* obj, void (*release)(struct kobject* kref)) {
+    if (atomic_fetch_sub_explicit(&obj->ref_count, 1, memory_order_acq_rel) == 1) {
+        release(obj);
         return 1;
     }
 

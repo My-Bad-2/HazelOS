@@ -44,7 +44,7 @@ void kernel_log_cont(const char* fmt, ...);
 
 #define PANIC(fmt, ...) kernel_panic(__FILE_NAME__, __LINE__, fmt, ##__VA_ARGS__)
 
-#if KERNEL_TEST
+#if KERNEL_DEBUG
 #define ASSERT(exp)                          \
     if (!(exp)) {                            \
         PANIC("Assertion failed: %s", #exp); \

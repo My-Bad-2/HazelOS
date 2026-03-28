@@ -314,7 +314,7 @@ static void balance_load(void) {
         KLOG_INFO(
             "SCHED: cpu %zu stole TID %u from cpu %zu\n",
             this_cpu->cpu_idx,
-            victim->tid,
+            victim->kobj.koid,
             busiest_cpu->cpu_idx
         );
 
@@ -350,7 +350,7 @@ static bool sched_should_preempt(thread_t* new_task, thread_t* curr_task) {
 
 void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
     if (cpu->is_bsp) {
-        kernel_proc = process_create("kernel_proc", nullptr, true);
+        kernel_proc = process_create("kernel_proc", true);
 
         if (!kernel_proc) {
             PANIC("SCHED: failed to create kernel process\n");
@@ -409,7 +409,7 @@ void scheduler_add_thread(thread_t* t) {
 
     t->sched_class = get_sched_class(t->policy);
     if (!t->sched_class) {
-        PANIC("SCHED: Unsupported policy assigned to TID %u\n", t->tid);
+        PANIC("SCHED: Unsupported policy assigned to TID %u\n", t->kobj.koid);
     }
 
     update_thread_load(t);

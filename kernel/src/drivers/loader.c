@@ -127,7 +127,7 @@ thread_t* load_elf(void* address) {
         return nullptr;
     }
 
-    init_process = process_create("user_init", nullptr, false);
+    init_process = process_create("user_init", false);
     if (!init_process) {
         KLOG_ERROR("Loader: Failed to create process\n");
         return nullptr;

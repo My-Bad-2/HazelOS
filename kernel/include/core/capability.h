@@ -9,11 +9,12 @@
 
 #define CAP_TYPE_NONE         0
 #define CAP_TYPE_THREAD       1
-#define CAP_TYPE_CHANNEL      2
-#define CAP_TYPE_PORT_SET     3
-#define CAP_TYPE_NOTIFICATION 4
-#define CAP_TYPE_REPLY        5
-#define CAP_TYPE_CNODE        6
+#define CAP_TYPE_PROCESS      2
+#define CAP_TYPE_CHANNEL      3
+#define CAP_TYPE_PORT_SET     4
+#define CAP_TYPE_NOTIFICATION 5
+#define CAP_TYPE_REPLY        6
+#define CAP_TYPE_CNODE        7
 #define CAP_TYPE_WEAK         15
 
 #define RIGHT_READ         (1 << 0)
@@ -149,6 +150,8 @@ void cnode_init(
     uint64_t prefix,
     uint8_t shift
 );
+struct cnode* create_cspace(void);
+void destroy_cspace(struct cnode* root);
 struct capability* cap_alloc(struct cnode* node, uint64_t* out_cap_id);
 int cap_delegate(struct capability* src, struct capability* child, uint16_t reduced_rights);
 int cap_close(struct cnode* root, uint64_t cap_id);

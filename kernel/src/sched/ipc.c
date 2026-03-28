@@ -201,14 +201,14 @@ int sys_ipc_create_channel(uint64_t* cap_id_out) {
 
     ch1->header.type = OBJ_CHANNEL;
     dlist_init(&ch1->header.port_node);
-    kref_init(&ch1->refcount);
+    kref_init(&ch1->refcount, CAP_TYPE_CHANNEL);
     create_qspinlock(&ch1->lock);
     dlist_init(&ch1->blocked_senders);
     dlist_init(&ch1->blocked_receivers);
 
     ch2->header.type = OBJ_CHANNEL;
     dlist_init(&ch2->header.port_node);
-    kref_init(&ch1->refcount);
+    kref_init(&ch1->refcount, CAP_TYPE_CHANNEL);
     create_qspinlock(&ch2->lock);
     dlist_init(&ch2->blocked_senders);
     dlist_init(&ch2->blocked_receivers);
@@ -217,14 +217,14 @@ int sys_ipc_create_channel(uint64_t* cap_id_out) {
     ch2->peer = ch1;
 
     uint64_t cap1, cap2;
-    struct capability* c1 = cap_alloc(me->root_cnode, &cap1);
+    struct capability* c1 = cap_alloc(me->owner->root_cnode, &cap1);
     if (!c1) {
         return ERR_NO_MEM;
     }
 
-    struct capability* c2 = cap_alloc(me->root_cnode, &cap2);
+    struct capability* c2 = cap_alloc(me->owner->root_cnode, &cap2);
     if (!c2) {
-        cap_close(me->root_cnode, cap1);
+        cap_close(me->owner->root_cnode, cap1);
         kmem_cache_free(channel_cache, ch1);
         return ERR_NO_MEM;
     }
@@ -254,13 +254,13 @@ int sys_ipc_port_create(uint64_t* cap_id_out) {
     }
 
     memset(set, 0, sizeof(struct ipc_port_set));
-    kref_init(&set->refcount);
+    kref_init(&set->refcount, CAP_TYPE_PORT_SET);
     create_qspinlock(&set->lock);
     dlist_init(&set->event_queue);
     dlist_init(&set->waiters);
 
     uint64_t cap         = 0;
-    struct capability* c = cap_alloc(me->root_cnode, &cap);
+    struct capability* c = cap_alloc(me->owner->root_cnode, &cap);
     if (!c) {
         kmem_cache_free(port_cache, set);
         return ERR_NO_MEM;
@@ -288,11 +288,11 @@ int sys_ipc_notification_create(uint64_t* cap_id_out) {
     memset(notif, 0, sizeof(struct ipc_notification));
     notif->header.type = OBJ_NOTIFICATION;
     dlist_init(&notif->header.port_node);
-    kref_init(&notif->refcount);
+    kref_init(&notif->refcount, CAP_TYPE_NOTIFICATION);
     create_qspinlock(&notif->lock);
 
     uint64_t cap         = 0;
-    struct capability* c = cap_alloc(me->root_cnode, &cap);
+    struct capability* c = cap_alloc(me->owner->root_cnode, &cap);
     if (!c) {
         kmem_cache_free(notification_cache, notif);
         return ERR_NO_MEM;
@@ -319,7 +319,7 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
 
     if (sender->ipc_state.is_doing_call) {
         uint64_t reply_id;
-        struct capability* reply_cap = cap_alloc(receiver->root_cnode, &reply_id);
+        struct capability* reply_cap = cap_alloc(receiver->owner->root_cnode, &reply_id);
 
         if (reply_cap) {
             atomic_store_explicit(&reply_cap->object_ptr, (uintptr_t)sender, memory_order_release);
@@ -370,14 +370,14 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
         }
 
         // Lookup sender's capability from the sender thread's cnode
-        struct capability* src_cap = cap_lookup(sender->root_cnode, src_cap_id, RIGHT_GRANT);
+        struct capability* src_cap = cap_lookup(sender->owner->root_cnode, src_cap_id, RIGHT_GRANT);
         if (!src_cap) {
             continue;
         }
 
         // Allocate the received capability into the receiver thread's cnode
         uint64_t dest_cap_id;
-        struct capability* dest_cap = cap_alloc(receiver->root_cnode, &dest_cap_id);
+        struct capability* dest_cap = cap_alloc(receiver->owner->root_cnode, &dest_cap_id);
         if (!dest_cap) {
             continue;
         }
@@ -393,7 +393,7 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
 
             transferred_caps++;
         } else {
-            cap_close(receiver->root_cnode, dest_cap_id);
+            cap_close(receiver->owner->root_cnode, dest_cap_id);
         }
     }
 
@@ -406,8 +406,8 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
 int sys_ipc_bind(uint64_t port_cap_id, uint64_t chan_cap_id, uint64_t key) {
     thread_t* me = smp_current_core()->curr_thread;
 
-    struct capability* p_cap = cap_lookup(me->root_cnode, port_cap_id, RIGHT_WRITE);
-    struct capability* c_cap = cap_lookup(me->root_cnode, chan_cap_id, RIGHT_WRITE);
+    struct capability* p_cap = cap_lookup(me->owner->root_cnode, port_cap_id, RIGHT_WRITE);
+    struct capability* c_cap = cap_lookup(me->owner->root_cnode, chan_cap_id, RIGHT_WRITE);
 
     if (!p_cap || !c_cap || p_cap->type != CAP_TYPE_PORT_SET || c_cap->type != CAP_TYPE_CHANNEL) {
         return ERR_INVALID_CAP;
@@ -455,7 +455,7 @@ int sys_ipc_bind(uint64_t port_cap_id, uint64_t chan_cap_id, uint64_t key) {
 int sys_ipc_notify(uint64_t notif_cap_id, uint64_t bits) {
     thread_t* me = smp_current_core()->curr_thread;
 
-    struct capability* cap = cap_lookup(me->root_cnode, notif_cap_id, RIGHT_SIGNAL);
+    struct capability* cap = cap_lookup(me->owner->root_cnode, notif_cap_id, RIGHT_SIGNAL);
     if (unlikely(!cap || cap->type != CAP_TYPE_NOTIFICATION)) {
         return ERR_INVALID_CAP;
     }
@@ -492,7 +492,7 @@ int sys_ipc_send(
         }
     }
 
-    struct capability* c_cap = cap_lookup(me->root_cnode, chan_cap_id, RIGHT_SEND);
+    struct capability* c_cap = cap_lookup(me->owner->root_cnode, chan_cap_id, RIGHT_SEND);
     if (unlikely(!c_cap)) {
         return ERR_INVALID_CAP;
     }
@@ -506,7 +506,7 @@ int sys_ipc_send(
         blocked_client->ipc_state.status = status;
         scheduler_unblock(blocked_client);
 
-        cap_close(me->root_cnode, chan_cap_id);
+        cap_close(me->owner->root_cnode, chan_cap_id);
 
         if (me->ipc_state.use_memory) {
             copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
@@ -622,7 +622,7 @@ int sys_ipc_recv(
         }
     }
 
-    struct capability* c_cap = cap_lookup(me->root_cnode, chan_cap_id, RIGHT_RECEIVE);
+    struct capability* c_cap = cap_lookup(me->owner->root_cnode, chan_cap_id, RIGHT_RECEIVE);
     if (unlikely(!c_cap || c_cap->type != CAP_TYPE_CHANNEL)) {
         return ERR_INVALID_CAP;
     }
@@ -714,7 +714,7 @@ int sys_ipc_call(
 int sys_ipc_wait(uint64_t port_cap_id, struct ipc_event* out_event, int timeout_ms) {
     thread_t* me = smp_current_core()->curr_thread;
 
-    struct capability* p_cap = cap_lookup(me->root_cnode, port_cap_id, RIGHT_WAIT);
+    struct capability* p_cap = cap_lookup(me->owner->root_cnode, port_cap_id, RIGHT_WAIT);
     if (unlikely(!p_cap || p_cap->type != CAP_TYPE_PORT_SET)) {
         return ERR_INVALID_CAP;
     }

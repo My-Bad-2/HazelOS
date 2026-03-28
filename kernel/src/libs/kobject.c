@@ -4,6 +4,7 @@
 
 #include "arch.h"
 #include "compiler.h"
+#include "cpu/smp.h"
 
 #define SHIFT_TYPE   56
 #define MASK_PAYLOAD 0x00fffffffffffffful  // 56 bits
@@ -15,9 +16,13 @@
 static _Atomic(uint64_t) global_koid_base = 0;
 static uint32_t boot_keys[4]              = {0};
 
+static struct koid_allocator early_bsp_allocator = {0, 0};
+
 static inline uint32_t integer_f(uint32_t right_half, uint32_t round_key) {
     uint32_t x = right_half ^ round_key;
 
+    // Borrowed from MurmurHash3's fmix32
+    // Original: https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp
     x ^= x >> 16;
     x *= 0x85ebca6b;
     x ^= x >> 13;
@@ -79,4 +84,12 @@ uint64_t generate_koid(struct koid_allocator* core, uint8_t object_type) {
     monotonic &= MASK_PAYLOAD;
     uint64_t payload = scramble_56bit(monotonic);
     return ((uint64_t)object_type << SHIFT_TYPE) | payload;
+}
+
+struct koid_allocator* koid_get_current_allocator(void) {
+    if (likely(smp_is_initialized())) {
+        return &smp_current_core()->allocator;
+    }
+
+    return &early_bsp_allocator;
 }

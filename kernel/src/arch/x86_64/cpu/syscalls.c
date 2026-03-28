@@ -56,7 +56,7 @@ typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_
 
 static uint64_t
 dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, struct syscall_regs* regs) {
-    struct cnode* root_cnode = cpu->curr_thread->root_cnode;
+    struct cnode* root_cnode = cpu->curr_thread->owner->root_cnode;
 
     if (unlikely(!root_cnode)) {
         return (uint64_t)ERR_DENIED;
@@ -199,13 +199,13 @@ static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process*
             );
             break;
         case SYS_FORK:
-            res = (uint64_t)sys_fork(regs);
+            res = sys_fork(regs);
             break;
         case SYS_VFORK:
-            res = (uint64_t)sys_vfork(regs);
+            res = sys_vfork(regs);
             break;
         case SYS_CLONE:
-            res = (uint64_t)sys_clone(regs->rdi, (void*)regs->rsi, regs);
+            res = sys_clone(regs->rdi, (void*)regs->rsi, regs);
             break;
         default:
             KLOG_DEBUG("Syscall %lu called!\n", regs->rax);

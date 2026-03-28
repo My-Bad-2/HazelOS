@@ -1,7 +1,6 @@
 #include <stdatomic.h>
 
 #include "drivers/timer.h"
-#include "libs/log.h"
 #include "libs/rb_tree.h"
 #include "sched/sched_class.h"
 

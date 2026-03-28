@@ -21,7 +21,7 @@ int64_t sys_write(uint32_t fd, const char* user_buf, size_t count) {
     }
 
     if (count > (1ul << 31)) {
-        return EINVAL;
+        return -EINVAL;
     }
 
     char buf[256];
@@ -50,55 +50,58 @@ int64_t sys_write(uint32_t fd, const char* user_buf, size_t count) {
     return (int64_t)bytes_processed;
 }
 
-int sys_fork(struct syscall_regs* tf) {
+uint64_t sys_fork(struct syscall_regs* tf) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* parent    = cpu->curr_thread;
+    uint64_t parent_cap_id, parent_cnode_id;
 
-    process_t* child_proc = process_clone(parent->owner, 0);
+    process_t* child_proc = process_clone(parent->owner, 0, &parent_cap_id, &parent_cnode_id);
     if (!child_proc) {
-        return -ENOMEM;
+        return 0;
     }
 
     thread_t* child_thread = thread_clone(child_proc, parent, tf, nullptr);
     if (!child_thread) {
-        process_destroy(child_proc);
-        return -ENOMEM;
+        kref_put(&child_proc->kobj, process_release);
+        return 0;
     }
 
     scheduler_add_thread(child_thread);
     scheduler_yield();
 
-    return child_proc->pid;
+    return child_proc->kobj.koid;
 }
 
-int sys_vfork(struct syscall_regs* tf) {
+uint64_t sys_vfork(struct syscall_regs* tf) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* parent    = cpu->curr_thread;
 
-    return thread_vclone(parent, tf);
+    uint64_t parent_cap_id, parent_cnode_id;
+    return thread_vclone(parent, tf, &parent_cap_id, &parent_cnode_id);
 }
 
-int sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf) {
+uint64_t sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf) {
     per_cpu_data_t* cpu     = smp_current_core();
     thread_t* parent_thread = cpu->curr_thread;
     process_t* target_proc  = parent_thread->owner;
+    uint64_t parent_cap_id, parent_cnode_id;
 
     if (!(flags & CLONE_THREAD)) {
-        target_proc = process_clone(parent_thread->owner, flags);
+        target_proc = process_clone(parent_thread->owner, flags, &parent_cap_id, &parent_cnode_id);
         if (!target_proc) {
-            return -ENOMEM;
+            return 0;
         }
     }
 
     thread_t* child_thread = thread_clone(target_proc, parent_thread, tf, child_stack);
     if (!child_stack) {
         if (!(flags & CLONE_THREAD)) {
-            process_destroy(target_proc);
+            kref_put(&target_proc->kobj, process_release);
         }
 
-        return -ENOMEM;
+        return 0;
     }
 
     scheduler_add_thread(child_thread);
-    return (flags & CLONE_THREAD) ? child_thread->tid : target_proc->pid;
+    return (flags & CLONE_THREAD) ? child_thread->kobj.koid : target_proc->kobj.koid;
 }

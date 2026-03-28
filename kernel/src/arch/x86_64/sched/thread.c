@@ -11,6 +11,7 @@
 #include "cpu/syscalls.h"
 #include "libs/log.h"
 #include "libs/math.h"
+#include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
@@ -42,8 +43,6 @@ struct fork_stack_layout {
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     if (!t) {
-        errno = EINVAL;
-        KLOG_WARN("THREAD: init called with nullptr thread\n");
         return false;
     }
 
@@ -53,7 +52,11 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         fpu_cache = kmem_cache_create("fpu_cache", fpu_size, 64, 0, nullptr);
     }
 
-    process_t* proc = t->owner;
+    t->fpu_buffer = kmem_cache_alloc(fpu_cache);
+    if (!t->fpu_buffer) {
+        return false;
+    }
+
     t->kernel_stack = vmalloc(
         kernel_space,
         nullptr,
@@ -62,15 +65,8 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         CACHE_WRITE_BACK,
         PAGE_SIZE_SMALL
     );
-
     if (!t->kernel_stack) {
-        return false;
-    }
-
-    t->fpu_buffer = kmem_cache_alloc(fpu_cache);
-
-    if (!t->fpu_buffer) {
-        vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
+        kmem_cache_free(fpu_cache, t->fpu_buffer);
         return false;
     }
 
@@ -79,6 +75,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
     t->kernel_stack_top = (uintptr_t)t->kernel_stack + KSTACK_SIZE;
     uintptr_t sp        = align_down(t->kernel_stack_top, 0x10);
 
+    process_t* proc = t->owner;
     if (proc->is_kernel) {
         sp -= sizeof(uint64_t);
         *((uint64_t*)sp) = (uint64_t)thread_exit;
@@ -160,11 +157,7 @@ void arch_thread_clone(thread_t* child, struct syscall_regs* tf, void* child_sta
     child->fpu_buffer = kmem_cache_alloc(fpu_cache);
 
     if (!child->fpu_buffer) {
-        PANIC(
-            "THREAD: fpu buffer allocation failed tid=%u pid=%u\n",
-            child->tid,
-            child->owner->pid
-        );
+        PANIC("THREAD: fpu buffer allocation failed\n");
     }
 
     thread_t* parent = smp_current_core()->curr_thread;
@@ -191,25 +184,13 @@ void arch_thread_clone(thread_t* child, struct syscall_regs* tf, void* child_sta
 }
 
 void thread_save_fpu(thread_t* t) {
-    if (!t) {
-        errno = EINVAL;
-        KLOG_WARN("THREAD: save_fpu called with nullptr thread\n");
-        return;
-    }
-
-    if (t->fpu_buffer) {
+    if (t && t->fpu_buffer) {
         simd_save(t->fpu_buffer);
     }
 }
 
 void thread_restore_fpu(thread_t* t) {
-    if (!t) {
-        errno = EINVAL;
-        KLOG_WARN("THREAD: restore_fpu called with nullptr thread\n");
-        return;
-    }
-
-    if (t->fpu_buffer) {
+    if (t && t->fpu_buffer) {
         simd_restore(t->fpu_buffer);
     }
 }
@@ -218,39 +199,38 @@ int thread_change_exec(
     thread_t* t,
     vm_space_t* new_space,
     uintptr_t entry_point,
-    uintptr_t new_rsp
+    uintptr_t new_rsp,
+    struct syscall_regs* regs
 ) {
-    if (!t || !t->owner) {
+    if (!t || !t->owner || !regs) {
         return -EINVAL;
     }
 
     process_t* proc      = t->owner;
     vm_space_t old_space = proc->space;
 
+    acquire_qspinlock(&proc->lock);
     proc->space = *new_space;
     proc->map   = *new_space->map;
+    release_qspinlock(&proc->lock);
 
     pagemap_load(&proc->map);
     vmm_destroy_space(&old_space);
 
-    interrupt_trapframe_t* tf = (interrupt_trapframe_t*)t->context_rsp;
+    regs->rip = entry_point;
+    regs->rsp = new_rsp;
 
-    tf->rip = entry_point;
-    tf->rsp = new_rsp;
-
-    tf->rax = 0;
-    tf->rbx = 0;
-    tf->rcx = 0;
-    tf->rdx = 0;
-    tf->rbp = 0;
-    tf->r8  = 0;
-    tf->r9  = 0;
-    tf->r10 = 0;
-    tf->r11 = 0;
-    tf->r12 = 0;
-    tf->r13 = 0;
-    tf->r14 = 0;
-    tf->r15 = 0;
+    regs->rax = 0;
+    regs->rbx = 0;
+    regs->rdx = 0;
+    regs->rbp = 0;
+    regs->r8  = 0;
+    regs->r9  = 0;
+    regs->r10 = 0;
+    regs->r12 = 0;
+    regs->r13 = 0;
+    regs->r14 = 0;
+    regs->r15 = 0;
 
     wait_queue_wake_up_all(&proc->vfork_wait_queue);
     return 0;
