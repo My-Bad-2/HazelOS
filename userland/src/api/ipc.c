@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "api/capability.h"
 #include "syscall.h"
 
 #ifdef __x86_64__
@@ -89,7 +90,22 @@ int ipc_port_create(uint64_t* port_cap_out) {
 }
 
 int ipc_close(uint64_t cap_id) {
-    return (int)syscall(SYS_IPC_CLOSE, (long)cap_id);
+    return cap_close(cap_id);
+}
+
+int ipc_notification_create(uint64_t* cap_id_out) {
+    uint64_t cap = 0;
+    int ret      = (int)syscall(SYS_IPC_NOTIFICATION_CREATE, (long)cap);
+
+    if (ret == 0 && cap_id_out) {
+        *cap_id_out = cap;
+    }
+
+    return ret;
+}
+
+int ipc_notify(uint64_t notif_cap_id, uint64_t bits) {
+    return (int)syscall(SYS_IPC_NOTIFY, (long)notif_cap_id, (long)bits);
 }
 
 int ipc_bind(uint64_t port_cap, uint64_t chan_cap, uint64_t key) {

@@ -3,16 +3,55 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#include "arch.h"
 #include "compiler.h"
 #include "core/errors.h"
-#include "libs/dlist.h"
 #include "libs/slist.h"
 #include "libs/spinlock.h"
-#include "memory/memory.h"
 #include "sched/ipc.h"
-#include "sched/process.h"
-#include "sched/syscalls.h"
+
+static void cap_object_ref(uint8_t type, void* obj) {
+    if (!obj) {
+        return;
+    }
+
+    switch (type) {
+        case CAP_TYPE_CHANNEL:
+            kref_get(&((struct ipc_channel*)obj)->refcount);
+            break;
+        case CAP_TYPE_PORT_SET:
+            kref_get(&((struct ipc_port_set*)obj)->refcount);
+            break;
+        case CAP_TYPE_NOTIFICATION:
+            kref_get(&((struct ipc_notification*)obj)->refcount);
+            break;
+        case CAP_TYPE_REPLY:
+            // TODO: kref_get to thread struct
+        default:
+            break;
+    }
+}
+
+static void cap_object_unref(uint8_t type, void* obj) {
+    if (!obj) {
+        return;
+    }
+
+    switch (type) {
+        case CAP_TYPE_CHANNEL:
+            kref_put(&((struct ipc_channel*)obj)->refcount, ipc_channel_release);
+            break;
+        case CAP_TYPE_PORT_SET:
+            kref_put(&((struct ipc_port_set*)obj)->refcount, ipc_port_set_release);
+            break;
+        case CAP_TYPE_NOTIFICATION:
+            kref_put(&((struct ipc_notification*)obj)->refcount, ipc_notification_release);
+            break;
+        case CAP_TYPE_REPLY:
+            // TODO: kref_put to thread struct
+        default:
+            break;
+    }
+}
 
 void cnode_init(
     struct cnode* node,
@@ -60,53 +99,40 @@ struct capability* cap_alloc(struct cnode* node, uint64_t* out_cap_id) {
         *out_cap_id = (gen << 56) | node->path_prefix | (index << node->index_shift);
     }
 
-    dlist_init(&cap->children);
-    dlist_init(&cap->sibling);
-    cap->parent = nullptr;
-
     return cap;
 }
 
-int cap_delegate(struct capability* parent, struct capability* child, uint16_t reduced_rights) {
-    if (unlikely(!parent || !child)) {
+int cap_delegate(struct capability* src, struct capability* child, uint16_t reduced_rights) {
+    if (unlikely(!src || !child)) {
         return ERR_INVALID_CAP;
     }
+
+    void* obj = (void*)atomic_load_explicit(&src->object_ptr, memory_order_relaxed);
 
     // Ephemeral Capability
     if (reduced_rights & RIGHT_WEAK) {
         acquire_qspinlock(&child->lock);
 
         // Point child to parent cap slot, not the object memory
-        atomic_store_explicit(&child->object_ptr, (uintptr_t)parent, memory_order_release);
+        atomic_store_explicit(&child->object_ptr, (uintptr_t)src, memory_order_release);
         child->type = CAP_TYPE_WEAK;
 
         // Badge stores the target's current generation for ABA check
-        child->badge  = atomic_load_explicit(&parent->generation, memory_order_relaxed);
-        child->rights = parent->rights & ~RIGHT_WEAK;
-        child->parent = nullptr;
+        child->badge  = atomic_load_explicit(&src->generation, memory_order_relaxed);
+        child->rights = src->rights & ~RIGHT_WEAK;
 
         release_qspinlock(&child->lock);
         return ERR_OK;
     }
 
-    size_t irq_state = acquire_qinterrupt_lock(&parent->lock);
+    cap_object_ref(src->type, obj);
+
     acquire_qspinlock(&child->lock);
-
-    atomic_store_explicit(
-        &child->object_ptr,
-        atomic_load_explicit(&parent->object_ptr, memory_order_relaxed),
-        memory_order_release
-    );
-
-    child->type   = parent->type;
-    child->rights = parent->rights & reduced_rights;
-    child->badge  = parent->badge;
-    child->parent = parent;
-
-    dlist_add_tail(&child->sibling, &parent->children);
-
+    atomic_store_explicit(&child->object_ptr, (uintptr_t)obj, memory_order_release);
+    child->type   = src->type;
+    child->rights = src->rights & reduced_rights;
+    child->badge  = src->badge;
     release_qspinlock(&child->lock);
-    release_qinterrupt_lock(&parent->lock, irq_state);
 
     return ERR_OK;
 }
@@ -124,235 +150,153 @@ static inline void cap_free_slot(struct cnode* pool, struct capability* cap) {
     release_qinterrupt_lock(&pool->lock, irq_state);
 }
 
-#define REVOKE_YIELD_THRESHOLD 32
+int cap_close(struct cnode* root, uint64_t cap_id) {
+    uint8_t expected_gen = (cap_id >> 56) & 0xff;
+    uint16_t l1_idx      = (cap_id >> CSPACE_L1_SHIFT) & CSPACE_L1_MASK;
+    uint16_t l2_idx      = (cap_id >> CSPACE_L2_SHIFT) & CSPACE_L2_MASK;
+    uint16_t l3_idx      = cap_id & CSPACE_L3_MASK;
 
-static bool cap_revoke_internal(
-    struct cnode* pool,
-    struct capability* target,
-    int* work_count,
-    size_t* irq_state
-) {
-    struct capability *child, *temp;
-
-    dlist_for_each_entry_safe(child, temp, &target->children, sibling) {
-        if (*work_count > REVOKE_YIELD_THRESHOLD) {
-            release_qinterrupt_lock(&target->lock, *irq_state);
-            arch_pause();
-
-            if (irq_state) {
-                *irq_state = acquire_qinterrupt_lock(&target->lock);
-            }
-
-            if (work_count) {
-                *work_count = 0;
-            }
-
-            return false;
-        }
-
-        acquire_qspinlock(&child->lock);
-
-        if (!dlist_empty(&child->children)) {
-            release_qspinlock(&child->lock);
-            while (!cap_revoke_internal(pool, child, work_count, irq_state));
-            acquire_qspinlock(&child->lock);
-        }
-
-        dlist_del_init(&child->sibling);
-        child->parent = nullptr;
-
-        atomic_fetch_add_explicit(&child->generation, 1, memory_order_release);
-        atomic_store_explicit(&child->object_ptr, 0, memory_order_release);
-        child->rights = 0;
-        child->badge  = 0;
-        child->type   = CAP_TYPE_NONE;
-
-        acquire_qspinlock(&pool->lock);
-        slist_push(&child->free_node, &pool->free_list);
-        release_qspinlock(&pool->lock);
-
-        if (work_count) {
-            (*work_count)++;
-        }
-
-        release_qspinlock(&child->lock);
-    }
-
-    return true;
-}
-
-void cap_revoke(struct cnode* pool, struct capability* target) {
-    if (unlikely(!target)) {
-        return;
-    }
-
-    int work_count   = 0;
-    size_t irq_state = acquire_qinterrupt_lock(&target->lock);
-    while (!cap_revoke_internal(pool, target, &work_count, &irq_state));
-    release_qinterrupt_lock(&target->lock, irq_state);
-}
-
-static inline size_t get_object_size(uint16_t type) {
-    switch (type) {
-        case CAP_TYPE_CHANNEL:
-            return sizeof(struct ipc_channel);
-        case CAP_TYPE_PORT_SET:
-            return sizeof(struct ipc_port_set);
-        case CAP_TYPE_THREAD:
-            return sizeof(thread_t);
-        case CAP_TYPE_FRAME:
-        case CAP_TYPE_VSPACE:
-            return PAGE_SIZE_SMALL;
-        case CAP_TYPE_SCHED_CONTEXT:
-            return sizeof(sched_entity_t);
-        default:
-            return 0;
-    }
-}
-
-int cap_retype(
-    struct capability* untyped_cap,
-    uint16_t target_type,
-    size_t count,
-    struct cnode* dest_cnode,
-    uint64_t* out_cap_ids
-) {
-    if (unlikely(!untyped_cap || untyped_cap->type != CAP_TYPE_UNTYPED)) {
+    struct cnode* target_cnode = root;
+    if (unlikely(l1_idx >= root->capacity)) {
         return ERR_INVALID_CAP;
     }
 
-    if (unlikely(!(untyped_cap->rights & RIGHT_WRITE))) {
-        return ERR_DENIED;
-    }
+    struct capability* target_cap = &root->slots[l1_idx];
 
-    size_t obj_size = get_object_size(target_type);
-    if (unlikely(obj_size == 0)) {
-        return ERR_INVALID_CAP;
-    }
-
-    struct untyped_node* mem_node =
-        (struct untyped_node*)atomic_load_explicit(&untyped_cap->object_ptr, memory_order_acquire);
-
-    if (unlikely(!mem_node)) {
-        return ERR_INVALID_CAP;
-    }
-
-    size_t total_alloc_size = obj_size * count;
-    size_t irq_state        = acquire_qinterrupt_lock(&mem_node->lock);
-
-    if (mem_node->free_offset + total_alloc_size > mem_node->total_size) {
-        release_qinterrupt_lock(&mem_node->lock, irq_state);
-        return ERR_NO_MEM;
-    }
-
-    uintptr_t current_paddr = mem_node->base_paddr + mem_node->free_offset;
-    mem_node->free_offset += total_alloc_size;
-    release_qinterrupt_lock(&mem_node->lock, irq_state);
-
-    irq_state = acquire_qinterrupt_lock(&untyped_cap->lock);
-
-    for (size_t i = 0; i < count; i++) {
-        uint64_t new_cap_id;
-        struct capability* new_cap = cap_alloc(dest_cnode, &new_cap_id);
-
-        if (unlikely(!new_cap)) {
-            release_qinterrupt_lock(&untyped_cap->lock, irq_state);
-            return ERR_NO_MEM;
+    if (target_cap->type == CAP_TYPE_CNODE) {
+        struct cnode* l2 =
+            (struct cnode*)atomic_load_explicit(&target_cap->object_ptr, memory_order_acquire);
+        if (unlikely(!l2 || l2_idx >= l2->capacity)) {
+            return ERR_INVALID_CAP;
         }
 
-        if (target_type == CAP_TYPE_CNODE) {
-            struct cnode* new_sub_cnode = (struct cnode*)current_paddr;
-            struct capability* slot_mem =
-                (struct capability*)(current_paddr + sizeof(struct cnode));
+        target_cnode = l2;
+        target_cap   = &l2->slots[l2_idx];
 
-            size_t requested_slots = (obj_size - sizeof(struct cnode)) / sizeof(struct capability);
-            uint64_t new_prefix    = new_cap_id & 0x00fffffffffffffful;
-
-            uint8_t new_shift = 0;
-            if (dest_cnode->index_shift == CSPACE_L1_SHIFT) {
-                new_shift = CSPACE_L2_SHIFT;
-            } else if (dest_cnode->index_shift == CSPACE_L2_SHIFT) {
-                new_shift = 0;
+        if (target_cap->type == CAP_TYPE_CNODE) {
+            struct cnode* l3 =
+                (struct cnode*)atomic_load_explicit(&target_cap->object_ptr, memory_order_acquire);
+            if (unlikely(!l3 || l3_idx >= l3->capacity)) {
+                return ERR_INVALID_CAP;
             }
 
-            cnode_init(new_sub_cnode, slot_mem, requested_slots, new_prefix, new_shift);
+            target_cnode = l3;
+            target_cap   = &l3->slots[l3_idx];
         }
-
-        acquire_qspinlock(&new_cap->lock);
-        atomic_store_explicit(&new_cap->object_ptr, current_paddr, memory_order_release);
-        new_cap->type   = target_type;
-        new_cap->rights = RIGHT_ALL;
-        new_cap->badge  = 0;
-        new_cap->parent = untyped_cap;
-
-        dlist_add_tail(&new_cap->sibling, &untyped_cap->children);
-        release_qspinlock(&new_cap->lock);
-
-        out_cap_ids[i] = new_cap_id;
-        current_paddr += obj_size;
     }
 
-    release_qinterrupt_lock(&untyped_cap->lock, irq_state);
+    uint8_t current_gen = atomic_load_explicit(&target_cap->generation, memory_order_acquire);
+    if (unlikely(current_gen != expected_gen)) {
+        return ERR_INVALID_CAP;
+    }
+
+    acquire_qspinlock(&target_cap->lock);
+
+    void* obj    = (void*)atomic_load_explicit(&target_cap->object_ptr, memory_order_acquire);
+    uint8_t type = target_cap->type;
+
+    atomic_fetch_add_explicit(&target_cap->generation, 1, memory_order_release);
+    atomic_store_explicit(&target_cap->object_ptr, 0, memory_order_release);
+    target_cap->rights = 0;
+    target_cap->badge  = 0;
+    target_cap->type   = CAP_TYPE_NONE;
+
+    release_qspinlock(&target_cap->lock);
+
+    size_t irq_state = acquire_qinterrupt_lock(&target_cnode->lock);
+    slist_push(&target_cap->free_node, &target_cnode->free_list);
+    release_qinterrupt_lock(&target_cnode->lock, irq_state);
+
+    if (type != CAP_TYPE_WEAK && type != CAP_TYPE_CNODE) {
+        cap_object_unref(type, obj);
+    }
+
     return ERR_OK;
 }
 
-static void sys_cap_revoke_untyped(struct cnode* pool, struct capability* untyped_cap) {
-    cap_revoke(pool, untyped_cap);
-
-    struct untyped_node* mem_node = (struct untyped_node*)(uintptr_t)
-        atomic_load_explicit(&untyped_cap->object_ptr, memory_order_acquire);
-
-    if (mem_node) {
-        size_t irq_state      = acquire_qinterrupt_lock(&mem_node->lock);
-        mem_node->free_offset = 0;
-        release_qinterrupt_lock(&mem_node->lock, irq_state);
-    }
-}
-
-int sys_cap_retype(
-    struct cnode* root_cnode,
-    uint64_t untyped_id,
-    uint16_t target_type,
-    size_t count,
-    uint64_t dest_cnode_id,
-    uint64_t* out_array
+int cap_move(
+    struct cnode* src_root,
+    uint64_t src_cap_id,
+    struct cnode* dest_root,
+    uint64_t* new_cap_id
 ) {
-    if (count == 0 || count > 1024) {
-        return ERR_NO_MEM;
-    }
+    uint8_t expected_gen = (src_cap_id >> 56) & 0xFF;
+    uint16_t l1_idx      = (src_cap_id >> CSPACE_L1_SHIFT) & CSPACE_L1_MASK;
+    uint16_t l2_idx      = (src_cap_id >> CSPACE_L2_SHIFT) & CSPACE_L2_MASK;
+    uint16_t l3_idx      = src_cap_id & CSPACE_L3_MASK;
 
-    struct capability* untyped_cap = cap_lookup(root_cnode, untyped_id, RIGHT_WRITE);
-    if (!untyped_cap) {
+    struct cnode* src_cnode = src_root;
+
+    if (unlikely(l1_idx >= src_root->capacity)) {
         return ERR_INVALID_CAP;
     }
 
-    struct capability* dest_cnode_cap = cap_lookup(root_cnode, dest_cnode_id, RIGHT_CNODE_MUTATE);
-    if (!dest_cnode_cap || dest_cnode_cap->type != CAP_TYPE_CNODE) {
-        return ERR_INVALID_CAP;
-    }
+    struct capability* src_cap = &src_root->slots[l1_idx];
+    if (src_cap->type == CAP_TYPE_CNODE) {
+        struct cnode* l2 =
+            (struct cnode*)atomic_load_explicit(&src_cap->object_ptr, memory_order_acquire);
 
-    struct cnode* dest_cnode =
-        (struct cnode*)atomic_load_explicit(&dest_cnode_cap->object_ptr, memory_order_acquire);
+        if (unlikely(!l2 || l2_idx >= l2->capacity)) {
+            return ERR_INVALID_CAP;
+        }
 
-    uint64_t new_ids[1024];
+        src_cnode = l2;
+        src_cap   = &l2->slots[l2_idx];
 
-    int status = cap_retype(untyped_cap, target_type, count, dest_cnode, new_ids);
-    if (status == ERR_OK && out_array) {
-        if (copy_to_user(out_array, new_ids, count * sizeof(uint64_t)) != 0) {
-            uint64_t mask = (dest_cnode->index_shift == 0) ? CSPACE_L3_MASK : CSPACE_L1_MASK;
+        if (src_cap->type == CAP_TYPE_CNODE) {
+            struct cnode* l3 =
+                (struct cnode*)atomic_load_explicit(&src_cap->object_ptr, memory_order_acquire);
 
-            for (size_t i = 0; i < count; ++i) {
-                uint16_t slot_idx               = (new_ids[i] >> dest_cnode->index_shift) & mask;
-                struct capability* orphaned_cap = &dest_cnode->slots[slot_idx];
-
-                cap_revoke(dest_cnode, orphaned_cap);
+            if (unlikely(!l3 || l3_idx >= l3->capacity)) {
+                return ERR_INVALID_CAP;
             }
 
-            return ERR_FAULT;
+            src_cnode = l3;
+            src_cap   = &l3->slots[l3_idx];
         }
     }
 
-    return status;
+    uint8_t current_gen = atomic_load_explicit(&src_cap->generation, memory_order_acquire);
+    if (unlikely(current_gen != expected_gen || (src_cap->rights & RIGHT_WRITE) != RIGHT_WRITE)) {
+        return ERR_INVALID_CAP;
+    }
+
+    uint64_t local_new_id;
+    struct capability* dest_cap = cap_alloc(dest_root, &local_new_id);
+    if (!dest_cap) {
+        return ERR_NO_MEM;
+    }
+
+    acquire_qspinlock(&src_cap->lock);
+    acquire_qspinlock(&dest_cap->lock);
+
+    atomic_store_explicit(
+        &dest_cap->object_ptr,
+        atomic_load_explicit(&src_cap->object_ptr, memory_order_relaxed),
+        memory_order_release
+    );
+    dest_cap->type   = src_cap->type;
+    dest_cap->rights = src_cap->rights;
+    dest_cap->badge  = src_cap->badge;
+
+    atomic_fetch_add_explicit(&src_cap->generation, 1, memory_order_release);
+    atomic_store_explicit(&src_cap->object_ptr, 0, memory_order_release);
+    src_cap->rights = 0;
+    src_cap->badge  = 0;
+    src_cap->type   = CAP_TYPE_NONE;
+
+    release_qspinlock(&dest_cap->lock);
+    release_qspinlock(&src_cap->lock);
+
+    size_t irq_state = acquire_qinterrupt_lock(&src_cnode->lock);
+    slist_push(&src_cap->free_node, &src_cnode->free_list);
+    release_qinterrupt_lock(&src_cnode->lock, irq_state);
+
+    if (new_cap_id) {
+        *new_cap_id = local_new_id;
+    }
+
+    return ERR_OK;
 }
 
 int sys_cap_delegate(
@@ -375,8 +319,8 @@ int sys_cap_delegate(
     struct cnode* dest_cnode =
         (struct cnode*)atomic_load_explicit(&dest_cnode_cap->object_ptr, memory_order_acquire);
 
-    uint64_t new_cap_id_;
-    struct capability* new_cap = cap_alloc(dest_cnode, &new_cap_id_);
+    uint64_t local_new_id;
+    struct capability* new_cap = cap_alloc(dest_cnode, &local_new_id);
     if (!new_cap) {
         return ERR_NO_MEM;
     }
@@ -385,26 +329,17 @@ int sys_cap_delegate(
 
     if (status == ERR_OK) {
         if (new_cap_id) {
-            *new_cap_id = new_cap_id_;
+            *new_cap_id = local_new_id;
         }
+    } else {
+        cap_close(root_cnode, local_new_id);
     }
 
     return status;
 }
 
-int sys_cap_revoke(struct cnode* root_cnode, uint64_t target_id) {
-    struct capability* target_cap = cap_lookup(root_cnode, target_id, RIGHT_READ);
-    if (!target_cap) {
-        return ERR_INVALID_CAP;
-    }
-
-    if (target_cap->type == CAP_TYPE_UNTYPED) {
-        sys_cap_revoke_untyped(root_cnode, target_cap);
-    } else {
-        cap_revoke(root_cnode, target_cap);
-    }
-
-    return ERR_OK;
+int sys_cap_close(struct cnode* root_cnode, uint64_t target_id) {
+    return cap_close(root_cnode, target_id);
 }
 
 int sys_cap_copy(
@@ -426,8 +361,8 @@ int sys_cap_copy(
     struct cnode* dest_cnode =
         (struct cnode*)atomic_load_explicit(&dest_cnode_cap->object_ptr, memory_order_acquire);
 
-    uint64_t new_cap_id_;
-    struct capability* new_cap = cap_alloc(dest_cnode, &new_cap_id_);
+    uint64_t local_new_id;
+    struct capability* new_cap = cap_alloc(dest_cnode, &local_new_id);
     if (!new_cap) {
         return ERR_NO_MEM;
     }
@@ -435,10 +370,10 @@ int sys_cap_copy(
     int status = cap_delegate(src_cap, new_cap, RIGHT_ALL);
     if (status == ERR_OK) {
         if (new_cap_id) {
-            *new_cap_id = new_cap_id_;
+            *new_cap_id = local_new_id;
         }
     } else {
-        cap_free_slot(dest_cnode, new_cap);
+        cap_close(dest_cnode, local_new_id);
     }
 
     return status;
@@ -465,8 +400,8 @@ int sys_cap_mint(
     struct cnode* dest_cnode =
         (struct cnode*)atomic_load_explicit(&dest_cnode_cap->object_ptr, memory_order_acquire);
 
-    uint64_t new_cap_id_;
-    struct capability* new_cap = cap_alloc(dest_cnode, &new_cap_id_);
+    uint64_t local_new_id;
+    struct capability* new_cap = cap_alloc(dest_cnode, &local_new_id);
     if (!new_cap) {
         return ERR_NO_MEM;
     }
@@ -474,12 +409,42 @@ int sys_cap_mint(
     int status = cap_delegate(src_cap, new_cap, new_rights);
     if (status == ERR_OK) {
         if (new_cap_id) {
-            *new_cap_id = new_cap_id_;
+            *new_cap_id = local_new_id;
         }
 
         new_cap->badge = badge_val;
     } else {
-        cap_free_slot(dest_cnode, new_cap);
+        cap_close(dest_cnode, local_new_id);
+    }
+
+    return status;
+}
+
+int sys_cap_alias(
+    struct cnode* root_cnode,
+    uint64_t src_cap_id,
+    uint16_t reduced_rights,
+    uint64_t* new_cap_id
+) {
+    struct capability* src_cap = cap_lookup(root_cnode, src_cap_id, RIGHT_GRANT);
+    if (unlikely(!src_cap)) {
+        return ERR_INVALID_CAP;
+    }
+
+    uint64_t local_new_id;
+    struct capability* new_cap = cap_alloc(root_cnode, &local_new_id);
+    if (unlikely(!new_cap)) {
+        return ERR_NO_MEM;
+    }
+
+    int status = cap_delegate(src_cap, new_cap, reduced_rights);
+
+    if (status == ERR_OK) {
+        if (new_cap_id) {
+            *new_cap_id = local_new_id;
+        }
+    } else {
+        cap_close(root_cnode, local_new_id);
     }
 
     return status;

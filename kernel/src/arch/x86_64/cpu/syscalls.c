@@ -4,6 +4,7 @@
 
 #include "compiler.h"
 #include "core/capability.h"
+#include "core/errors.h"
 #include "cpu/cpu.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
@@ -65,19 +66,7 @@ dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, struct syscall_reg
     uint64_t out_cap_id = 0;
 
     switch (operation) {
-        case 0x01:  // SYS_CAP_RETYPE
-        {
-            status = sys_cap_retype(
-                root_cnode,
-                regs->rdi,
-                regs->rsi,
-                regs->rdx,
-                regs->r10,
-                (uint64_t*)regs->r8
-            );
-            break;
-        }
-        case 0x02:  // SYS_CAP_DELEGATE
+        case 0x01:  // SYS_CAP_DELEGATE
         {
             status = sys_cap_delegate(root_cnode, regs->rdi, regs->rsi, regs->rdx, &out_cap_id);
 
@@ -87,12 +76,12 @@ dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, struct syscall_reg
 
             break;
         }
-        case 0x03:  // SYS_CAP_REVOKE
+        case 0x02:  // SYS_CAP_CLOSE
         {
-            status = sys_cap_revoke(root_cnode, regs->rdi);
+            status = sys_cap_close(root_cnode, regs->rdi);
             break;
         }
-        case 0x04:  // SYS_CAP_COPY
+        case 0x03:  // SYS_CAP_COPY
         {
             status = sys_cap_copy(root_cnode, regs->rdi, regs->rsi, &out_cap_id);
 
@@ -102,11 +91,20 @@ dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, struct syscall_reg
 
             break;
         }
-        case 0x05:  // SYS_CAP_MINT
+        case 0x04:  // SYS_CAP_MINT
         {
             status =
                 sys_cap_mint(root_cnode, regs->rdi, regs->rsi, regs->rdx, regs->r10, &out_cap_id);
 
+            if (status == ERR_OK) {
+                regs->rdx = out_cap_id;
+            }
+
+            break;
+        }
+        case 0x05:  // SYS_CAP_ALIAS
+        {
+            status = sys_cap_alias(root_cnode, regs->rdi, regs->rsi, &out_cap_id);
             if (status == ERR_OK) {
                 regs->rdx = out_cap_id;
             }
@@ -145,14 +143,17 @@ static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* re
         case 0x05:  // SYS_IPC_WAIT
             status = sys_ipc_wait(regs->rdi, (struct ipc_event*)regs->rsi, (int)regs->rdx);
             break;
-        case 0x06:  // SYS_IPC_CLOSE
-            status = sys_ipc_close(regs->rdi);
-            break;
-        case 0x07:  // SYS_IPC_SEND
+        case 0x06:  // SYS_IPC_SEND
             status = sys_ipc_send(regs->rdi, (struct ipc_msg_info*)regs->rsi, regs);
             break;
-        case 0x08:  // SYS_IPC_RECV
+        case 0x07:  // SYS_IPC_RECV
             status = sys_ipc_recv(regs->rdi, (struct ipc_msg_info*)regs->rsi, regs);
+            break;
+        case 0x08:  // SYS_IPC_NOTIFICATION_CREATE
+            status = sys_ipc_notification_create((uint64_t*)regs->rdi);
+            break;
+        case 0x09:  // SYS_IPC_NOTIFY
+            status = sys_ipc_notify(regs->rdi, regs->rsi);
             break;
         default:
             status = ERR_DENIED;
@@ -162,8 +163,59 @@ static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* re
     return (uint64_t)status;
 }
 
+static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process* proc) {
+    uint64_t res = 0;
+    switch (regs->rax) {
+        case SYS_WRITE:
+            // RDI = FD; RSI = Buffer Pointer; RDX = count
+            res = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
+            break;
+        case SYS_MMAP:
+            res = (uint64_t)sys_mmap(
+                &proc->space,
+                (void*)regs->rdi,
+                regs->rsi,
+                (int)regs->rdx,
+                (int)regs->r10,
+                (int)regs->r8,
+                (long)regs->r9
+            );
+            break;
+        case SYS_MPROTECT:
+            res = (uint64_t)sys_mprotect(&proc->space, (void*)regs->rdi, regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_MUNMAP:
+            res = (uint64_t)sys_munmap(&proc->space, (void*)regs->rdi, regs->rsi);
+            break;
+        case SYS_MREMAP:
+            res = (uint64_t)sys_mremap(
+                &proc->space,
+                (void*)regs->rdi,
+                regs->rsi,
+                regs->rdx,
+                (int)regs->r10,
+                (void*)regs->r8
+            );
+            break;
+        case SYS_FORK:
+            res = (uint64_t)sys_fork(regs);
+            break;
+        case SYS_VFORK:
+            res = (uint64_t)sys_vfork(regs);
+            break;
+        case SYS_CLONE:
+            res = (uint64_t)sys_clone(regs->rdi, (void*)regs->rsi, regs);
+            break;
+        default:
+            KLOG_DEBUG("Syscall %lu called!\n", regs->rax);
+            break;
+    }
+
+    return res;
+}
+
 // NOLINTNEXTLINE(misc-use-internal-linkage)
-uint64_t syscall_dispatcher(struct syscall_regs* regs, uint64_t num) {
+uint64_t syscall_dispatcher(struct syscall_regs* regs) {
     uint64_t res = 0;
 
     uint64_t sys_num   = regs->rax;
@@ -179,57 +231,10 @@ uint64_t syscall_dispatcher(struct syscall_regs* regs, uint64_t num) {
             break;
         case SYS_CATEGORY_IPC:
             res = dispatch_ipc_syscall(operation, regs);
-        default:
             break;
-    }
-
-    if (regs->rax < 450) {
-        switch (regs->rax) {
-            case SYS_WRITE:
-                // RDI = FD; RSI = Buffer Pointer; RDX = count
-                res = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
-                break;
-            case SYS_MMAP:
-                res = (uint64_t)sys_mmap(
-                    &proc->space,
-                    (void*)regs->rdi,
-                    regs->rsi,
-                    (int)regs->rdx,
-                    (int)regs->r10,
-                    (int)regs->r8,
-                    (long)regs->r9
-                );
-                break;
-            case SYS_MPROTECT:
-                res = (uint64_t)
-                    sys_mprotect(&proc->space, (void*)regs->rdi, regs->rsi, (int)regs->rdx);
-                break;
-            case SYS_MUNMAP:
-                res = (uint64_t)sys_munmap(&proc->space, (void*)regs->rdi, regs->rsi);
-                break;
-            case SYS_MREMAP:
-                res = (uint64_t)sys_mremap(
-                    &proc->space,
-                    (void*)regs->rdi,
-                    regs->rsi,
-                    regs->rdx,
-                    (int)regs->r10,
-                    (void*)regs->r8
-                );
-                break;
-            case SYS_FORK:
-                res = (uint64_t)sys_fork(regs);
-                break;
-            case SYS_VFORK:
-                res = (uint64_t)sys_vfork(regs);
-                break;
-            case SYS_CLONE:
-                res = (uint64_t)sys_clone(regs->rdi, (void*)regs->rsi, regs);
-                break;
-            default:
-                KLOG_DEBUG("Syscall %lu called!\n", num);
-                break;
-        }
+        default:
+            res = dispatch_misc_syscall(regs, proc);
+            break;
     }
 
     regs->rax = res;

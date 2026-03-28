@@ -4,9 +4,10 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#define IPC_EVENT_READABLE (1 << 0)
-#define IPC_EVENT_WRITABLE (1 << 1)
-#define IPC_EVENT_CLOSED   (1 << 2)
+#define IPC_EVENT_READABLE     (1 << 0)
+#define IPC_EVENT_WRITABLE     (1 << 1)
+#define IPC_EVENT_CLOSED       (1 << 2)
+#define IPC_EVENT_NOTIFICATION (1 << 3)
 
 struct ipc_msg_info {
     void* data_buffer;
@@ -17,11 +18,13 @@ struct ipc_msg_info {
     size_t caps_max;
     size_t caps_actual;
 
+    uint64_t reply_cap_id;
     uint32_t sender_badge;
 };
 
 struct ipc_event {
     uint64_t key;
+    uint64_t notification_bits;
     uint32_t events;
 };
 

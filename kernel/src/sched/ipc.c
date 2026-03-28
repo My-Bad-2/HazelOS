@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "arch.h"
 #include "compiler.h"
 #include "core/capability.h"
 #include "core/errors.h"
@@ -12,6 +13,8 @@
 #include "cpu/syscalls.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
+#include "libs/kref.h"
+#include "libs/slist.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "sched/process.h"
@@ -19,8 +22,9 @@
 #include "sched/syscalls.h"
 #include "uapi/ipc.h"
 
-static kmem_cache_t* channel_cache = nullptr;
-static kmem_cache_t* port_cache    = nullptr;
+static kmem_cache_t* channel_cache      = nullptr;
+static kmem_cache_t* port_cache         = nullptr;
+static kmem_cache_t* notification_cache = nullptr;
 
 extern int copy_between_spaces(
     process_t* dest_proc,
@@ -46,61 +50,81 @@ void ipc_init(void) {
         0,
         nullptr
     );
+
+    notification_cache = kmem_cache_create(
+        "notif_cache",
+        sizeof(struct ipc_notification),
+        _Alignof(struct ipc_notification),
+        0,
+        nullptr
+    );
 }
 
-static void sys_ipc_notify_internal(struct ipc_channel* dest) {
-    struct ipc_port_set* set = dest->wait_set;
+static void sys_ipc_notify_internal(struct ipc_port_set* set, struct ipc_object_header* obj) {
     if (!set) {
         return;
     }
 
-    acquire_qspinlock(&set->header.lock);
+    acquire_qspinlock(&set->lock);
 
-    if (!dest->is_in_port_set) {
-        dest->is_in_port_set = true;
-        dlist_add_tail(&dest->port_node, &set->event_queue);
+    if (!obj->is_in_port_set) {
+        obj->is_in_port_set = true;
+        dlist_add_tail(&obj->port_node, &set->event_queue);
 
-        // Wake up one waiting thread
         if (!dlist_empty(&set->waiters)) {
             struct dlist_head* first = set->waiters.next;
-            thread_t* t              = dlist_entry(first, thread_t, wait_node);
+
+            thread_t* t = dlist_entry(first, thread_t, wait_node);
             dlist_del(first);
             scheduler_unblock(t);
         }
     }
 
-    release_qspinlock(&set->header.lock);
+    release_qspinlock(&set->lock);
 }
 
-static void destroy_channel(struct ipc_channel* chan) {
-    if (!chan) {
-        return;
-    }
+void ipc_channel_release(struct kref* ref) {
+    struct ipc_channel* chan = kref_entry(ref, struct ipc_channel, refcount);
 
-    if (chan->peer) {
-        acquire_qspinlock(&chan->peer->header.lock);
-        chan->peer->peer        = nullptr;
-        chan->peer->peer_closed = true;
+    acquire_qspinlock(&chan->lock);
 
-        // Wake up anyone blocked waiting for the dead peer
+retry_release:
+    struct ipc_channel* peer = chan->peer;
+
+    if (peer) {
+        if (chan < peer) {
+            acquire_qspinlock(&peer->lock);
+        } else {
+            if (!try_acquire_qspinlock(&peer->lock)) {
+                release_qspinlock(&chan->lock);
+                arch_pause();
+                acquire_qspinlock(&chan->lock);
+                goto retry_release;
+            }
+        }
+
+        peer->peer        = nullptr;
+        peer->peer_closed = true;
+
         thread_t *t, *n;
-        dlist_for_each_entry_safe(t, n, &chan->peer->blocked_senders, wait_node) {
+        dlist_for_each_entry_safe(t, n, &peer->blocked_senders, wait_node) {
             dlist_del(&t->wait_node);
             t->ipc_state.status = ERR_FAULT;
             scheduler_unblock(t);
         }
 
-        dlist_for_each_entry_safe(t, n, &chan->peer->blocked_receivers, wait_node) {
+        dlist_for_each_entry_safe(t, n, &peer->blocked_receivers, wait_node) {
             dlist_del(&t->wait_node);
             t->ipc_state.status = ERR_FAULT;
             scheduler_unblock(t);
         }
 
-        sys_ipc_notify_internal(chan->peer);
-        release_qspinlock(&chan->peer->header.lock);
+        sys_ipc_notify_internal(peer->wait_set, &peer->header);
+        release_qspinlock(&peer->lock);
     }
 
-    // Cleanup any dangling threads in our own queues
+    release_qspinlock(&chan->lock);
+
     thread_t *t, *n;
     dlist_for_each_entry_safe(t, n, &chan->blocked_senders, wait_node) {
         dlist_del(&t->wait_node);
@@ -114,18 +138,47 @@ static void destroy_channel(struct ipc_channel* chan) {
         scheduler_unblock(t);
     }
 
-    // Unlink from our own port set
     if (chan->wait_set) {
-        acquire_qspinlock(&chan->wait_set->header.lock);
-
-        if (chan->is_in_port_set) {
-            dlist_del(&chan->port_node);
+        acquire_qspinlock(&chan->wait_set->lock);
+        if (chan->header.is_in_port_set) {
+            dlist_del(&chan->header.port_node);
         }
 
-        release_qspinlock(&chan->wait_set->header.lock);
+        release_qspinlock(&chan->wait_set->lock);
+        kref_put(&chan->wait_set->refcount, ipc_port_set_release);
     }
 
     kmem_cache_free(channel_cache, chan);
+}
+
+void ipc_notification_release(struct kref* ref) {
+    struct ipc_notification* notif = kref_entry(ref, struct ipc_notification, refcount);
+
+    if (notif->wait_set) {
+        acquire_qspinlock(&notif->wait_set->lock);
+
+        if (notif->header.is_in_port_set) {
+            dlist_del(&notif->header.port_node);
+        }
+
+        release_qspinlock(&notif->wait_set->lock);
+        kref_put(&notif->wait_set->refcount, ipc_port_set_release);
+    }
+
+    kmem_cache_free(notification_cache, notif);
+}
+
+void ipc_port_set_release(struct kref* ref) {
+    struct ipc_port_set* set = kref_entry(ref, struct ipc_port_set, refcount);
+
+    thread_t *t, *n;
+    dlist_for_each_entry_safe(t, n, &set->waiters, wait_node) {
+        dlist_del(&t->wait_node);
+        t->ipc_state.status = ERR_FAULT;
+        scheduler_unblock(t);
+    }
+
+    kmem_cache_free(port_cache, set);
 }
 
 int sys_ipc_create_channel(uint64_t* cap_id_out) {
@@ -147,31 +200,32 @@ int sys_ipc_create_channel(uint64_t* cap_id_out) {
     memset(ch2, 0, sizeof(struct ipc_channel));
 
     ch1->header.type = OBJ_CHANNEL;
-    create_qspinlock(&ch1->header.lock);
+    dlist_init(&ch1->header.port_node);
+    kref_init(&ch1->refcount);
+    create_qspinlock(&ch1->lock);
     dlist_init(&ch1->blocked_senders);
     dlist_init(&ch1->blocked_receivers);
-    dlist_init(&ch1->port_node);
 
     ch2->header.type = OBJ_CHANNEL;
-    create_qspinlock(&ch2->header.lock);
+    dlist_init(&ch2->header.port_node);
+    kref_init(&ch1->refcount);
+    create_qspinlock(&ch2->lock);
     dlist_init(&ch2->blocked_senders);
     dlist_init(&ch2->blocked_receivers);
-    dlist_init(&ch2->port_node);
 
     ch1->peer = ch2;
     ch2->peer = ch1;
 
     uint64_t cap1, cap2;
     struct capability* c1 = cap_alloc(me->root_cnode, &cap1);
+    if (!c1) {
+        return ERR_NO_MEM;
+    }
+
     struct capability* c2 = cap_alloc(me->root_cnode, &cap2);
-
-    if (!c1 || !c2) {
-        if (c1) {
-            cap_revoke(me->root_cnode, c1);
-        }
-
+    if (!c2) {
+        cap_close(me->root_cnode, cap1);
         kmem_cache_free(channel_cache, ch1);
-        kmem_cache_free(channel_cache, ch2);
         return ERR_NO_MEM;
     }
 
@@ -200,8 +254,8 @@ int sys_ipc_port_create(uint64_t* cap_id_out) {
     }
 
     memset(set, 0, sizeof(struct ipc_port_set));
-    set->header.type = OBJ_PORT_SET;
-    create_qspinlock(&set->header.lock);
+    kref_init(&set->refcount);
+    create_qspinlock(&set->lock);
     dlist_init(&set->event_queue);
     dlist_init(&set->waiters);
 
@@ -223,23 +277,33 @@ int sys_ipc_port_create(uint64_t* cap_id_out) {
     return ERR_OK;
 }
 
-int sys_ipc_close(uint64_t cap_id) {
+int sys_ipc_notification_create(uint64_t* cap_id_out) {
     thread_t* me = smp_current_core()->curr_thread;
 
-    struct capability* cap = cap_lookup(me->root_cnode, cap_id, 0);
-    if (!cap) {
-        return ERR_INVALID_CAP;
+    struct ipc_notification* notif = kmem_cache_alloc(notification_cache);
+    if (!notif) {
+        return ERR_NO_MEM;
     }
 
-    uint16_t type = cap->type;
-    uintptr_t obj = atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
+    memset(notif, 0, sizeof(struct ipc_notification));
+    notif->header.type = OBJ_NOTIFICATION;
+    dlist_init(&notif->header.port_node);
+    kref_init(&notif->refcount);
+    create_qspinlock(&notif->lock);
 
-    sys_cap_revoke(me->root_cnode, cap_id);
+    uint64_t cap         = 0;
+    struct capability* c = cap_alloc(me->root_cnode, &cap);
+    if (!c) {
+        kmem_cache_free(notification_cache, notif);
+        return ERR_NO_MEM;
+    }
 
-    if (type == CAP_TYPE_CHANNEL) {
-        destroy_channel((struct ipc_channel*)obj);
-    } else if (type == CAP_TYPE_PORT_SET) {
-        kmem_cache_free(port_cache, (void*)obj);
+    atomic_store_explicit(&c->object_ptr, (uintptr_t)notif, memory_order_release);
+    c->type   = CAP_TYPE_NOTIFICATION;
+    c->rights = RIGHT_ALL;
+
+    if (cap_id_out) {
+        copy_to_user(cap_id_out, &cap, sizeof(uint64_t));
     }
 
     return ERR_OK;
@@ -247,6 +311,23 @@ int sys_ipc_close(uint64_t cap_id) {
 
 static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
     receiver->ipc_state.sender_badge = sender->ipc_state.sender_badge;
+
+    struct ipc_msg_info* tx = &sender->ipc_state.msg_info;
+    struct ipc_msg_info* rx = &receiver->ipc_state.msg_info;
+
+    rx->reply_cap_id = 0;
+
+    if (sender->ipc_state.is_doing_call) {
+        uint64_t reply_id;
+        struct capability* reply_cap = cap_alloc(receiver->root_cnode, &reply_id);
+
+        if (reply_cap) {
+            atomic_store_explicit(&reply_cap->object_ptr, (uintptr_t)sender, memory_order_release);
+            reply_cap->type   = CAP_TYPE_REPLY;
+            reply_cap->rights = RIGHT_SEND;
+            rx->reply_cap_id  = reply_id;
+        }
+    }
 
     // Pure Register-to-Register Transfer
     if (!sender->ipc_state.use_memory && !receiver->ipc_state.use_memory) {
@@ -260,9 +341,6 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
 
     process_t* proc_tx = sender->owner;
     process_t* proc_rx = receiver->owner;
-
-    struct ipc_msg_info* tx = &sender->ipc_state.msg_info;
-    struct ipc_msg_info* rx = &receiver->ipc_state.msg_info;
 
     size_t copy_len =
         (tx->data_size_max < rx->data_size_max) ? tx->data_size_max : rx->data_size_max;
@@ -315,7 +393,7 @@ static int ipc_do_transfer(thread_t* sender, thread_t* receiver) {
 
             transferred_caps++;
         } else {
-            cap_revoke(receiver->root_cnode, dest_cap);
+            cap_close(receiver->root_cnode, dest_cap_id);
         }
     }
 
@@ -337,13 +415,58 @@ int sys_ipc_bind(uint64_t port_cap_id, uint64_t chan_cap_id, uint64_t key) {
 
     struct ipc_port_set* set =
         (struct ipc_port_set*)atomic_load_explicit(&p_cap->object_ptr, memory_order_acquire);
-    struct ipc_channel* chan =
-        (struct ipc_channel*)atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
 
-    acquire_qspinlock(&chan->header.lock);
-    chan->wait_set = set;
-    chan->user_key = key;
-    release_qspinlock(&chan->header.lock);
+    if (c_cap->type == CAP_TYPE_CHANNEL) {
+        struct ipc_channel* chan =
+            (struct ipc_channel*)atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
+
+        acquire_qspinlock(&chan->lock);
+
+        if (chan->wait_set) {
+            kref_put(&chan->wait_set->refcount, ipc_port_set_release);
+        }
+
+        kref_get(&set->refcount);
+        chan->wait_set        = set;
+        chan->header.user_key = key;
+
+        release_qspinlock(&chan->lock);
+        return ERR_OK;
+    } else if (c_cap->type == CAP_TYPE_NOTIFICATION) {
+        struct ipc_notification* notif = (struct ipc_notification*)
+            atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
+        acquire_qspinlock(&notif->lock);
+
+        if (notif->wait_set) {
+            kref_put(&notif->wait_set->refcount, ipc_port_set_release);
+        }
+
+        kref_get(&set->refcount);
+        notif->wait_set        = set;
+        notif->header.user_key = key;
+
+        release_qspinlock(&notif->lock);
+        return ERR_OK;
+    }
+
+    return ERR_INVALID_CAP;
+}
+
+int sys_ipc_notify(uint64_t notif_cap_id, uint64_t bits) {
+    thread_t* me = smp_current_core()->curr_thread;
+
+    struct capability* cap = cap_lookup(me->root_cnode, notif_cap_id, RIGHT_SIGNAL);
+    if (unlikely(!cap || cap->type != CAP_TYPE_NOTIFICATION)) {
+        return ERR_INVALID_CAP;
+    }
+
+    struct ipc_notification* notif =
+        (struct ipc_notification*)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
+
+    acquire_qspinlock(&notif->lock);
+    notif->state |= bits;
+    sys_ipc_notify_internal(notif->wait_set, &notif->header);
+    release_qspinlock(&notif->lock);
 
     return ERR_OK;
 }
@@ -353,7 +476,6 @@ int sys_ipc_send(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct sy
 
     if (!user_info) {
         me->ipc_state.use_memory = false;
-
         arch_sys_ipc_send(regs, &me->ipc_state);
     } else {
         me->ipc_state.use_memory = true;
@@ -366,29 +488,54 @@ int sys_ipc_send(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct sy
     }
 
     struct capability* c_cap = cap_lookup(me->root_cnode, chan_cap_id, RIGHT_SEND);
-    if (unlikely(!c_cap || c_cap->type != CAP_TYPE_CHANNEL)) {
+    if (unlikely(!c_cap)) {
         return ERR_INVALID_CAP;
     }
 
     me->ipc_state.sender_badge = c_cap->badge;
+    if (c_cap->type == CAP_TYPE_REPLY) {
+        thread_t* blocked_client =
+            (thread_t*)atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
+
+        int status                       = ipc_do_transfer(me, blocked_client);
+        blocked_client->ipc_state.status = status;
+        scheduler_unblock(blocked_client);
+
+        cap_close(me->root_cnode, chan_cap_id);
+
+        if (me->ipc_state.use_memory) {
+            copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
+        }
+
+        return ERR_OK;
+    }
+
+    if (unlikely(c_cap->type != CAP_TYPE_CHANNEL)) {
+        return ERR_INVALID_CAP;
+    }
 
     struct ipc_channel* chan =
         (struct ipc_channel*)atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
+
+    acquire_qspinlock(&chan->lock);
+
+retry_send:
     struct ipc_channel* dest = chan->peer;
+
     if (unlikely(!dest || chan->peer_closed)) {
+        release_qspinlock(&chan->lock);
         return ERR_FAULT;
     }
 
-    struct ipc_channel* first_lock  = (chan < dest) ? chan : dest;
-    struct ipc_channel* second_lock = (chan < dest) ? dest : chan;
-
-    acquire_qspinlock(&first_lock->header.lock);
-    acquire_qspinlock(&second_lock->header.lock);
-
-    if (unlikely(!chan->peer || chan->peer_closed)) {
-        release_qspinlock(&second_lock->header.lock);
-        release_qspinlock(&first_lock->header.lock);
-        return ERR_FAULT;
+    if (chan < dest) {
+        acquire_qspinlock(&dest->lock);
+    } else {
+        if (!try_acquire_qspinlock(&dest->lock)) {
+            release_qspinlock(&chan->lock);
+            arch_pause();
+            acquire_qspinlock(&chan->lock);
+            goto retry_send;
+        }
     }
 
     if (!dlist_empty(&dest->blocked_receivers)) {
@@ -401,8 +548,8 @@ int sys_ipc_send(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct sy
         receiver->ipc_state.status = status;
         scheduler_unblock(receiver);
 
-        release_qspinlock(&second_lock->header.lock);
-        release_qspinlock(&first_lock->header.lock);
+        release_qspinlock(&dest->lock);
+        release_qspinlock(&chan->lock);
 
         if (me->ipc_state.use_memory) {
             copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
@@ -412,12 +559,12 @@ int sys_ipc_send(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct sy
     }
 
     dlist_add_tail(&me->wait_node, &dest->blocked_senders);
-    sys_ipc_notify_internal(dest);
+    sys_ipc_notify_internal(dest->wait_set, &dest->header);
 
     scheduler_block();
 
-    release_qspinlock(&second_lock->header.lock);
-    release_qspinlock(&first_lock->header.lock);
+    release_qspinlock(&dest->lock);
+    release_qspinlock(&chan->lock);
 
     if (me->ipc_state.use_memory) {
         copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
@@ -449,10 +596,10 @@ int sys_ipc_recv(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct sy
     struct ipc_channel* chan =
         (struct ipc_channel*)atomic_load_explicit(&c_cap->object_ptr, memory_order_acquire);
 
-    acquire_qspinlock(&chan->header.lock);
+    acquire_qspinlock(&chan->lock);
 
     if (unlikely(chan->peer_closed && dlist_empty(&chan->blocked_senders))) {
-        release_qspinlock(&chan->header.lock);
+        release_qspinlock(&chan->lock);
         return ERR_FAULT;
     }
 
@@ -466,7 +613,7 @@ int sys_ipc_recv(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct sy
         sender->ipc_state.status = status;
         scheduler_unblock(sender);
 
-        release_qspinlock(&chan->header.lock);
+        release_qspinlock(&chan->lock);
 
         if (me->ipc_state.use_memory) {
             copy_to_user(user_info, &me->ipc_state.msg_info, sizeof(struct ipc_msg_info));
@@ -480,7 +627,7 @@ int sys_ipc_recv(uint64_t chan_cap_id, struct ipc_msg_info* user_info, struct sy
     dlist_add_tail(&me->wait_node, &chan->blocked_receivers);
 
     scheduler_block();
-    release_qspinlock(&chan->header.lock);
+    release_qspinlock(&chan->lock);
 
     if (me->ipc_state.use_memory) {
         me->ipc_state.msg_info.sender_badge = me->ipc_state.sender_badge;
@@ -498,7 +645,11 @@ int sys_ipc_call(
     struct ipc_msg_info* recv_info,
     struct syscall_regs* regs
 ) {
-    int ret = sys_ipc_send(chan_cap_id, send_info, regs);
+    thread_t* me = smp_current_core()->curr_thread;
+
+    me->ipc_state.is_doing_call = true;
+    int ret                     = sys_ipc_send(chan_cap_id, send_info, regs);
+    me->ipc_state.is_doing_call = false;
 
     if (unlikely(ret != ERR_OK)) {
         return ret;
@@ -519,7 +670,7 @@ int sys_ipc_wait(uint64_t port_cap_id, struct ipc_event* out_event, int timeout_
         (struct ipc_port_set*)atomic_load_explicit(&p_cap->object_ptr, memory_order_acquire);
 
     int ret = ERR_OK;
-    acquire_qspinlock(&set->header.lock);
+    acquire_qspinlock(&set->lock);
 
     while (dlist_empty(&set->event_queue)) {
         if (timeout_ms == 0) {
@@ -528,11 +679,10 @@ int sys_ipc_wait(uint64_t port_cap_id, struct ipc_event* out_event, int timeout_
         }
 
         dlist_add_tail(&me->wait_node, &set->waiters);
-        release_qspinlock(&set->header.lock);
 
+        release_qspinlock(&set->lock);
         scheduler_sleep((uint32_t)timeout_ms);
-
-        acquire_qspinlock(&set->header.lock);
+        acquire_qspinlock(&set->lock);
 
         if (dlist_linked(&me->wait_node)) {
             dlist_del_init(&me->wait_node);
@@ -544,22 +694,36 @@ int sys_ipc_wait(uint64_t port_cap_id, struct ipc_event* out_event, int timeout_
     }
 
     if (ret == ERR_OK && !dlist_empty(&set->event_queue)) {
-        struct dlist_head* first = set->event_queue.next;
-        struct ipc_channel* chan = dlist_entry(first, struct ipc_channel, port_node);
+        struct dlist_head* first      = set->event_queue.next;
+        struct ipc_object_header* obj = dlist_entry(first, struct ipc_object_header, port_node);
+
+        dlist_del_init(first);
+        obj->is_in_port_set = false;
 
         if (out_event) {
             struct ipc_event evt = {
-                .key    = chan->user_key,
-                .events = IPC_EVENT_READABLE | (chan->peer_closed ? IPC_EVENT_CLOSED : 0)
+                .key               = obj->user_key,
+                .events            = 0,
+                .notification_bits = 0,
             };
+
+            if (obj->type == OBJ_CHANNEL) {
+                struct ipc_channel* chan = container_of(obj, struct ipc_channel, header);
+                evt.events = IPC_EVENT_READABLE | (chan->peer_closed ? IPC_EVENT_CLOSED : 0);
+            } else if (obj->type == OBJ_NOTIFICATION) {
+                struct ipc_notification* notif = container_of(obj, struct ipc_notification, header);
+
+                acquire_qspinlock(&notif->lock);
+                evt.events            = IPC_EVENT_NOTIFICATION;
+                evt.notification_bits = notif->state;
+                notif->state          = 0;
+                release_qspinlock(&notif->lock);
+            }
 
             copy_to_user(out_event, &evt, sizeof(struct ipc_event));
         }
-
-        dlist_del_init(first);
-        chan->is_in_port_set = false;
     }
 
-    release_qspinlock(&set->header.lock);
+    release_qspinlock(&set->lock);
     return ret;
 }

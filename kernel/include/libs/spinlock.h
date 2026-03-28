@@ -35,6 +35,7 @@ typedef struct {
 void qspinlock_init(void);
 
 void create_qspinlock(qspinlock_t* lock);
+bool try_acquire_qspinlock(qspinlock_t* lock);
 void acquire_qspinlock(qspinlock_t* lock);
 void release_qspinlock(qspinlock_t* lock);
 bool test_qspinlock(qspinlock_t* lock);

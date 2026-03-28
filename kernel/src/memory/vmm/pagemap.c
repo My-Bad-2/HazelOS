@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "core/capability.h"
+#include "core/errors.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
 #include "memory/memory.h"

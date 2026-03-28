@@ -68,7 +68,8 @@ static void qspin_lock(qspinlock_t* lock, uint64_t val) {
                     (((uint64_t)idx) << Q_TAIL_IDX_OFFSET);
 
     uint64_t old_val = atomic_load_explicit(&lock->val, memory_order_relaxed);
-    uint64_t new_val;
+    uint64_t new_val = 0;
+
     do {
         new_val = (old_val & ~Q_TAIL_MASK) | tail;
     } while (!atomic_compare_exchange_weak_explicit(
@@ -120,6 +121,19 @@ static void qspin_lock(qspinlock_t* lock, uint64_t val) {
 
 release_node:
     cpu->qspin_node_idx--;
+}
+
+bool try_acquire_qspinlock(qspinlock_t* lock) {
+    ASSERT(lock);
+    uint64_t expected = 0;
+
+    return atomic_compare_exchange_strong_explicit(
+        &lock->val,
+        &expected,
+        Q_LOCKED_VAL,
+        memory_order_acquire,
+        memory_order_relaxed
+    );
 }
 
 void acquire_qspinlock(qspinlock_t* lock) {
