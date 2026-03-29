@@ -57,6 +57,7 @@ static thread_t* thread_create_internal(
     (void)name;
 #endif
 
+    dlist_init(&t->run_node);
     dlist_init(&t->process_node);
     dlist_init(&t->wait_node);
     wait_queue_init(&t->join_queue);
@@ -129,6 +130,7 @@ thread_t* thread_clone(
     strncpy(child->name, parent->name, 31);
 #endif
 
+    dlist_init(&child->run_node);
     dlist_init(&child->process_node);
     dlist_init(&child->wait_node);
     wait_queue_init(&child->join_queue);

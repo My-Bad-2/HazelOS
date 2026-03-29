@@ -3,42 +3,41 @@
 #include <string.h>
 
 #include "compiler.h"
-#include "libs/log.h"
 #include "libs/rb_tree.h"
 #include "sched/process.h"
 #include "sched/sched_class.h"
 
-#define MIN_GRANULARITY_NS 2500000ul  // 2.5ms
-#define YIELD_PENALTY_NS   2000000ul  // 2ms
-#define INIT_VRUNTIME_NS   100000ul   // 100us
+#define MIN_GRANULARITY_NS 2500000ul  // 2.5ms minimum time slice
+#define YIELD_PENALTY_NS   2000000ul  // 2ms virtual penalty for yielding
+#define WAKEUP_LATENCY_NS  2500000ul  // 2.5 ms latency allowance
 
 // misc/scripts/calculate_wmult.py
 static const uint32_t prio_to_wmult[40] = {
-    /* -20 */ 0x0000BCE5, /* -19 */ 0x0000EC1E,
-    /* -18 */ 0x00012725, /* -17 */ 0x000170EF,
-    /* -16 */ 0x0001CD2B, /* -15 */ 0x00024075,
-    /* -14 */ 0x0002D093, /* -13 */ 0x000384B8,
-    /* -12 */ 0x000465E6, /* -11 */ 0x00057F5F,
-    /* -10 */ 0x0006DF37, /*  -9 */ 0x00089705,
-    /*  -8 */ 0x000ABCC7, /*  -7 */ 0x000D6BF9,
-    /*  -6 */ 0x0010C6F7, /*  -5 */ 0x0014F8B5,
-    /*  -4 */ 0x001A36E2, /*  -3 */ 0x0020C49B,
-    /*  -2 */ 0x0028F5C2, /*  -1 */ 0x00333333,
+    /* -20 */ 0x0000bce5, /* -19 */ 0x0000ec1e,
+    /* -18 */ 0x00012725, /* -17 */ 0x000170ef,
+    /* -16 */ 0x0001cd2b, /* -15 */ 0x00024075,
+    /* -14 */ 0x0002d093, /* -13 */ 0x000384b8,
+    /* -12 */ 0x000465e6, /* -11 */ 0x00057f5f,
+    /* -10 */ 0x0006df37, /*  -9 */ 0x00089705,
+    /*  -8 */ 0x000abcc7, /*  -7 */ 0x000d6bf9,
+    /*  -6 */ 0x0010c6f7, /*  -5 */ 0x0014f8b5,
+    /*  -4 */ 0x001a36e2, /*  -3 */ 0x0020c49b,
+    /*  -2 */ 0x0028f5c2, /*  -1 */ 0x00333333,
     /*   0 */ 0x00400000, /*   1 */ 0x00500000,
-    /*   2 */ 0x00640000, /*   3 */ 0x007D0000,
-    /*   4 */ 0x009C4000, /*   5 */ 0x00C34FFF,
-    /*   6 */ 0x00F42400, /*   7 */ 0x01312D00,
-    /*   8 */ 0x017D7840, /*   9 */ 0x01DCD64F,
-    /*  10 */ 0x02540BE4, /*  11 */ 0x02E90EDD,
-    /*  12 */ 0x03A35294, /*  13 */ 0x048C2739,
-    /*  14 */ 0x05AF3107, /*  15 */ 0x071AFD49,
-    /*  16 */ 0x08E1BC9B, /*  17 */ 0x0B1A2BC2,
-    /*  18 */ 0x0DE0B6B3, /*  19 */ 0x1158E460,
+    /*   2 */ 0x00640000, /*   3 */ 0x007d0000,
+    /*   4 */ 0x009c4000, /*   5 */ 0x00c34fff,
+    /*   6 */ 0x00f42400, /*   7 */ 0x01312d00,
+    /*   8 */ 0x017d7840, /*   9 */ 0x01dcd64f,
+    /*  10 */ 0x02540be4, /*  11 */ 0x02e90edd,
+    /*  12 */ 0x03a35294, /*  13 */ 0x048c2739,
+    /*  14 */ 0x05af3107, /*  15 */ 0x071afd49,
+    /*  16 */ 0x08e1bc9b, /*  17 */ 0x0b1a2bc2,
+    /*  18 */ 0x0de0b6b3, /*  19 */ 0x1158e460,
 };
 
 struct cfs_config {
-    size_t vruntime;
-    size_t total_runtime;
+    uint64_t vruntime;
+    uint64_t total_runtime;
     int nice;
     int nice_idx;
 };
@@ -49,19 +48,19 @@ struct cfs_config {
 #define CFS_NICE(t)          (CFS_DATA(t)->nice)
 #define CFS_NICE_IDX(t)      (CFS_DATA(t)->nice_idx)
 
+static inline bool vruntime_less(uint64_t a, uint64_t b) {
+    return (int64_t)(a - b) < 0;
+}
+
+static inline uint64_t vruntime_max(uint64_t a, uint64_t b) {
+    return vruntime_less(a, b) ? b : a;
+}
+
 static inline size_t calculate_weighted_delta(size_t delta, int nice_idx) {
-    if (nice_idx < 0) {
-        nice_idx = 0;
-    }
+    if (unlikely(nice_idx < 0)) nice_idx = 0;
+    if (unlikely(nice_idx > 39)) nice_idx = 39;
 
-    if (nice_idx > 39) {
-        nice_idx = 39;
-    }
-
-    uint32_t wmult = prio_to_wmult[nice_idx];
-    uint128_t v    = (uint128_t)delta * wmult;
-
-    return (size_t)(v >> 32);
+    return (size_t)(((uint128_t)delta * prio_to_wmult[nice_idx]) >> 32);
 }
 
 static void cfs_init_task(thread_t* t, va_list args) {
@@ -69,40 +68,35 @@ static void cfs_init_task(thread_t* t, va_list args) {
     t->sched.private_data = nullptr;
 
     int nice = va_arg(args, int);
-    if (nice < -20) {
-        nice = -20;
-    }
-
-    if (nice > 19) {
-        nice = 19;
-    }
+    if (nice < -20) nice = -20;
+    if (nice > 19) nice = 19;
 
     CFS_NICE(t)     = nice;
-    CFS_NICE_IDX(t) = CFS_NICE(t) + 20;
+    CFS_NICE_IDX(t) = nice + 20;
 
     per_cpu_data_t* target = smp_get_core((t->assigned_cpu == UINT32_MAX) ? 0 : t->assigned_cpu);
-    CFS_VRUNTIME(t)        = target->min_vruntime + INIT_VRUNTIME_NS;
+    uint64_t min_v         = target ? target->min_vruntime : 0;
+    CFS_VRUNTIME(t)        = min_v + calculate_weighted_delta(MIN_GRANULARITY_NS, CFS_NICE_IDX(t));
 }
 
 static void cfs_renice_task(per_cpu_data_t* rq, thread_t* t, int nice) {
-    // Lag = Thread_VRuntime - System_Min_VRuntime
-    int64_t vruntime_lag = (int64_t)CFS_VRUNTIME(t) - (int64_t)rq->min_vruntime;
+    if (nice < -20) nice = -20;
+    if (nice > 19) nice = 19;
 
-    // Formula: NewLag = OldLag * (NewInverseWeight / OldInverseWeight)
-    uint32_t old_wmult = prio_to_wmult[CFS_NICE_IDX(t)];
-    uint32_t new_wmult = prio_to_wmult[nice + 20];
+    if (likely(rq)) {
+        int64_t vruntime_lag = (int64_t)(CFS_VRUNTIME(t) - rq->min_vruntime);
 
-    if (vruntime_lag != 0) {
-        vruntime_lag = (int64_t)((uint128_t)vruntime_lag * new_wmult) / old_wmult;
+        uint32_t old_wmult = prio_to_wmult[CFS_NICE_IDX(t)];
+        uint32_t new_wmult = prio_to_wmult[nice + 20];
+
+        if (vruntime_lag != 0)
+            vruntime_lag = (int64_t)((uint128_t)vruntime_lag * new_wmult) / old_wmult;
+
+        CFS_VRUNTIME(t) = rq->min_vruntime + (uint64_t)vruntime_lag;
     }
 
-    CFS_VRUNTIME(t) = (size_t)((int64_t)rq->min_vruntime + vruntime_lag);
     CFS_NICE(t)     = nice;
     CFS_NICE_IDX(t) = nice + 20;
-}
-
-static inline bool vruntime_less(uint64_t a, uint64_t b) {
-    return (int64_t)(a - b) < 0;
 }
 
 static void cfs_enqueue_task(per_cpu_data_t* rq, thread_t* t) {
@@ -127,7 +121,6 @@ static void cfs_enqueue_task(per_cpu_data_t* rq, thread_t* t) {
     rb_insert_color_cached(&t->rb_node, &rq->cfs_tree, is_leftmost);
 
     t->on_rq = true;
-
     atomic_fetch_add_explicit(&rq->cpu_load, t->avg_load, memory_order_relaxed);
 }
 
@@ -138,11 +131,10 @@ static void cfs_dequeue_task(per_cpu_data_t* rq, thread_t* t) {
     t->on_rq = false;
 
     size_t current_load = atomic_load_explicit(&rq->cpu_load, memory_order_relaxed);
-    if (current_load >= t->avg_load) {
+    if (current_load >= t->avg_load)
         atomic_fetch_sub_explicit(&rq->cpu_load, t->avg_load, memory_order_relaxed);
-    } else {
+    else
         atomic_store_explicit(&rq->cpu_load, 0, memory_order_relaxed);
-    }
 }
 
 static void cfs_yield_task(per_cpu_data_t*, thread_t* t) {
@@ -152,42 +144,34 @@ static void cfs_yield_task(per_cpu_data_t*, thread_t* t) {
 
 static void cfs_task_tick(per_cpu_data_t* rq, thread_t* t, size_t now) {
     size_t delta = (now > t->last_start_time) ? (now - t->last_start_time) : 0;
-
     CFS_TOTAL_RUNTIME(t) += delta;
 
     size_t wdelta = calculate_weighted_delta(delta, CFS_NICE_IDX(t));
     CFS_VRUNTIME(t) += wdelta;
 
-    size_t v_min         = CFS_VRUNTIME(t);
+    uint64_t v_min       = CFS_VRUNTIME(t);
     struct rb_node* left = rb_first_cached(&rq->cfs_tree);
 
     if (left) {
         thread_t* leftmost = rb_entry(left, thread_t, rb_node);
-
-        if (CFS_VRUNTIME(leftmost) < v_min) {
-            v_min = CFS_VRUNTIME(leftmost);
-        }
+        if (vruntime_less(CFS_VRUNTIME(leftmost), v_min)) v_min = CFS_VRUNTIME(leftmost);
     }
 
-    if (v_min > rq->min_vruntime) {
-        rq->min_vruntime = v_min;
-    }
+    if (vruntime_less(rq->min_vruntime, v_min)) rq->min_vruntime = v_min;
 }
 
 static void cfs_task_unblock(per_cpu_data_t* rq, thread_t* t) {
-    size_t thresh   = (MIN_GRANULARITY_NS * 2);
-    size_t v_target = (rq->min_vruntime > thresh) ? (rq->min_vruntime - thresh) : 0;
-
-    if (CFS_VRUNTIME(t) < v_target) {
-        CFS_VRUNTIME(t) = v_target;
-    }
+    // When a task wakes up, it may have slept for hours. Its vruntime is ancient. If we don't boost
+    // it, it will monopolize the CPU for hours to "catch up". We place it slightly behind the
+    // current min_vruntime so it run immediately, but without causing starvation.
+    uint64_t w_latency = calculate_weighted_delta(WAKEUP_LATENCY_NS, CFS_NICE_IDX(t));
+    uint64_t v_target  = rq->min_vruntime - w_latency;
+    CFS_VRUNTIME(t)    = vruntime_max(CFS_VRUNTIME(t), v_target);
 }
 
 static thread_t* cfs_pick_next_task(per_cpu_data_t* rq) {
     struct rb_node* leftmost = rb_first_cached(&rq->cfs_tree);
-    if (!leftmost) {
-        return nullptr;
-    }
+    if (!leftmost) return nullptr;
     return rb_entry(leftmost, thread_t, rb_node);
 }
 
@@ -215,12 +199,10 @@ static thread_t* cfs_steal_task(per_cpu_data_t* busiest_cpu, per_cpu_data_t* thi
 
         victim->assigned_cpu = this_cpu->cpu_idx;
 
-        int64_t vruntime_norm = (int64_t)CFS_VRUNTIME(victim) - (int64_t)busiest_cpu->min_vruntime;
-        if (vruntime_norm < 0) {
-            vruntime_norm = 0;
-        }
+        int64_t vruntime_norm = (int64_t)(CFS_VRUNTIME(victim) - busiest_cpu->min_vruntime);
+        if (vruntime_norm < 0) vruntime_norm = 0;
 
-        CFS_VRUNTIME(victim) = (size_t)((int64_t)this_cpu->min_vruntime + vruntime_norm);
+        CFS_VRUNTIME(victim) = this_cpu->min_vruntime + (uint64_t)vruntime_norm;
 
         cfs_enqueue_task(this_cpu, victim);
         this_cpu->thread_count++;
@@ -230,9 +212,9 @@ static thread_t* cfs_steal_task(per_cpu_data_t* busiest_cpu, per_cpu_data_t* thi
 }
 
 static bool cfs_check_preempt(thread_t* new_task, thread_t* curr_task) {
-    if (CFS_VRUNTIME(new_task) < CFS_VRUNTIME(curr_task)) {
-        size_t diff = CFS_VRUNTIME(curr_task) - CFS_VRUNTIME(new_task);
-        return diff > MIN_GRANULARITY_NS;
+    if (vruntime_less(CFS_VRUNTIME(new_task), CFS_VRUNTIME(curr_task))) {
+        int64_t diff = (int64_t)(CFS_VRUNTIME(curr_task) - CFS_VRUNTIME(new_task));
+        return diff > (int64_t)MIN_GRANULARITY_NS;
     }
 
     return false;

@@ -1,5 +1,3 @@
-#include "libs/kobject.h"
-#include "sched/rcu.h"
 #ifndef KERNEL_SMP_H
 #define KERNEL_SMP_H 1
 
@@ -7,9 +5,11 @@
 #include <stddef.h>
 
 #include "drivers/timer.h"
+#include "libs/kobject.h"
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 #include "sched/process.h"
+#include "sched/rcu.h"
 
 #ifdef __x86_64__
 #include "cpu/topology.h"
@@ -49,8 +49,12 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
     size_t min_vruntime;
 
     struct rb_root_cached cfs_tree;
-    struct rb_root_cached rt_tree;
     struct rb_root_cached dl_tree;
+
+    uint64_t rt_bitmap[2];
+    struct dlist_head rt_queues[MAX_RT_PRIO];
+    uint32_t rt_thread_count;
+
     struct rcu_data* rcu;
 
     timer_manager_t* timer_manager;

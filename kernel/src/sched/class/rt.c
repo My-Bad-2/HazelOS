@@ -1,14 +1,17 @@
 #include <stdatomic.h>
+#include <stdint.h>
+#include <string.h>
 
 #include "drivers/timer.h"
+#include "libs/dlist.h"
 #include "libs/rb_tree.h"
 #include "sched/sched_class.h"
 
-#define RR_QUANTUM_NS 10000000ul
+#define RR_QUANTUM_NS 10000000ul  // 10ms default quantum for Round Robin
 
 struct rt_config {
-    size_t arrival_time;
-    size_t time_slice;
+    uint64_t arrival_time;
+    int64_t time_slice;
     int priority;
 };
 
@@ -18,147 +21,125 @@ struct rt_config {
 #define RT_PRIORITY(t) (RT_DATA(t)->priority)
 
 static void rt_init_task(thread_t* t, va_list args) {
-    RT_SLICE(t) = 0;
+    memset(t->sched.payload, 0, SCHED_DATA_PAYLOAD_SIZE);
 
-    if (t->policy != SCHED_RR) {
-        return;
-    }
-
-    size_t now   = timer_get_time();
     int priority = va_arg(args, int);
-    if (priority < 0) {
-        priority = 0;
-    }
-
-    if (priority > 99) {
-        priority = 99;
-    }
+    if (priority < 0) priority = 0;
+    if (priority > 99) priority = 99;
 
     RT_PRIORITY(t) = priority;
-    RT_ARRIVAL(t)  = now;
-
-    if (t->policy == SCHED_RR && RT_SLICE(t) == 0) {
-        RT_SLICE(t) = RR_QUANTUM_NS;
-    }
+    RT_ARRIVAL(t)  = timer_get_time();
+    RT_SLICE(t)    = (t->policy == SCHED_RR) ? RR_QUANTUM_NS : 0;
 }
 
 static void rt_renice_task(per_cpu_data_t*, thread_t* t, int nice) {
     int new_prio = 50 - nice;
-
-    if (new_prio < 0) {
-        new_prio = 0;
-    }
-
-    if (new_prio > 99) {
-        new_prio = 99;
-    }
+    if (new_prio < 0) new_prio = 0;
+    if (new_prio > 99) new_prio = 99;
 
     RT_PRIORITY(t) = new_prio;
 }
 
 static void rt_enqueue_task(per_cpu_data_t* rq, thread_t* t) {
-    struct rb_node** link  = &rq->rt_tree.rb_root.rb_node;
-    struct rb_node* parent = nullptr;
-    bool is_leftmost       = true;
+    // Priority 99 goes to Index 0. Priority 0 goes to Index 99.
+    int idx = 99 - RT_PRIORITY(t);
 
-    while (*link) {
-        parent          = *link;
-        thread_t* entry = rb_entry(parent, thread_t, rb_node);
+    dlist_add_tail(&t->run_node, &rq->rt_queues[idx]);
 
-        if (RT_PRIORITY(t) > RT_PRIORITY(entry) ||
-            (RT_PRIORITY(t) == RT_PRIORITY(entry) && RT_ARRIVAL(t) < RT_ARRIVAL(entry))) {
-            link = &parent->rb_left;
-        } else {
-            link        = &parent->rb_right;
-            is_leftmost = false;
-        }
-    }
-
-    rb_link_node(&t->rb_node, parent, link);
-    rb_insert_color_cached(&t->rb_node, &rq->rt_tree, is_leftmost);
-
+    rq->rt_bitmap[idx / 64] |= (1ULL << (idx % 64));
+    rq->rt_thread_count++;
     t->on_rq = true;
+
     atomic_fetch_add_explicit(&rq->cpu_load, t->avg_load, memory_order_relaxed);
 }
 
 static void rt_dequeue_task(per_cpu_data_t* rq, thread_t* t) {
-    rb_erase_cached(&t->rb_node, &rq->rt_tree);
-    rb_init_node(&t->rb_node);
+    int idx = 99 - RT_PRIORITY(t);
 
+    dlist_del_init(&t->run_node);
+
+    if (dlist_empty(&rq->rt_queues[idx])) rq->rt_bitmap[idx / 64] &= ~(1ULL << (idx % 64));
+
+    rq->rt_thread_count--;
     t->on_rq = false;
 
     size_t current_load = atomic_load_explicit(&rq->cpu_load, memory_order_relaxed);
-    if (current_load >= t->avg_load) {
+    if (current_load >= t->avg_load)
         atomic_fetch_sub_explicit(&rq->cpu_load, t->avg_load, memory_order_relaxed);
-    } else {
+    else
         atomic_store_explicit(&rq->cpu_load, 0, memory_order_relaxed);
-    }
 }
 
 static void rt_yield_task(per_cpu_data_t* rq, thread_t* t) {
+    // Yielding a FIFO or RR thread puts it at the back of its priority tier
     RT_ARRIVAL(t) = timer_get_time();
-
-    if (t->policy == SCHED_RR) {
-        RT_SLICE(t) = RR_QUANTUM_NS;
-    }
-
+    if (t->policy == SCHED_RR) RT_SLICE(t) = RR_QUANTUM_NS;
     rq->reschedule_needed = true;
 }
 
 static void rt_task_tick(per_cpu_data_t* rq, thread_t* t, size_t now) {
-    if (t->policy != SCHED_RR) {
-        return;
-    }
+    // SCHED_FIFO runs until it blocks, yields, or is preempted
+    if (t->policy != SCHED_RR) return;
 
-    size_t delta = (now > t->last_start_time) ? (now - t->last_start_time) : 0;
+    int64_t delta = (now > t->last_start_time) ? (int64_t)(now - t->last_start_time) : 0;
 
-    if (RT_SLICE(t) <= delta) {
+    t->last_start_time = now;
+
+    RT_SLICE(t) -= delta;
+
+    if (RT_SLICE(t) <= 0) {
         RT_SLICE(t)           = RR_QUANTUM_NS;
         RT_ARRIVAL(t)         = now;
         rq->reschedule_needed = true;
-    } else {
-        RT_SLICE(t) -= delta;
     }
 }
 
 static thread_t* rt_pick_next_task(per_cpu_data_t* rq) {
-    struct rb_node* leftmost = rb_first_cached(&rq->rt_tree);
-
-    if (!leftmost) {
+    if (unlikely(rq->rt_thread_count == 0)) {
         return nullptr;
     }
 
-    return rb_entry(leftmost, thread_t, rb_node);
+    int idx;
+    if (rq->rt_bitmap[0] != 0)
+        idx = ffs((long)rq->rt_bitmap[0]) - 1;
+    else
+        idx = ffs((long)rq->rt_bitmap[1]) - 1 + 64;
+
+    return dlist_first_entry(&rq->rt_queues[idx], thread_t, run_node);
 }
 
 static thread_t* rt_steal_task(per_cpu_data_t* busiest_cpu, per_cpu_data_t* this_cpu) {
-    struct rb_node* node = rb_last(&busiest_cpu->rt_tree.rb_root);
-    thread_t* victim     = nullptr;
+    if (busiest_cpu->rt_thread_count == 0) return nullptr;
 
-    while (node) {
-        thread_t* t = rb_entry(node, thread_t, rb_node);
+    thread_t* victim = nullptr;
+    for (int i = 99; i >= 0; --i) {
+        if ((busiest_cpu->rt_bitmap[i / 64] & (1ULL << (i % 64))) == 0) continue;
 
-        if ((t->affinity_mask & (1ul << this_cpu->cpu_idx)) && (t->state != THREAD_RUNNING)) {
-            victim = t;
-            break;
+        struct dlist_head* pos;
+        dlist_for_each_prev(pos, &busiest_cpu->rt_queues[i]) {
+            thread_t* t = dlist_entry(pos, thread_t, run_node);
+
+            if (likely(t->state != THREAD_RUNNING) &&
+                (t->affinity_mask & (1ul << this_cpu->cpu_idx))) {
+                victim = t;
+                goto found_victim;
+            }
         }
-
-        node = rb_prev(node);
     }
 
+found_victim:
     if (victim) {
         rt_dequeue_task(busiest_cpu, victim);
-        busiest_cpu->thread_count--;
 
         victim->assigned_cpu = this_cpu->cpu_idx;
         rt_enqueue_task(this_cpu, victim);
-        this_cpu->thread_count++;
     }
 
     return victim;
 }
 
 static bool rt_check_preempt(thread_t* new_task, thread_t* curr_task) {
+    // RT tasks only preempt if they are strictly higher priority
     return RT_PRIORITY(new_task) > RT_PRIORITY(curr_task);
 }
 

@@ -54,19 +54,12 @@ __dlist_add(struct dlist_head* new_node, struct dlist_head* prev, struct dlist_h
 }
 
 static inline void __dlist_del(struct dlist_head* prev, struct dlist_head* next) {
-    if (next) {
-        next->prev = prev;
-    }
-
-    if (prev) {
-        prev->next = next;
-    }
+    if (next) next->prev = prev;
+    if (prev) prev->next = next;
 }
 
 static inline void dlist_add(struct dlist_head* new, struct dlist_head* head) {
-    if (!head) {
-        return;
-    }
+    if (!head) return;
 
     __dlist_add(new, head, head->next);
 }
@@ -141,7 +134,30 @@ static size_t dlist_count(const struct dlist_head* head) {
     return count;
 }
 
+static inline void dlist_replace(struct dlist_head* old_node, struct dlist_head* new_node) {
+    if (!old_node || !new_node) return;
+
+    if (old_node->next == old_node) {
+        dlist_init(new_node);
+    } else {
+        new_node->next = old_node->next;
+        new_node->prev = old_node->prev;
+
+        if (new_node->prev) new_node->prev->next = new_node;
+        if (new_node->next) new_node->next->prev = new_node;
+    }
+}
+
+static inline void dlist_replace_init(struct dlist_head* old_node, struct dlist_head* new_node) {
+    if (!old_node || !new_node) return;
+
+    dlist_replace(old_node, new_node);
+    dlist_init(old_node);
+}
+
 #define dlist_entry(ptr, type, member) container_of(ptr, type, member)
+#define dlist_first_entry(head, type, member) \
+    (dlist_empty(head) ? nullptr : dlist_entry((head)->next, type, member))
 
 #define dlist_for_each(pos, head) for ((pos) = (head)->next; (pos) != (head); (pos) = (pos)->next)
 
@@ -154,6 +170,20 @@ static size_t dlist_count(const struct dlist_head* head) {
         (n)    = dlist_entry((pos)->member.next, __typeof__(*(pos)), member); \
          &(pos)->member != (head);                                            \
          (pos) = (n), (n) = dlist_entry((n)->member.next, __typeof__(*(n)), member))
+
+#define dlist_for_each_safe(pos, n, head)                                                          \
+    for ((pos) = (head) ? (head)->next : nullptr, (n) = ((head) && (pos)) ? (pos)->next : nullptr; \
+         (head) && (pos) && (pos) != (head);                                                       \
+         (pos) = (n), (n) = (pos) ? (pos)->next : nullptr)
+
+#define dlist_for_each_prev(pos, head)                                                \
+    for ((pos) = (head) ? (head)->prev : nullptr; (head) && (pos) && (pos) != (head); \
+         (pos) = (pos)->prev)
+
+#define dlist_for_each_prev_safe(pos, n, head)                                                     \
+    for ((pos) = (head) ? (head)->prev : nullptr, (n) = ((head) && (pos)) ? (pos)->prev : nullptr; \
+         (head) && (pos) && (pos) != (head);                                                       \
+         (pos) = (n), (n) = (pos) ? (pos)->prev : nullptr)
 
 #ifdef __cplusplus
 }

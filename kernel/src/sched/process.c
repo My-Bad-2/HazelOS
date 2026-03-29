@@ -12,7 +12,6 @@
 #include "memory/pagemap.h"
 #include "memory/vma.h"
 #include "memory/vmm.h"
-#include "sched/sched_class.h"
 #include "sched/scheduler.h"
 #include "sched/wait.h"
 
@@ -196,16 +195,12 @@ uint64_t process_wait(process_t* proc, int* exit_code) {
 }
 
 void process_release(struct kobject* obj) {
-    if (!obj) {
-        return;
-    }
+    if (!obj) return;
 
     process_t* proc = kref_entry(obj, struct process, kobj);
     wait_queue_wake_up_all(&proc->vfork_wait_queue);
 
-    if (!proc->is_kernel) {
-        pagemap_release(&proc->map);
-    }
+    if (!proc->is_kernel) pagemap_release(&proc->map);
 
     acquire_qspinlock(&proc->lock);
 
@@ -218,13 +213,8 @@ void process_release(struct kobject* obj) {
         dlist_add_tail(&orphan->sibling_node, &init_process->children_list);
     }
 
-    if (!dlist_empty(&proc->sibling_node)) {
-        dlist_del(&proc->sibling_node);
-    }
-
-    if (proc->parent) {
-        wait_queue_wake_up_all(&proc->parent->wait_queue);
-    }
+    if (!dlist_empty(&proc->sibling_node)) dlist_del(&proc->sibling_node);
+    if (proc->parent) wait_queue_wake_up_all(&proc->parent->wait_queue);
 
     destroy_cspace(proc->root_cnode);
 

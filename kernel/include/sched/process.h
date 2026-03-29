@@ -16,6 +16,8 @@
 #include "sched/ipc.h"
 #include "sched/wait.h"
 
+#define MAX_RT_PRIO 100
+
 #define CLONE_VM     0x100
 #define CLONE_FS     0x200
 #define CLONE_THREAD 0x400
@@ -102,6 +104,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     size_t last_start_time;
 
     struct rb_node rb_node;
+    struct dlist_head run_node;
     struct dlist_head process_node;
     struct dlist_head wait_node;
     struct wait_queue join_queue;
@@ -159,9 +162,6 @@ int thread_change_exec(
 
 [[noreturn, gnu::used]] void thread_exit(int exit_code);
 void thread_join(thread_t* t, int* exit_code);
-
-void thread_sleep_prepare(struct wait_queue* wq);
-void thread_sleep_finish(struct wait_queue* wq);
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
 void arch_thread_destroy(thread_t* t);

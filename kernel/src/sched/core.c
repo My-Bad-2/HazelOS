@@ -1,9 +1,14 @@
 #include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdatomic.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "arch.h"
 #include "boot/boot.h"
 #include "compiler.h"
+#include "core/errors.h"
+#include "cpu/exception.h"
+#include "cpu/gdt.h"
 #include "cpu/smp.h"
 #include "drivers/arch_timer.h"
 #include "drivers/timer.h"
@@ -15,7 +20,7 @@
 #include "sched/sched_class.h"
 #include "sched/scheduler.h"
 
-#define PELT_MAX_LOAD 1024
+#define PELT_MAX_LOAD 1024ul
 #define LOAD_AVG_MAX  47742
 
 static process_t* kernel_proc = nullptr;
@@ -52,101 +57,184 @@ static const uint32_t runnable_avg_yN_inv[] = {
     0x8b95c1e3, 0x88980e80, 0x85aac367, 0x82cd8698,  // 28-31
 };
 
+static bool sched_should_preempt(thread_t* new_task, thread_t* curr_task) {
+    // If there is no current task or it is alread yielding/blocked, we must preempt to schedule the
+    // new task.
+    if (unlikely(!curr_task || curr_task->state != THREAD_RUNNING)) return true;
+
+    const struct sched_class* new_class  = new_task->sched_class;
+    const struct sched_class* curr_class = curr_task->sched_class;
+
+    // Strict priority dominance (Real-Time > CFS > Idle)
+    if (new_class->priority > curr_class->priority) return true;
+    if (new_class->priority < curr_class->priority) return false;
+
+    // If they share the same policy, delegate to the specific algorithm
+    if (new_task->sched_class->check_preempt)
+        return new_task->sched_class->check_preempt(new_task, curr_task);
+
+    // If no hook exists, preempt
+    return true;
+}
+
 static inline size_t decay_load(size_t load, size_t delta_ms) {
-    if (delta_ms == 0) {
-        return load;
-    }
+    if (delta_ms == 0) return load;
+    if (delta_ms >= 2048) return 0;
 
-    if (delta_ms >= 2048) {
-        return 0;
-    }
+    size_t half_lives = delta_ms >> 5;  // same as delta_ms / 32 (2^5)
+    size_t remainder  = delta_ms & 31;
 
-    size_t half_lives = delta_ms / 32;
-    size_t remainder  = delta_ms % 32;
-
-    size_t decayed = (load * pelt_decay_factors[remainder]) >> 15;
-    return decayed >> half_lives;
+    return (load * pelt_decay_factors[remainder]) >> 15 >> half_lives;
 }
 
 static inline size_t decay_cpu_load(size_t val, size_t n) {
-    if (n == 0) {
-        return val;
-    }
-
+    if (n == 0) return val;
     if (n >= 32) {
-        val >>= (n / 32);
-        n %= 32;
+        val >>= (n >> 5);
+        n &= 31;
     }
 
-    size_t factor = runnable_avg_yN_inv[n];
-    val           = (size_t)(((uint128_t)val * factor) >> 32);
-
-    return val;
+    return (size_t)(((uint128_t)val * runnable_avg_yN_inv[n]) >> 32);
 }
 
 static void update_thread_load(thread_t* t) {
-    size_t now = get_time_now();
+    const size_t now      = get_time_now();
+    const size_t delta_ms = (now - t->last_load_update) / 1000000;
 
-    size_t delta_ns = now - t->last_load_update;
-    size_t delta_ms = delta_ns / 1000000;
-
-    if (delta_ms == 0) {
-        return;
-    }
-
+    if (delta_ms == 0) return;
     t->last_load_update = now;
 
-    size_t decayed_load = decay_load(t->avg_load, delta_ms);
-    size_t contribution = 0;
-    if (t->state == THREAD_RUNNING) {
-        size_t decayed_max = decay_load(PELT_MAX_LOAD, delta_ms);
-        contribution       = PELT_MAX_LOAD - decayed_max;
-    }
+    const size_t decayed_load = decay_load(t->avg_load, delta_ms);
+    const size_t contribution =
+        (t->state == THREAD_RUNNING) ? (PELT_MAX_LOAD - decay_load(PELT_MAX_LOAD, delta_ms)) : 0;
 
     t->avg_load = decayed_load + contribution;
-
-    if (t->avg_load > PELT_MAX_LOAD) {
-        t->avg_load = PELT_MAX_LOAD;
-    }
+    if (t->avg_load > PELT_MAX_LOAD) t->avg_load = PELT_MAX_LOAD;
 }
 
 static void update_cpu_load(per_cpu_data_t* cpu, size_t now) {
-    if (cpu->last_load_update == 0) {
+    if (unlikely(cpu->last_load_update == 0)) {
         cpu->last_load_update = now;
         return;
     }
 
     int64_t delta_ns = (int64_t)now - (int64_t)cpu->last_load_update;
-
-    if (delta_ns < 0) {
-        delta_ns = 0;
-    }
-
-    size_t delta_us = (size_t)delta_ns / 1000;
-
-    if (delta_us == 0) {
-        return;
-    }
-
+    size_t delta_us  = (delta_ns < 0 ? 0 : (size_t)delta_ns) / 1000;
+    if (delta_us == 0) return;
     cpu->last_load_update = now;
-
-    bool is_active = (cpu->curr_thread != cpu->idle_thread);
-    cpu->period_contrib += delta_us;
+    cpu->period_contrib   = delta_us;
 
     if (cpu->period_contrib >= 1024) {
         size_t periods = cpu->period_contrib >> 10;
-        cpu->period_contrib &= (1024 - 1);
+        cpu->period_contrib &= 1023;
 
         size_t old_load = cpu->cpu_load;
         size_t new_load = decay_cpu_load(old_load, periods);
-
-        if (is_active) {
-            size_t decayed_max = decay_cpu_load(LOAD_AVG_MAX, periods);
-            new_load += (LOAD_AVG_MAX - decayed_max);
+        if (cpu->curr_thread != cpu->idle_thread) {
+            new_load += (LOAD_AVG_MAX - decay_cpu_load(LOAD_AVG_MAX, periods));
         }
 
         cpu->cpu_load = new_load;
     }
+}
+
+static per_cpu_data_t* lock_thread_cpu(thread_t* t, size_t* flags_out) {
+    per_cpu_data_t* cpu;
+    while (true) {
+        uint32_t expected_cpu =
+            atomic_load_explicit((_Atomic uint32_t*)&t->assigned_cpu, memory_order_acquire);
+        if (unlikely(expected_cpu == UINT32_MAX)) {
+            return nullptr;
+        }
+
+        cpu        = smp_get_core(expected_cpu);
+        *flags_out = acquire_qinterrupt_lock(&cpu->lock);
+
+        if (likely(t->assigned_cpu == expected_cpu)) {
+            return cpu;
+        }
+
+        release_qinterrupt_lock(&cpu->lock, *flags_out);
+        arch_pause();
+    }
+}
+
+static inline void switch_mm_and_fpu(per_cpu_data_t* cpu, thread_t* curr, thread_t* next) {
+    process_t* next_proc = next->owner;
+    process_t* curr_proc = curr ? curr->owner : nullptr;
+
+#ifdef __x86_64__
+    update_tss_rsp(&cpu->arch.tss, next->kernel_stack_top);
+#endif
+
+    cpu->kstack_top = next->kernel_stack_top;
+    if (next_proc && curr_proc != next_proc) {
+        pagemap_load(&next_proc->map);
+    }
+
+    thread_restore_fpu(next);
+    cpu->reschedule_needed = false;
+}
+
+static inline void enqueue_and_check_preempt(per_cpu_data_t* cpu, thread_t* t) {
+    t->state = THREAD_READY;
+    t->sched_class->enqueue_task(cpu, t);
+    cpu->thread_count++;
+
+    if (cpu->curr_thread && sched_should_preempt(t, cpu->curr_thread)) {
+        cpu->reschedule_needed = true;
+        if (cpu != smp_current_core()) {
+            smp_send_reschedule_ipi(cpu);
+        }
+    }
+}
+
+static void sleep_callback(void* ctx) {
+    scheduler_unblock(ctx);
+}
+
+static int internal_sleep_timeout(int64_t timeout_ms, thread_state_t sleep_state) {
+    if (unlikely(timeout_ms < 0)) {
+        return -EINVAL;
+    }
+
+    if (unlikely(timeout_ms == 0)) {
+        if (sleep_state == THREAD_SLEEPING) {
+            scheduler_yield();
+            return 0;
+        }
+
+        return ERR_TIMEOUT;
+    }
+
+    arch_disable_interrupts();
+    per_cpu_data_t* cpu = smp_current_core();
+    thread_t* curr      = cpu->curr_thread;
+
+    if (unlikely(!curr || curr == cpu->idle_thread)) {
+        arch_enable_interrupts();
+        return -EPERM;
+    }
+
+    acquire_qspinlock(&cpu->lock);
+    curr->state            = sleep_state;
+    cpu->reschedule_needed = true;
+
+    timer_arm_oneshot(cpu->timer_manager, &curr->sleep_timer, timeout_ms, sleep_callback, curr);
+    release_qspinlock(&cpu->lock);
+
+    schedule();
+
+    arch_disable_interrupts();
+    cpu                = smp_current_core();
+    bool woke_up_early = timer_cancel(&curr->sleep_timer);
+    arch_enable_interrupts();
+
+    if (woke_up_early) {
+        return (sleep_state == THREAD_SLEEPING) ? -EINTR : ERR_TIMEOUT;
+    }
+
+    return 0;
 }
 
 static void idle_task_entry(void*) {
@@ -165,86 +253,15 @@ static void idle_task_entry(void*) {
     }
 }
 
-static uint32_t select_best_cpu(thread_t* t) {
-    per_cpu_data_t* curr_cpu = smp_current_core();
-
-    if (curr_cpu->thread_count <= 1 && (t->affinity_mask & (1ul << curr_cpu->cpu_idx))) {
-        return curr_cpu->cpu_idx;
+static inline void
+double_lock_cpu(per_cpu_data_t* cpu1, per_cpu_data_t* cpu2, size_t* flags1, size_t* flags2) {
+    if (cpu1->cpu_idx < cpu2->cpu_idx) {
+        *flags1 = acquire_qinterrupt_lock(&cpu1->lock);
+        *flags2 = acquire_qinterrupt_lock(&cpu2->lock);
+    } else {
+        *flags2 = acquire_qinterrupt_lock(&cpu2->lock);
+        *flags1 = acquire_qinterrupt_lock(&cpu1->lock);
     }
-
-    if (t->assigned_cpu != UINT32_MAX && (t->affinity_mask & (1ul << t->assigned_cpu))) {
-        per_cpu_data_t* prev = smp_get_core(t->assigned_cpu);
-
-        if (prev->thread_count == 0) {
-            return t->assigned_cpu;
-        }
-
-        size_t sibs        = cpumask_get(&prev->arch.topology.core_siblings, prev->cpu_idx);
-        bool are_sibs_busy = false;
-
-        while (sibs) {
-            int idx = ctz(sibs);
-            if (smp_get_core((uint32_t)idx)->thread_count > 0) {
-                are_sibs_busy = true;
-                break;
-            }
-
-            sibs &= ~(1ul << idx);
-        }
-
-        if (!are_sibs_busy) {
-            return t->assigned_cpu;
-        }
-    }
-
-    uint32_t best_cpu = UINT32_MAX;
-    size_t min_cost   = SIZE_MAX;
-
-    for (uint32_t i = 0; i < mp_request.response->cpu_count; ++i) {
-        if (!((t->affinity_mask >> i) & 1)) {
-            continue;
-        }
-
-        per_cpu_data_t* target = smp_get_core(i);
-        size_t curr_cost       = 0;
-
-        curr_cost += atomic_load_explicit(&target->cpu_load, memory_order_relaxed);
-        curr_cost += ((size_t)target->thread_count * 100);
-
-        size_t sibs = cpumask_get(&target->arch.topology.core_siblings, i);
-        while (sibs) {
-            int idx                 = __builtin_ctzll(sibs);
-            per_cpu_data_t* sibling = smp_get_core((uint32_t)idx);
-
-            if (sibling->thread_count > 0) {
-                curr_cost += COST_SMT_THREAD;
-                curr_cost += (atomic_load_explicit(&sibling->cpu_load, memory_order_relaxed) / 2);
-            }
-
-            sibs &= ~(1ul << idx);
-        }
-
-        if (t->assigned_cpu != UINT32_MAX && i != t->assigned_cpu) {
-            per_cpu_data_t* last = smp_get_core(t->assigned_cpu);
-
-            if (last && cpumask_test(&target->arch.topology.llc_siblings, t->assigned_cpu)) {
-                curr_cost += (MIGRATION_COST_NS / 2000);
-            } else {
-                curr_cost += (MIGRATION_COST_NS / 1000);
-            }
-        }
-
-        if (curr_cost < min_cost) {
-            min_cost = curr_cost;
-            best_cpu = i;
-        }
-    }
-
-    if (best_cpu == UINT32_MAX) {
-        return (t->assigned_cpu != UINT32_MAX) ? t->assigned_cpu : 0;
-    }
-
-    return best_cpu;
 }
 
 static void
@@ -258,32 +275,106 @@ double_unlock_cpu(per_cpu_data_t* cpu1, per_cpu_data_t* cpu2, size_t flags1, siz
     }
 }
 
-static inline void
-double_lock_cpu(per_cpu_data_t* cpu1, per_cpu_data_t* cpu2, size_t* flags1, size_t* flags2) {
-    if (cpu1->cpu_idx < cpu2->cpu_idx) {
-        *flags1 = acquire_qinterrupt_lock(&cpu1->lock);
-        *flags2 = acquire_qinterrupt_lock(&cpu2->lock);
-    } else {
-        *flags2 = acquire_qinterrupt_lock(&cpu2->lock);
-        *flags1 = acquire_qinterrupt_lock(&cpu1->lock);
+static uint32_t select_best_cpu(thread_t* t) {
+    per_cpu_data_t* curr_cpu = smp_current_core();
+    uint32_t target_cpu      = t->assigned_cpu;
+
+    // Current CPU is idle/low-load and allowed by affinity
+    if (curr_cpu->thread_count <= 1 && (t->affinity_mask & (1ul << curr_cpu->cpu_idx)))
+        return curr_cpu->cpu_idx;
+
+    per_cpu_data_t* last_cpu = (target_cpu != UINT32_MAX) ? smp_get_core(target_cpu) : nullptr;
+
+    // Previously assigned CPU is entirely idle
+    if (last_cpu && (t->affinity_mask & (1ul << target_cpu))) {
+        if (last_cpu->thread_count == 0) return target_cpu;
+
+        // Check if all SMT siblings of the last CPU are also idle
+        size_t sibs        = cpumask_get(&last_cpu->arch.topology.core_siblings, last_cpu->cpu_idx);
+        bool are_sibs_busy = false;
+
+        while (sibs) {
+            int idx = ctz(sibs);
+            if (smp_get_core((uint32_t)idx)->thread_count > 0) {
+                are_sibs_busy = true;
+                break;
+            }
+
+            // Instantly clear the lowest set bit
+            // Learn more:
+            // https://softwareengineering.stackexchange.com/questions/304876/explanation-to-why-counting-bits-set-brian-kernighans-way-works
+            sibs &= sibs - 1;
+        }
+
+        if (!are_sibs_busy) return target_cpu;
     }
+
+    // Calculate cost across all allowed CPUs
+    uint32_t best_cpu  = UINT32_MAX;
+    size_t min_cost    = SIZE_MAX;
+    uint32_t cpu_count = mp_request.response->cpu_count;
+
+    for (uint32_t i = 0; i < cpu_count; ++i) {
+        if (!((t->affinity_mask >> i) & 1)) continue;
+
+        per_cpu_data_t* target = smp_get_core(i);
+
+        // Base cost = CPU load + static thread count weight
+        size_t curr_cost = atomic_load_explicit(&target->cpu_load, memory_order_relaxed) +
+                           ((size_t)target->thread_count * 100);
+
+        // Add SMT sibling cost
+        size_t sibs = cpumask_get(&target->arch.topology.core_siblings, i);
+        sibs &= ~(1ul << i);
+
+        while (sibs) {
+            int idx                 = ctz(sibs);
+            per_cpu_data_t* sibling = smp_get_core((uint32_t)idx);
+
+            if (sibling->thread_count > 0)
+                curr_cost += COST_SMT_THREAD +
+                             (atomic_load_explicit(&sibling->cpu_load, memory_order_relaxed) / 2);
+
+            sibs &= sibs - 1;
+        }
+
+        if (last_cpu && i != target_cpu) {
+            if (cpumask_get(&target->arch.topology.llc_siblings, target_cpu))
+                curr_cost += (MIGRATION_COST_NS / 2000);  // Shares the same L3 cache
+            else
+                curr_cost += (MIGRATION_COST_NS / 1000);  // Different L3 cache
+        }
+
+        if (curr_cost < min_cost) {
+            min_cost = curr_cost;
+            best_cpu = i;
+        }
+    }
+
+    if (best_cpu == UINT32_MAX) return last_cpu ? target_cpu : 0;
+    return best_cpu;
 }
 
 static void balance_load(void) {
     per_cpu_data_t* this_cpu    = smp_current_core();
     per_cpu_data_t* busiest_cpu = nullptr;
     size_t max_threads          = 0;
+    uint32_t cpu_count          = mp_request.response->cpu_count;
 
-    for (uint32_t i = 0; i < mp_request.response->cpu_count; ++i) {
+    // Find the busiest CPU
+    for (uint32_t i = 0; i < cpu_count; ++i) {
         if (i == this_cpu->cpu_idx) continue;
 
         per_cpu_data_t* remote = smp_get_core(i);
-        if (remote->thread_count > max_threads) {
-            max_threads = remote->thread_count;
+        size_t remote_threads  = remote->thread_count;  // Heuristic read
+
+        if (remote_threads > max_threads) {
+            max_threads = remote_threads;
             busiest_cpu = remote;
         }
     }
 
+    // Abort if no one is significantly busier than us
     if (!busiest_cpu || max_threads <= (this_cpu->thread_count + 1)) {
         return;
     }
@@ -291,29 +382,24 @@ static void balance_load(void) {
     size_t flags1, flags2;
     double_lock_cpu(this_cpu, busiest_cpu, &flags1, &flags2);
 
+    // Re-verify under lock to prevent race conditions
     if (busiest_cpu->thread_count <= (this_cpu->thread_count + 1)) {
         double_unlock_cpu(this_cpu, busiest_cpu, flags1, flags2);
         return;
     }
 
-    struct sched_class* curr_class = sched_classes_head;
-    thread_t* victim               = nullptr;
+    thread_t* victim = nullptr;
 
-    while (curr_class) {
-        if (curr_class->steal_task) {
-            victim = curr_class->steal_task(busiest_cpu, this_cpu);
-
-            if (victim) {
-                break;
-            }
+    for (struct sched_class* sc = sched_classes_head; sc; sc = sc->next) {
+        if (sc->steal_task) {
+            victim = sc->steal_task(busiest_cpu, this_cpu);
+            if (victim) break;
         }
-
-        curr_class = curr_class->next;
     }
 
     if (victim) {
         KLOG_INFO(
-            "SCHED: cpu %zu stole TID %u from cpu %zu\n",
+            "SCHED: cpu %zu stole KOID %lu from cpu %zu\n",
             this_cpu->cpu_idx,
             victim->kobj.koid,
             busiest_cpu->cpu_idx
@@ -325,42 +411,52 @@ static void balance_load(void) {
     double_unlock_cpu(this_cpu, busiest_cpu, flags1, flags2);
 }
 
-static bool sched_should_preempt(thread_t* new_task, thread_t* curr_task) {
-    if (!curr_task) {
-        return true;
+static inline thread_t* pick_highest_priority_task(per_cpu_data_t* cpu) {
+    for (struct sched_class* sc = sched_classes_head; sc; sc = sc->next) {
+        if (sc->pick_next_task) {
+            thread_t* next = sc->pick_next_task(cpu);
+            if (next) return next;
+        }
     }
 
-    if (curr_task->state != THREAD_RUNNING) {
-        return true;
+    return nullptr;
+}
+
+static thread_t* pick_next_task(per_cpu_data_t* cpu, size_t* flags) {
+    thread_t* next = pick_highest_priority_task(cpu);
+
+    // We found a task locally
+    if (likely(next)) return next;
+
+    // No runnable tasks found. Try stealing from neighbors periodically
+    if (unlikely(cpu->balance_counter & 63) == 0) {
+        release_qinterrupt_lock(&cpu->lock, *flags);
+        balance_load();
+        *flags = acquire_qinterrupt_lock(&cpu->lock);
+
+        // Re-check our queues in case balance_load succeeded or someone woke up
+        next = pick_highest_priority_task(cpu);
+        if (next) return next;
     }
 
-    if (new_task->sched_class->priority > curr_task->sched_class->priority) {
-        return true;
-    }
-
-    if (new_task->sched_class->priority < curr_task->sched_class->priority) {
-        return false;
-    }
-
-    if (new_task->sched_class->check_preempt) {
-        return new_task->sched_class->check_preempt(new_task, curr_task);
-    }
-
-    return true;
+    return cpu->idle_thread;
 }
 
 void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
     if (cpu->is_bsp) {
         kernel_proc = process_create("kernel_proc", true);
-
-        if (!kernel_proc) {
-            PANIC("SCHED: failed to create kernel process\n");
-        }
+        if (!kernel_proc) PANIC("SCHED: failed to create kernel process\n");
     }
 
     cpu->cfs_tree = RB_ROOT_CACHED;
     cpu->dl_tree  = RB_ROOT_CACHED;
-    cpu->rt_tree  = RB_ROOT_CACHED;
+    for (int i = 0; i < MAX_RT_PRIO; ++i) {
+        dlist_init(&cpu->rt_queues[i]);
+    }
+
+    cpu->rt_bitmap[0]    = 0;
+    cpu->rt_bitmap[1]    = 0;
+    cpu->rt_thread_count = 0;
 
     cpu->min_vruntime      = 0;
     cpu->balance_counter   = 0;
@@ -369,9 +465,7 @@ void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
 
     thread_t* idle =
         thread_create("idle_thread", kernel_proc, SCHED_IDLE, idle_task_entry, nullptr);
-    if (!idle) {
-        PANIC("SCHED: failed to create idle thread for cpu=%u\n", cpu->cpu_idx);
-    }
+    if (!idle) PANIC("SCHED: failed to create idle thread for cpu=%u\n", cpu->cpu_idx);
 
     idle->sched_class   = &idle_sched_class;
     idle->state         = THREAD_READY;
@@ -384,7 +478,6 @@ void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
     cpu->thread_count = 0;
 
     timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
-
     KLOG_DEBUG("SCHED: initialzied scheduler on CPU %u\n", cpu->cpu_idx);
 }
 
@@ -403,75 +496,136 @@ void scheduler_init(void) {
     initialized = true;
 }
 
-void scheduler_add_thread(thread_t* t) {
-    if (!t) {
+void schedule(void) {
+    per_cpu_data_t* cpu = smp_current_core();
+    if (unlikely(!cpu)) return;
+
+    if (unlikely((++cpu->balance_counter & 0x3ff) == 0)) balance_load();
+
+    thread_t* curr = cpu->curr_thread;
+    size_t now     = get_time_now();
+
+    if (unlikely(curr->preempt_count > 0)) {
+        cpu->reschedule_needed = true;
         return;
     }
 
-    t->sched_class = get_sched_class(t->policy);
-    if (!t->sched_class) {
-        PANIC("SCHED: Unsupported policy assigned to TID %u\n", t->kobj.koid);
-    }
-
-    update_thread_load(t);
-
-    if (t->assigned_cpu == UINT32_MAX) {
-        t->assigned_cpu = select_best_cpu(t);
-    }
-
-    per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
+    if (likely(curr && curr->state != THREAD_TERMINATED)) thread_save_fpu(curr);
 
     size_t flags = acquire_qinterrupt_lock(&cpu->lock);
-    size_t now   = get_time_now();
+    update_cpu_load(cpu, now);
 
-    t->state = THREAD_READY;
-    t->sched_class->enqueue_task(cpu, t);
-    cpu->thread_count++;
-
-    if (cpu->curr_thread && sched_should_preempt(t, cpu->curr_thread)) {
-        cpu->reschedule_needed = true;
-
-        if (cpu != smp_current_core()) {
-            smp_send_reschedule_ipi(cpu);
+    if (curr && curr != cpu->idle_thread) {
+        if (curr->state == THREAD_RUNNING) {
+            update_thread_load(curr);
+            if (curr->sched_class->task_tick) curr->sched_class->task_tick(cpu, curr, now);
+            curr->state = THREAD_READY;
+            curr->sched_class->enqueue_task(cpu, curr);
+        } else {
+            cpu->thread_count--;
         }
     }
+
+    thread_t* next = pick_next_task(cpu, &flags);
+    if (curr == next) {
+        curr->state           = THREAD_RUNNING;
+        curr->last_start_time = now;
+        if (curr != cpu->idle_thread) curr->sched_class->dequeue_task(cpu, curr);
+        release_qinterrupt_lock(&cpu->lock, flags);
+        return;
+    }
+
+    if (next != cpu->idle_thread) next->sched_class->dequeue_task(cpu, next);
+
+    cpu->curr_thread      = next;
+    next->state           = THREAD_RUNNING;
+    next->assigned_cpu    = cpu->cpu_idx;
+    next->last_start_time = now;
+    switch_mm_and_fpu(cpu, curr, next);
+
+    release_qinterrupt_lock(&cpu->lock, flags);
+
+    arch_switch_context(
+        (switch_context_t**)&curr->context_rsp,
+        (switch_context_t*)next->context_rsp
+    );
+}
+
+void scheduler_directed_yield(thread_t* target) {
+    if (unlikely(!target)) return;
+
+    arch_disable_interrupts();
+    per_cpu_data_t* cpu = smp_current_core();
+    thread_t* curr      = cpu->curr_thread;
+
+    if (target->assigned_cpu != cpu->cpu_idx) {
+        scheduler_unblock(target);
+        scheduler_yield();
+        return;
+    }
+
+    acquire_qspinlock(&cpu->lock);
+
+    if (unlikely(target->state != THREAD_BLOCKED && target->state != THREAD_SLEEPING)) {
+        release_qspinlock(&cpu->lock);
+        arch_enable_interrupts();
+        return;
+    }
+
+    if (likely(curr && curr->state != THREAD_TERMINATED)) thread_save_fpu(curr);
+    size_t now = get_time_now();
+
+    if (likely(curr && curr != cpu->idle_thread)) {
+        curr->state = THREAD_READY;
+        curr->sched_class->enqueue_task(cpu, curr);
+    }
+
+    target->state           = THREAD_RUNNING;
+    target->last_start_time = now;
+    cpu->curr_thread        = target;
+    switch_mm_and_fpu(cpu, curr, target);
+
+    release_qspinlock(&cpu->lock);
+
+    arch_switch_context(
+        (switch_context_t**)&curr->context_rsp,
+        (switch_context_t*)target->context_rsp
+    );
+
+    arch_enable_interrupts();
+}
+
+void scheduler_add_thread(thread_t* t) {
+    if (unlikely(!t)) return;
+
+    t->sched_class = get_sched_class(t->policy);
+    if (!t->sched_class) PANIC("SCHED: Unsupported policy\n");
+
+    update_thread_load(t);
+    if (t->assigned_cpu == UINT32_MAX) t->assigned_cpu = select_best_cpu(t);
+
+    per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
+    size_t flags        = acquire_qinterrupt_lock(&cpu->lock);
+    enqueue_and_check_preempt(cpu, t);
 
     release_qinterrupt_lock(&cpu->lock, flags);
 }
 
 void scheduler_remove_thread(thread_t* t) {
-    if (!t) {
+    if (unlikely(!t)) return;
+
+    size_t flags;
+    per_cpu_data_t* cpu = lock_thread_cpu(t, &flags);
+
+    if (unlikely(!cpu)) {
+        t->state = THREAD_TERMINATED;
         return;
-    }
-
-    per_cpu_data_t* cpu = nullptr;
-    size_t flags        = 0;
-
-    while (true) {
-        uint32_t expected_cpu = *(volatile uint32_t*)&t->assigned_cpu;
-        if (expected_cpu == UINT32_MAX) {
-            t->state = THREAD_TERMINATED;
-            return;
-        }
-
-        cpu   = smp_get_core(expected_cpu);
-        flags = acquire_qinterrupt_lock(&cpu->lock);
-
-        if (t->assigned_cpu == expected_cpu) {
-            break;
-        }
-
-        release_qinterrupt_lock(&cpu->lock, flags);
-        arch_pause();
     }
 
     if (t == cpu->curr_thread) {
         t->state               = THREAD_TERMINATED;
         cpu->reschedule_needed = true;
-
-        if (cpu != smp_current_core()) {
-            smp_send_reschedule_ipi(cpu);
-        }
+        if (cpu != smp_current_core()) smp_send_reschedule_ipi(cpu);
     } else if (t->on_rq) {
         t->sched_class->dequeue_task(cpu, t);
         t->state = THREAD_TERMINATED;
@@ -483,131 +637,37 @@ void scheduler_remove_thread(thread_t* t) {
     release_qinterrupt_lock(&cpu->lock, flags);
 }
 
-static thread_t* pick_next_task(per_cpu_data_t* cpu, size_t* flags) {
-    struct sched_class* sc = sched_classes_head;
-    while (sc) {
-        if (sc->pick_next_task) {
-            thread_t* next = sc->pick_next_task(cpu);
-            if (next) {
-                return next;
-            }
-        }
+int scheduler_renice(thread_t* t, int nice) {
+    if (unlikely(!t)) return -EINVAL;
 
-        sc = sc->next;
+    if (nice < -20) nice = -20;
+    if (nice > 19) nice = 19;
+
+    if (unlikely(!t->sched_class || !t->sched_class->renice_task)) return -EINVAL;
+
+    size_t flags;
+    per_cpu_data_t* cpu = lock_thread_cpu(t, &flags);
+    if (unlikely(!cpu)) {
+        t->sched_class->renice_task(nullptr, t, nice);
+        return 0;
     }
 
-    // No runnable tasks found. Try stealing from neighbors.
-    if ((cpu->balance_counter & 63) == 0) {
-        release_qinterrupt_lock(&cpu->lock, *flags);
-        balance_load();
-        *flags = acquire_qinterrupt_lock(&cpu->lock);
+    bool was_on_rq = t->on_rq;
 
-        sc = sched_classes_head;
-        while (sc) {
-            if (sc->pick_next_task) {
-                thread_t* next = sc->pick_next_task(cpu);
-                if (next) {
-                    return next;
-                }
-            }
-
-            sc = sc->next;
-        }
-    }
-
-    return cpu->idle_thread;
-}
-
-void schedule(void) {
-    per_cpu_data_t* cpu = smp_current_core();
-    if (!cpu) {
-        return;
-    }
-
-    if ((++cpu->balance_counter & 0x3ff) == 0) {
-        balance_load();
-    }
-
-    thread_t* curr = cpu->curr_thread;
-    size_t now     = get_time_now();
-
-    if (curr->preempt_count > 0) {
-        cpu->reschedule_needed = true;
-        return;
-    }
-
-    if (curr && curr->state != THREAD_TERMINATED) {
-        thread_save_fpu(curr);
-    }
-
-    size_t flags = acquire_qinterrupt_lock(&cpu->lock);
-    update_cpu_load(cpu, now);
-
-    if (curr && curr != cpu->idle_thread) {
-        if (curr->state == THREAD_RUNNING) {
-            update_thread_load(curr);
-
-            if (curr->sched_class->task_tick) {
-                curr->sched_class->task_tick(cpu, curr, now);
-            }
-
-            curr->state = THREAD_READY;
-            curr->sched_class->enqueue_task(cpu, curr);
-        } else {
-            cpu->thread_count--;
-        }
-    }
-
-    thread_t* next = pick_next_task(cpu, &flags);
-
-    if (curr == next) {
-        curr->state           = THREAD_RUNNING;
-        curr->last_start_time = now;
-        if (curr != cpu->idle_thread) {
-            curr->sched_class->dequeue_task(cpu, curr);
-        }
-
-        release_qinterrupt_lock(&cpu->lock, flags);
-        return;
-    }
-
-    if (next != cpu->idle_thread) {
-        next->sched_class->dequeue_task(cpu, next);
-    }
-
-    cpu->curr_thread      = next;
-    next->state           = THREAD_RUNNING;
-    next->assigned_cpu    = cpu->cpu_idx;
-    next->last_start_time = now;
-
-    process_t* next_proc = next->owner;
-    process_t* curr_proc = curr ? curr->owner : nullptr;
-
-#ifdef __x86_64__
-    update_tss_rsp(&cpu->arch.tss, next->kernel_stack_top);
-#endif
-
-    cpu->kstack_top = next->kernel_stack_top;
-    if (next_proc && (curr_proc != next_proc)) {
-        pagemap_load(&next_proc->map);
-    }
-
-    thread_restore_fpu(next);
+    if (was_on_rq) t->sched_class->dequeue_task(cpu, t);
+    t->sched_class->renice_task(cpu, t, nice);
+    if (was_on_rq) enqueue_and_check_preempt(cpu, t);
 
     release_qinterrupt_lock(&cpu->lock, flags);
-
-    arch_switch_context(
-        (switch_context_t**)&curr->context_rsp,
-        (switch_context_t*)next->context_rsp
-    );
+    return 0;
 }
 
 void scheduler_block(void) {
     arch_disable_interrupts();
-
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* curr      = cpu->curr_thread;
-    if (curr && curr != cpu->idle_thread) {
+
+    if (likely(curr && curr != cpu->idle_thread)) {
         curr->state            = THREAD_BLOCKED;
         cpu->reschedule_needed = true;
     }
@@ -616,164 +676,44 @@ void scheduler_block(void) {
     arch_enable_interrupts();
 }
 
-void scheduler_unblock(thread_t* t) {
-    if (!t) {
-        return;
+void scheduler_yield(void) {
+    arch_disable_interrupts();
+    per_cpu_data_t* cpu = smp_current_core();
+    thread_t* curr      = cpu->curr_thread;
+
+    if (likely(curr && curr != cpu->idle_thread)) {
+        if (curr->sched_class->yield_task) curr->sched_class->yield_task(cpu, curr);
+        cpu->reschedule_needed = true;
     }
 
-    if (t->assigned_cpu == UINT32_MAX) {
-        t->assigned_cpu = select_best_cpu(t);
-    }
+    arch_enable_interrupts();
+    schedule();
+}
+
+void scheduler_unblock(thread_t* t) {
+    if (unlikely(!t)) return;
+
+    if (t->assigned_cpu == UINT32_MAX) t->assigned_cpu = select_best_cpu(t);
 
     per_cpu_data_t* cpu = smp_get_core(t->assigned_cpu);
     size_t flags        = acquire_qinterrupt_lock(&cpu->lock);
 
-    if (t->state != THREAD_BLOCKED && t->state != THREAD_SLEEPING) {
+    if (unlikely(t->state != THREAD_BLOCKED && t->state != THREAD_SLEEPING)) {
         release_qinterrupt_lock(&cpu->lock, flags);
         return;
     }
 
-    if (t->sched_class->task_unblock) {
-        t->sched_class->task_unblock(cpu, t);
-    }
-
-    t->state = THREAD_READY;
-    t->sched_class->enqueue_task(cpu, t);
-    cpu->thread_count++;
-
-    if (cpu->curr_thread && sched_should_preempt(t, cpu->curr_thread)) {
-        cpu->reschedule_needed = true;
-        if (cpu != smp_current_core()) {
-            smp_send_reschedule_ipi(cpu);
-        }
-    }
-
+    if (t->sched_class->task_unblock) t->sched_class->task_unblock(cpu, t);
+    enqueue_and_check_preempt(cpu, t);
     release_qinterrupt_lock(&cpu->lock, flags);
 }
 
-void scheduler_yield(void) {
-    arch_disable_interrupts();
-
-    per_cpu_data_t* cpu = smp_current_core();
-    thread_t* curr      = cpu->curr_thread;
-    if (curr && curr != cpu->idle_thread) {
-        if (curr->sched_class->yield_task) {
-            curr->sched_class->yield_task(cpu, curr);
-        }
-
-        cpu->reschedule_needed = true;
-    }
-
-    arch_enable_interrupts();
-    schedule();
-}
-
-static void sleep_callback(void* ctx) {
-    scheduler_unblock(ctx);
+int scheduler_block_timeout(int64_t timeout_ms) {
+    return internal_sleep_timeout(timeout_ms, THREAD_BLOCKED);
 }
 
 int scheduler_sleep(int64_t timeout_ms) {
-    if (timeout_ms < 0) {
-        return -EINVAL;
-    }
-
-    if (timeout_ms == 0) {
-        scheduler_yield();
-        return 0;
-    }
-
-    arch_disable_interrupts();
-    per_cpu_data_t* cpu = smp_current_core();
-    thread_t* curr      = cpu->curr_thread;
-
-    if (!curr || curr == cpu->idle_thread) {
-        arch_enable_interrupts();
-        return -EPERM;
-    }
-
-    acquire_qspinlock(&cpu->lock);
-
-    curr->state            = THREAD_SLEEPING;
-    cpu->reschedule_needed = true;
-
-    timer_arm_oneshot(cpu->timer_manager, &curr->sleep_timer, timeout_ms, sleep_callback, curr);
-    release_qspinlock(&cpu->lock);
-
-    schedule();
-
-    arch_disable_interrupts();
-
-    cpu                = smp_current_core();
-    bool woke_up_early = timer_cancel(&curr->sleep_timer);
-
-    arch_enable_interrupts();
-
-    if (woke_up_early) {
-        return -EINTR;
-    }
-
-    return 0;
-}
-
-int scheduler_renice(thread_t* t, int nice) {
-    if (!t) {
-        return -EINVAL;
-    }
-
-    if (nice < -20) {
-        nice = -20;
-    }
-
-    if (nice > 19) {
-        nice = 19;
-    }
-
-    if (!t->sched_class || !t->sched_class->renice_task) {
-        return -EINVAL;
-    }
-
-    per_cpu_data_t* cpu = nullptr;
-    size_t flags        = 0;
-
-    while (true) {
-        uint32_t expected_cpu = *(volatile uint32_t*)&t->assigned_cpu;
-        if (expected_cpu == UINT32_MAX) {
-            t->sched_class->renice_task(nullptr, t, nice);
-            return 0;
-        }
-
-        cpu   = smp_get_core(expected_cpu);
-        flags = acquire_qinterrupt_lock(&cpu->lock);
-
-        if (t->assigned_cpu == expected_cpu) {
-            break;
-        }
-
-        release_qinterrupt_lock(&cpu->lock, flags);
-        arch_pause();
-    }
-
-    bool was_on_rq = t->on_rq;
-
-    if (was_on_rq) {
-        t->sched_class->dequeue_task(cpu, t);
-    }
-
-    t->sched_class->renice_task(cpu, t, nice);
-    if (was_on_rq) {
-        t->sched_class->enqueue_task(cpu, t);
-
-        if (cpu->curr_thread && sched_should_preempt(t, cpu->curr_thread)) {
-            cpu->reschedule_needed = true;
-
-            if (cpu != smp_current_core()) {
-                smp_send_reschedule_ipi(cpu);
-            }
-        }
-    }
-
-    release_qinterrupt_lock(&cpu->lock, flags);
-    return 0;
+    return internal_sleep_timeout(timeout_ms, THREAD_SLEEPING);
 }
 
 bool scheduler_is_initialized(void) {
@@ -786,7 +726,7 @@ process_t* get_kernel_process(void) {
 
 void preempt_disable(void) {
     per_cpu_data_t* cpu = smp_current_core();
-    if (cpu && cpu->curr_thread) {
+    if (likely(cpu && cpu->curr_thread)) {
         cpu->curr_thread->preempt_count++;
     }
 
@@ -797,19 +737,25 @@ void preempt_enable(void) {
     atomic_signal_fence(memory_order_seq_cst);
 
     per_cpu_data_t* cpu = smp_current_core();
-    if (cpu && cpu->curr_thread) {
-        if (cpu->curr_thread->preempt_count > 0) {
-            cpu->curr_thread->preempt_count--;
-        }
+    if (likely(cpu)) {
+        thread_t* curr = cpu->curr_thread;
 
-        if (cpu->curr_thread->preempt_count == 0 && cpu->reschedule_needed) {
-            cpu->reschedule_needed = false;
-            schedule();
+        if (likely(curr && curr->preempt_count > 0)) {
+            curr->preempt_count--;
+
+            if (unlikely(curr->preempt_count == 0 && cpu->reschedule_needed)) {
+                cpu->reschedule_needed = false;
+                schedule();
+            }
         }
     }
 }
 
 uint32_t preempt_count(void) {
     per_cpu_data_t* cpu = smp_current_core();
-    return (cpu && cpu->curr_thread) ? cpu->curr_thread->preempt_count : 0;
+    if (likely(cpu && cpu->curr_thread)) {
+        return cpu->curr_thread->preempt_count;
+    }
+
+    return 0;
 }
