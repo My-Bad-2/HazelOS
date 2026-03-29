@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -52,6 +53,8 @@ void user_start() {
     char buf[128];
     snprintf(buf, sizeof(buf), "Hello from Process (0x%lx)\n", ret);
     write(1, buf, sizeof(buf));
+
+    exit(0);
 
     while (true);
 }

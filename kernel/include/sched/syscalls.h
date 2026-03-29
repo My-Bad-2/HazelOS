@@ -51,6 +51,7 @@ uint64_t sys_fork(struct syscall_regs* tf);
 uint64_t sys_vfork(struct syscall_regs* tf);
 uint64_t sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf);
 int sys_execv(const char* path, const char* argv[], struct syscall_regs* tf);
+void sys_exit(int exit_code);
 
 #ifdef __cplusplus
 }

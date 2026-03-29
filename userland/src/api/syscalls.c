@@ -26,3 +26,7 @@ int munmmap(void* addr, size_t length) {
 uint64_t fork(void) {
     return (uint64_t)syscall(SYS_FORK, 0);
 }
+
+void exit(int exit_code) {
+    syscall(SYS_EXIT, exit_code);
+}

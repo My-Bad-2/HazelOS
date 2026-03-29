@@ -4,7 +4,6 @@
 
 #include "drivers/timer.h"
 #include "libs/dlist.h"
-#include "libs/rb_tree.h"
 #include "sched/sched_class.h"
 
 #define RR_QUANTUM_NS 10000000ul  // 10ms default quantum for Round Robin

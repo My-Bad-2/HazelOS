@@ -882,6 +882,10 @@ void arch_mmu_init(void) {
     );
 }
 
+uintptr_t get_user_space_limit(void) {
+    return (paging_max_levels == 5) ? USER_SPACE_END_5L : USER_SPACE_END_4L;
+}
+
 void arch_mmu_free_pkey(arch_pagemap_t* map, uint8_t pkey) {
     if (!pku_supported || !map || pkey == 0 || pkey >= X86_MAX_PKEYS) {
         return;

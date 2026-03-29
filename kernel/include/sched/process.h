@@ -48,9 +48,6 @@ typedef enum {
 typedef struct process {
     struct kobject kobj;
 
-#if KERNEL_DEBUG
-    char name[32];
-#endif
     uint16_t state;
     bool is_kernel;
     int exit_code;
@@ -68,6 +65,10 @@ typedef struct process {
 
     struct wait_queue wait_queue;
     struct wait_queue vfork_wait_queue;
+
+#if KERNEL_DEBUG
+    char name[32];
+#endif
 } process_t;
 
 #define SCHED_DATA_PAYLOAD_SIZE 32
@@ -78,9 +79,6 @@ typedef struct {
 
 typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     struct kobject kobj;
-#if KERNEL_DEBUG
-    char name[32];
-#endif
     process_t* owner;
 
     uintptr_t context_rsp;
@@ -96,6 +94,10 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     uint32_t assigned_cpu;
     uint32_t affinity_mask;
 
+#if KERNEL_DEBUG
+    char name[32];
+#endif
+
     alignas(CACHE_LINE_SIZE) sched_entity_t sched;
     struct sched_class* sched_class;
     size_t avg_load;
@@ -103,8 +105,11 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     size_t preempt_count;
     size_t last_start_time;
 
-    struct rb_node rb_node;
-    struct dlist_head run_node;
+    union {
+        struct rb_node rb_node;
+        struct dlist_head run_node;
+    };
+
     struct dlist_head process_node;
     struct dlist_head wait_node;
     struct wait_queue join_queue;

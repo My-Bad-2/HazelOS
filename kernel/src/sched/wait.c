@@ -5,7 +5,6 @@
 #include "libs/dlist.h"
 #include "libs/spinlock.h"
 #include "sched/process.h"
-#include "sched/sched_class.h"
 #include "sched/scheduler.h"
 
 void thread_sleep_prepare(struct wait_queue* wq) {

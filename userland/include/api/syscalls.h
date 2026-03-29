@@ -52,6 +52,7 @@ int munmmap(void* addr, size_t length);
 int mprotect(void* addr, size_t length, int prot);
 void* sys_mremap(void* old_address, size_t old_size, size_t new_size, int flags, void* new_address);
 uint64_t fork(void);
+void exit(int exit_code);
 
 #ifdef __cplusplus
 }

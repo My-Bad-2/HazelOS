@@ -207,6 +207,10 @@ static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process*
         case SYS_CLONE:
             res = sys_clone(regs->rdi, (void*)regs->rsi, regs);
             break;
+        case SYS_EXIT:
+            sys_exit((int)regs->rdi);
+            res = regs->rdi;
+            break;
         default:
             KLOG_DEBUG("Syscall %lu called!\n", regs->rax);
             break;

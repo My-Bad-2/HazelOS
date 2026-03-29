@@ -113,7 +113,6 @@ __attribute__((force_align_arg_pointer)) void pf_handler(interrupt_trapframe_t* 
 
     if (tf->error_code & X86_PAGE_FAULT_USER) {
         process_exit(-EFAULT);
-        scheduler_yield();
     } else {
         PANIC("Kernel page fault at %p! (RIP: %p)", fault_addr, tf->rip);
     }

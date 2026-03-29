@@ -5,7 +5,6 @@
 
 #include "libs/log.h"
 #include "sched/process.h"
-#include "sched/sched_class.h"
 #include "sched/scheduler.h"
 #include "sched/syscalls.h"
 
@@ -104,4 +103,8 @@ uint64_t sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf) {
 
     scheduler_add_thread(child_thread);
     return (flags & CLONE_THREAD) ? child_thread->kobj.koid : target_proc->kobj.koid;
+}
+
+void sys_exit(int exit_code) {
+    process_exit(exit_code);
 }

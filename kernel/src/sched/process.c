@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "compiler.h"
 #include "core/capability.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
@@ -19,7 +20,7 @@ static kmem_cache_t* process_cache = nullptr;
 extern process_t* init_process;
 static qspinlock_t global_process_lock;
 
-static void capability_bootstrap_injection(
+static bool capability_bootstrap_injection(
     struct process* parent,
     struct process* child,
     uint64_t* proc_cap_id,
@@ -27,17 +28,17 @@ static void capability_bootstrap_injection(
 ) {
     uint64_t parent_proc_cap_id;
     struct capability* proc_cap = cap_alloc(parent->root_cnode, &parent_proc_cap_id);
-
-    if (proc_cap_id) {
-        *proc_cap_id = parent_proc_cap_id;
-    }
+    if (unlikely(!proc_cap)) return false;
 
     uint64_t parent_cnode_cap_id;
     struct capability* cnode_cap = cap_alloc(parent->root_cnode, &parent_cnode_cap_id);
-
-    if (cnode_cap_id) {
-        *cnode_cap_id = parent_cnode_cap_id;
+    if (unlikely(!cnode_cap)) {
+        cap_close(parent->root_cnode, parent_proc_cap_id);
+        return false;
     }
+
+    if (proc_cap_id) *proc_cap_id = parent_proc_cap_id;
+    if (cnode_cap_id) *cnode_cap_id = parent_cnode_cap_id;
 
     acquire_qspinlock(&proc_cap->lock);
     atomic_store_explicit(&proc_cap->object_ptr, (uintptr_t)child, memory_order_release);
@@ -54,6 +55,8 @@ static void capability_bootstrap_injection(
     cnode_cap->type   = CAP_TYPE_CNODE;
     cnode_cap->rights = RIGHT_ALL;
     release_qspinlock(&cnode_cap->lock);
+
+    return true;
 }
 
 process_t* process_create(const char* name, bool is_kernel) {
@@ -63,21 +66,19 @@ process_t* process_create(const char* name, bool is_kernel) {
     }
 
     process_t* proc = kmem_cache_alloc(process_cache);
-    if (!proc) {
-        return nullptr;
-    }
+    if (unlikely(!proc)) return nullptr;
 
     memset(proc, 0, sizeof(process_t));
     kref_init(&proc->kobj, CAP_TYPE_PROCESS);
     proc->state      = PROCESS_ALIVE;
     proc->is_kernel  = is_kernel;
     proc->root_cnode = create_cspace();
-
 #if KERNEL_DEBUG
-    strncpy(proc->name, name, sizeof(proc->name) - 1);
+    if (likely(name)) strncpy(proc->name, name, sizeof(proc->name) - 1);
 #else
     (void)name;
 #endif
+
     create_qspinlock(&proc->lock);
     dlist_init(&proc->thread_list);
     dlist_init(&proc->children_list);
@@ -90,7 +91,7 @@ process_t* process_create(const char* name, bool is_kernel) {
         memcpy(&proc->space, kernel_space, sizeof(vm_space_t));
     } else {
         pagemap_create(&proc->map);
-        vmm_init_space(&proc->space, &proc->map, 0x1000, 0x00007fffffffffff);
+        vmm_init_space(&proc->space, &proc->map, USER_SPACE_START, get_user_space_limit());
     }
 
     return proc;
@@ -102,23 +103,19 @@ process_t* process_clone(
     uint64_t* parent_proc_cap_id,
     uint64_t* parent_cnode_id
 ) {
-    if (!parent) {
-        return nullptr;
-    }
+    if (unlikely(!parent)) return nullptr;
 
     process_t* child = kmem_cache_alloc(process_cache);
-    if (!child) {
-        return nullptr;
-    }
+    if (unlikely(!child)) return nullptr;
 
     memset(child, 0, sizeof(process_t));
     kref_init(&child->kobj, CAP_TYPE_PROCESS);
     child->state      = PROCESS_ALIVE;
     child->root_cnode = create_cspace();
-
 #if KERNEL_DEBUG
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
 #endif
+
     create_qspinlock(&child->lock);
     dlist_init(&child->thread_list);
     dlist_init(&child->children_list);
@@ -132,12 +129,21 @@ process_t* process_clone(
         child->map   = parent->map;
     } else {
         if (!vmm_clone_space(&parent->space, &child->space, &child->map)) {
+            destroy_cspace(child->root_cnode);
             kmem_cache_free(process_cache, child);
             return nullptr;
         }
     }
 
-    capability_bootstrap_injection(parent, child, parent_proc_cap_id, parent_cnode_id);
+    if (unlikely(
+            !capability_bootstrap_injection(parent, child, parent_proc_cap_id, parent_cnode_id)
+        )) {
+        if (!(flags & CLONE_VM)) vmm_destroy_space(&child->space);
+        destroy_cspace(child->root_cnode);
+        kmem_cache_free(process_cache, child);
+        return nullptr;
+    }
+
     child->parent = parent;
 
     acquire_qspinlock(&global_process_lock);
@@ -148,34 +154,14 @@ process_t* process_clone(
 }
 
 uint64_t process_wait(process_t* proc, int* exit_code) {
-    if (!proc) {
-        return 0;
-    }
+    if (unlikely(!proc)) return 0;
 
-    while (true) {
-        thread_sleep_prepare(&proc->wait_queue);
+    wait_event(&proc->wait_queue, proc->state == PROCESS_ZOMBIE || proc->state == PROCESS_DEAD);
 
-        acquire_qspinlock(&proc->lock);
-        bool is_done = (proc->state == PROCESS_ZOMBIE || proc->state == PROCESS_DEAD);
-
-        if (is_done) {
-            if (exit_code) {
-                *exit_code = proc->exit_code;
-            }
-
-            proc->state = PROCESS_DEAD;
-        }
-
-        release_qspinlock(&proc->lock);
-
-        if (is_done) {
-            thread_sleep_finish(&proc->wait_queue);
-            break;
-        }
-
-        scheduler_yield();
-        thread_sleep_finish(&proc->wait_queue);
-    }
+    acquire_qspinlock(&proc->lock);
+    if (exit_code) *exit_code = proc->exit_code;
+    proc->state = PROCESS_DEAD;
+    release_qspinlock(&proc->lock);
 
     uint64_t koid = proc->kobj.koid;
     kref_put(&proc->kobj, process_release);
@@ -195,13 +181,14 @@ uint64_t process_wait(process_t* proc, int* exit_code) {
 }
 
 void process_release(struct kobject* obj) {
-    if (!obj) return;
+    if (unlikely(!obj)) return;
 
     process_t* proc = kref_entry(obj, struct process, kobj);
     wait_queue_wake_up_all(&proc->vfork_wait_queue);
 
     if (!proc->is_kernel) pagemap_release(&proc->map);
 
+    acquire_qspinlock(&global_process_lock);
     acquire_qspinlock(&proc->lock);
 
     while (!dlist_empty(&proc->children_list)) {
@@ -209,15 +196,21 @@ void process_release(struct kobject* obj) {
         struct process* orphan  = dlist_entry(node, struct process, sibling_node);
 
         dlist_del(node);
-        orphan->parent = init_process;
-        dlist_add_tail(&orphan->sibling_node, &init_process->children_list);
+
+        if (likely(init_process)) {
+            orphan->parent = init_process;
+            dlist_add_tail(&orphan->sibling_node, &init_process->children_list);
+        }
     }
 
-    if (!dlist_empty(&proc->sibling_node)) dlist_del(&proc->sibling_node);
-    if (proc->parent) wait_queue_wake_up_all(&proc->parent->wait_queue);
+    if (!dlist_empty(&proc->sibling_node)) dlist_del_init(&proc->sibling_node);
+    process_t* parent = proc->parent;
+
+    release_qspinlock(&proc->lock);
+    release_qspinlock(&global_process_lock);
+
+    if (parent) wait_queue_wake_up_all(&parent->wait_queue);
 
     destroy_cspace(proc->root_cnode);
-
-    release_qspinlock(&global_process_lock);
     kmem_cache_free(process_cache, proc);
 }

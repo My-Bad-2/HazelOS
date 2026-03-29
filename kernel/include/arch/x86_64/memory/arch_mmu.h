@@ -9,6 +9,9 @@
 #define X86_MAX_PCID  4095
 #define X86_MAX_PKEYS 15
 
+#define USER_SPACE_END_4L 0x00007ffffffffffful
+#define USER_SPACE_END_5L 0x00fffffffffffffful
+
 typedef struct {
     spinlock_t pcid_lock;
     uint64_t pcid_bitmap[64];  // 64 * 64 = 4096 entries

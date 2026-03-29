@@ -4,6 +4,8 @@
 #include "memory/pagemap.h"
 #include "sched/process.h"
 
+#define USER_SPACE_START 0x1000ul
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -20,6 +22,8 @@ int copy_between_spaces(
     const void* src_addr,
     size_t len
 );
+
+uintptr_t get_user_space_limit(void);
 
 #ifdef __cplusplus
 }
