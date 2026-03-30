@@ -15,6 +15,7 @@
 #define CAP_TYPE_NOTIFICATION 5
 #define CAP_TYPE_REPLY        6
 #define CAP_TYPE_CNODE        7
+#define CAP_TYPE_VSPACE       8
 #define CAP_TYPE_WEAK         15
 
 #define RIGHT_READ         (1 << 0)

@@ -164,6 +164,22 @@ static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* re
     return (uint64_t)status;
 }
 
+static uint64_t
+dispatch_sched_syscall(uint64_t operation, struct syscall_regs* regs, struct process*) {
+    uint64_t res = 0;
+
+    switch (operation) {
+        case 0x01:  // SYS_SCHED_FORK
+            res = sys_fork(regs);
+            break;
+        default:
+            res = (uint64_t)ERR_DENIED;
+            break;
+    }
+
+    return res;
+}
+
 static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process* proc) {
     uint64_t res = 0;
     switch (regs->rax) {
@@ -198,15 +214,6 @@ static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process*
                 (void*)regs->r8
             );
             break;
-        case SYS_FORK:
-            res = sys_fork(regs);
-            break;
-        case SYS_VFORK:
-            res = sys_vfork(regs);
-            break;
-        case SYS_CLONE:
-            res = sys_clone(regs->rdi, (void*)regs->rsi, regs);
-            break;
         case SYS_EXIT:
             sys_exit((int)regs->rdi);
             res = regs->rdi;
@@ -236,6 +243,9 @@ uint64_t syscall_dispatcher(struct syscall_regs* regs) {
             break;
         case SYS_CATEGORY_IPC:
             res = dispatch_ipc_syscall(operation, regs);
+            break;
+        case SYS_CATEGORY_SCHED:
+            res = dispatch_sched_syscall(operation, regs, proc);
             break;
         default:
             res = dispatch_misc_syscall(regs, proc);
