@@ -1,10 +1,10 @@
-#include "libs/kobject.h"
 #ifndef KERNEL_SCHED_IPC_H
 #define KERNEL_SCHED_IPC_H 1
 
 #include <stdint.h>
 
 #include "libs/dlist.h"
+#include "libs/kobject.h"
 #include "libs/spinlock.h"
 #include "uapi/ipc.h"
 

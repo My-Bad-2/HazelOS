@@ -14,6 +14,7 @@
 #include "memory/pagemap.h"
 #include "memory/paging.h"
 #include "memory/pmm.h"
+#include "memory/vma.h"
 #include "memory/vmm.h"
 
 static int paging_max_levels  = 4;
@@ -1301,4 +1302,8 @@ void arch_mmu_sync_kernel(arch_pagemap_t* target_map) {
     );
 
     release_spinlock(&target_map->lock);
+}
+
+bool vmm_is_user_region(uintptr_t addr, size_t size) {
+    return (addr >= USER_SPACE_START) && ((addr + size) <= get_user_space_limit());
 }

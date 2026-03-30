@@ -10,8 +10,9 @@
 extern "C" {
 #endif
 
-#define SYS_CATEGORY_CAP 0x0100
-#define SYS_CATEGORY_IPC 0x0200
+#define SYS_CATEGORY_CAP   0x0100
+#define SYS_CATEGORY_IPC   0x0200
+#define SYS_CATEGORY_SCHED 0x0300
 
 #define SYS_CAP_DELEGATE (SYS_CATEGORY_CAP | 0x01)  // Grant a capability to another CNode
 #define SYS_CAP_CLOSE    (SYS_CATEGORY_CAP | 0x02)  // Close a cap
@@ -28,6 +29,12 @@ extern "C" {
 #define SYS_IPC_RECV                (SYS_CATEGORY_IPC | 0x07)
 #define SYS_IPC_NOTIFICATION_CREATE (SYS_CATEGORY_IPC | 0x08)
 #define SYS_IPC_NOTIFY              (SYS_CATEGORY_IPC | 0x09)
+
+#define SYS_SCHED_PROCESS_CREATE (SYS_CATEGORY_SCHED | 0x01)
+#define SYS_SCHED_THREAD_CREATE  (SYS_CATEGORY_SCHED | 0x02)
+#define SYS_SCHED_WAIT           (SYS_CATEGORY_SCHED | 0x03)
+#define SYS_SCHED_THREAD_EXIT    (SYS_CATEGORY_SCHED | 0x04)
+#define SYS_SCHED_PROCESS_EXIT   (SYS_CATEGORY_SCHED | 0x05)
 
 #define SYS_WRITE    0x01
 #define SYS_MMAP     0x09

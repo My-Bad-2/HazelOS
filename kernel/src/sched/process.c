@@ -1,5 +1,6 @@
 #include "sched/process.h"
 
+#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -111,7 +112,7 @@ process_t* process_clone(
     memset(child, 0, sizeof(process_t));
     kref_init(&child->kobj, CAP_TYPE_PROCESS);
     child->state      = PROCESS_ALIVE;
-    child->root_cnode = create_cspace();
+    child->root_cnode = cnode_clone(parent->root_cnode);
 #if KERNEL_DEBUG
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
 #endif

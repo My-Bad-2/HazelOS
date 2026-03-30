@@ -25,6 +25,7 @@
 #define RIGHT_WAIT         (1 << 5)
 #define RIGHT_GRANT        (1 << 6)
 #define RIGHT_SIGNAL       (1 << 11)
+#define RIGHT_CLOEXEC      (1 << 13)
 #define RIGHT_CNODE_MUTATE (1 << 14)
 #define RIGHT_WEAK         (1 << 15)
 #define RIGHT_ALL          (0x7fff)
@@ -72,12 +73,9 @@ cap_lookup(struct cnode* node, uint64_t cap_id, uint32_t req_rights) {
     uint16_t l2_idx = (cap_id >> CSPACE_L2_SHIFT) & CSPACE_L2_MASK;
     uint16_t l3_idx = cap_id & CSPACE_L3_MASK;
 
-    if (unlikely(l1_idx >= node->capacity)) {
-        return nullptr;
-    }
+    if (unlikely(l1_idx >= node->capacity)) return nullptr;
 
     struct capability* cap = &node->slots[l1_idx];
-
     if (cap->type == CAP_TYPE_CNODE) {
         struct cnode* l2 =
             (struct cnode*)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
@@ -102,9 +100,8 @@ cap_lookup(struct cnode* node, uint64_t cap_id, uint32_t req_rights) {
 
     // ABA & Rights Check
     uint8_t current_gen = atomic_load_explicit(&cap->generation, memory_order_acquire);
-    if (unlikely(current_gen != expected_gen || (cap->rights & req_rights) != req_rights)) {
+    if (unlikely(current_gen != expected_gen || (cap->rights & req_rights) != req_rights))
         return nullptr;
-    }
 
     // Resolve Ephemeral (Weak) Capabilities
     if (unlikely(cap->type == CAP_TYPE_WEAK)) {
@@ -114,10 +111,7 @@ cap_lookup(struct cnode* node, uint64_t cap_id, uint32_t req_rights) {
         uint8_t target_gen = atomic_load_explicit(&target->generation, memory_order_acquire);
 
         // Weak cap's badge stores the generation the target should have
-        if (target_gen != cap->badge || (target->rights & req_rights) != req_rights) {
-            return nullptr;
-        }
-
+        if (target_gen != cap->badge || (target->rights & req_rights) != req_rights) return nullptr;
         return target;
     }
 
@@ -152,6 +146,8 @@ void cnode_init(
 );
 struct cnode* create_cspace(void);
 void destroy_cspace(struct cnode* root);
+struct cnode* cnode_clone(struct cnode* parent);
+
 struct capability* cap_alloc(struct cnode* node, uint64_t* out_cap_id);
 int cap_delegate(struct capability* src, struct capability* child, uint16_t reduced_rights);
 int cap_close(struct cnode* root, uint64_t cap_id);

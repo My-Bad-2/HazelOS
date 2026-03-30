@@ -27,7 +27,6 @@ uint64_t generate_koid(struct koid_allocator* core, uint8_t object_type);
 
 static inline void kref_init(struct kobject* obj, uint8_t type) {
     obj->koid = generate_koid(koid_get_current_allocator(), type);
-
     atomic_init(&obj->ref_count, 1);
 }
 

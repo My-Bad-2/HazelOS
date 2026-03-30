@@ -12,7 +12,40 @@
 #include "sched/ipc.h"
 #include "sched/process.h"
 
+#define MAX_CLONE_NODES 64
+
+struct clone_ctx {
+    struct cnode* old_nodes[MAX_CLONE_NODES];
+    struct cnode* new_nodes[MAX_CLONE_NODES];
+    size_t count;
+
+    struct cnode* work_queue[MAX_CLONE_NODES];
+    size_t head;
+    size_t tail;
+};
+
 static kmem_cache_t* cnode_cache = nullptr;
+
+static struct cnode* alloc_cnode_skeleton(struct cnode* template_cnode) {
+    struct cnode* new_node = (struct cnode*)kmem_cache_alloc(cnode_cache);
+    if (!new_node) return nullptr;
+
+    struct capability* slots =
+        (struct capability*)kmalloc(template_cnode->capacity * sizeof(struct capability));
+    if (!slots) {
+        kmem_cache_free(cnode_cache, new_node);
+        return nullptr;
+    }
+
+    new_node->slots       = slots;
+    new_node->capacity    = template_cnode->capacity;
+    new_node->path_prefix = template_cnode->path_prefix;
+    new_node->index_shift = template_cnode->index_shift;
+    slist_init(&new_node->free_list);
+    create_qspinlock(&new_node->lock);
+
+    return new_node;
+}
 
 static void cap_object_ref(uint8_t type, void* obj) {
     if (!obj) {
@@ -141,15 +174,12 @@ struct cnode* create_cspace(void) {
 }
 
 void destroy_cspace(struct cnode* root) {
-    if (!root) {
-        return;
-    }
+    if (!root) return;
 
     for (size_t i = 1; i < root->capacity; ++i) {
         struct capability* cap = &root->slots[i];
 
         uint8_t type = cap->type;
-
         if (type != CAP_TYPE_NONE && type != CAP_TYPE_WEAK) {
             uint8_t gen     = atomic_load_explicit(&cap->generation, memory_order_relaxed);
             uint64_t cap_id = ((uint64_t)gen << 56) | root->path_prefix | (i << root->index_shift);
@@ -160,6 +190,124 @@ void destroy_cspace(struct cnode* root) {
 
     kfree(root->slots);
     kmem_cache_free(cnode_cache, root);
+}
+
+struct cnode* cnode_clone(struct cnode* parent) {
+    if (unlikely(!parent)) return nullptr;
+
+    struct clone_ctx* ctx = (struct clone_ctx*)kmalloc(sizeof(struct clone_ctx));
+    if (!ctx) return nullptr;
+    ctx->count = 0;
+    ctx->head  = 0;
+    ctx->tail  = 0;
+
+    // Bootstrap the root node
+    struct cnode* new_root = alloc_cnode_skeleton(parent);
+    if (!new_root) {
+        kfree(ctx);
+        return nullptr;
+    }
+
+    // Add root to mapping table and work queue
+    ctx->old_nodes[ctx->count] = parent;
+    ctx->new_nodes[ctx->count] = new_root;
+    ctx->count++;
+    ctx->work_queue[ctx->tail++] = parent;
+
+    // Process as Breadth-First Search queue
+    while (ctx->head < ctx->tail) {
+        struct cnode* old_node = ctx->work_queue[ctx->head++];
+
+        struct cnode* new_node = nullptr;
+        for (size_t i = 0; i < ctx->count; i++) {
+            if (ctx->old_nodes[i] == old_node) {
+                new_node = ctx->new_nodes[i];
+                break;
+            }
+        }
+
+        // Iterate exactly one level per slot
+        for (size_t i = 0; i < old_node->capacity; i++) {
+            struct capability* p_cap = &old_node->slots[i];
+            struct capability* c_cap = &new_node->slots[i];
+
+            atomic_init(&c_cap->object_ptr, 0);
+            atomic_init(&c_cap->generation, 1);
+            c_cap->badge  = 0;
+            c_cap->rights = 0;
+            c_cap->type   = CAP_TYPE_NONE;
+            create_qspinlock(&c_cap->lock);
+
+            // Snapshot the parent slot's state
+            acquire_qspinlock(&p_cap->lock);
+            uint8_t type    = p_cap->type;
+            uint16_t rights = p_cap->rights;
+            uint32_t badge  = p_cap->badge;
+            void* obj       = (void*)atomic_load_explicit(&p_cap->object_ptr, memory_order_relaxed);
+            release_qspinlock(&p_cap->lock);
+
+            if (type == CAP_TYPE_NONE) {
+                slist_push(&c_cap->free_node, &new_node->free_list);
+                continue;
+            }
+
+            if (type == CAP_TYPE_CNODE) {
+                struct cnode* old_child = (struct cnode*)obj;
+                struct cnode* new_child = nullptr;
+
+                // Have we seen this child before?
+                for (size_t j = 0; j < ctx->count; j++) {
+                    if (ctx->old_nodes[j] == old_child) {
+                        new_child = ctx->new_nodes[j];
+                        break;
+                    }
+                }
+
+                // If not, we create it and queue it for future processing
+                if (!new_child) {
+                    if (ctx->count >= MAX_CLONE_NODES) {
+                        // Graph is too large. Skip cloning this sub-branch to protect the kernel.
+                        slist_push(&c_cap->free_node, &new_node->free_list);
+                        continue;
+                    }
+
+                    new_child = alloc_cnode_skeleton(old_child);
+                    if (!new_child) {
+                        // Clean up the entire partially contructed CSpace and abort.
+                        destroy_cspace(new_root);
+                        kfree(ctx);
+                        return nullptr;
+                    }
+
+                    // Map and enqueue it
+                    ctx->old_nodes[ctx->count] = old_child;
+                    ctx->new_nodes[ctx->count] = new_child;
+                    ctx->count++;
+
+                    ctx->work_queue[ctx->tail++] = old_child;
+                }
+
+                // Link the parent slot to the new child
+                atomic_store_explicit(
+                    &c_cap->object_ptr,
+                    (uintptr_t)new_child,
+                    memory_order_relaxed
+                );
+            } else if (type == CAP_TYPE_WEAK) {
+                atomic_store_explicit(&c_cap->object_ptr, (uintptr_t)obj, memory_order_relaxed);
+            } else {
+                cap_object_ref(type, obj);
+                atomic_store_explicit(&c_cap->object_ptr, (uintptr_t)obj, memory_order_relaxed);
+            }
+
+            c_cap->type   = type;
+            c_cap->rights = rights;
+            c_cap->badge  = badge;
+        }
+    }
+
+    kfree(ctx);
+    return new_root;
 }
 
 struct capability* cap_alloc(struct cnode* node, uint64_t* out_cap_id) {

@@ -60,9 +60,7 @@ void ipc_init(void) {
 }
 
 static void sys_ipc_notify_internal(struct ipc_port_set* set, struct ipc_object_header* obj) {
-    if (!set) {
-        return;
-    }
+    if (!set) return;
 
     acquire_qspinlock(&set->lock);
 

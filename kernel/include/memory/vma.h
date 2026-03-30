@@ -74,6 +74,8 @@ struct vmm_fault_info {
     bool is_exec;
 };
 
+bool vmm_is_user_region(uintptr_t addr, size_t size);
+
 void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_t end);
 void vmm_destroy_space(vm_space_t* space);
 
