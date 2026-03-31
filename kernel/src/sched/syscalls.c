@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stdint.h>
 
+#include "cpu/smp.h"
 #include "libs/log.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
@@ -52,9 +53,10 @@ int64_t sys_write(uint32_t fd, const char* user_buf, size_t count) {
 uint64_t sys_fork(struct syscall_regs* tf) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* parent    = cpu->curr_thread;
-    uint64_t parent_cap_id, parent_cnode_id;
+    uint64_t parent_cap_id, parent_cnode_id, parent_vspace_id;
 
-    process_t* child_proc = process_clone(parent->owner, 0, &parent_cap_id, &parent_cnode_id);
+    process_t* child_proc =
+        process_clone(parent->owner, 0, &parent_cap_id, &parent_cnode_id, &parent_vspace_id);
     if (!child_proc) {
         return 0;
     }
@@ -75,18 +77,24 @@ uint64_t sys_vfork(struct syscall_regs* tf) {
     per_cpu_data_t* cpu = smp_current_core();
     thread_t* parent    = cpu->curr_thread;
 
-    uint64_t parent_cap_id, parent_cnode_id;
-    return thread_vclone(parent, tf, &parent_cap_id, &parent_cnode_id);
+    uint64_t parent_cap_id, parent_cnode_id, parent_vspace_id;
+    return thread_vclone(parent, tf, &parent_cap_id, &parent_cnode_id, &parent_vspace_id);
 }
 
 uint64_t sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf) {
     per_cpu_data_t* cpu     = smp_current_core();
     thread_t* parent_thread = cpu->curr_thread;
     process_t* target_proc  = parent_thread->owner;
-    uint64_t parent_cap_id, parent_cnode_id;
+    uint64_t parent_cap_id, parent_cnode_id, parent_vspace_id;
 
     if (!(flags & CLONE_THREAD)) {
-        target_proc = process_clone(parent_thread->owner, flags, &parent_cap_id, &parent_cnode_id);
+        target_proc = process_clone(
+            parent_thread->owner,
+            flags,
+            &parent_cap_id,
+            &parent_cnode_id,
+            &parent_vspace_id
+        );
         if (!target_proc) {
             return 0;
         }

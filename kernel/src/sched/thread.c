@@ -158,10 +158,16 @@ uint64_t thread_vclone(
     thread_t* parent,
     struct syscall_regs* tf,
     uint64_t* parent_proc_cap_id,
-    uint64_t* parent_cnode_cap_id
+    uint64_t* parent_cnode_cap_id,
+    uint64_t* parent_vspace_cap_id
 ) {
-    process_t* child_proc =
-        process_clone(parent->owner, CLONE_VM, parent_proc_cap_id, parent_cnode_cap_id);
+    process_t* child_proc = process_clone(
+        parent->owner,
+        CLONE_VM,
+        parent_proc_cap_id,
+        parent_cnode_cap_id,
+        parent_vspace_cap_id
+    );
     if (unlikely(!child_proc)) return 0;
 
     thread_t* child_thread = thread_clone(child_proc, parent, tf, nullptr);
@@ -175,7 +181,7 @@ uint64_t thread_vclone(
     wait_event(
         &child_proc->vfork_wait_queue,
         child_proc->state == PROCESS_DEAD || child_proc->state == PROCESS_ZOMBIE ||
-            child_proc->map.arch.phys_root != parent->owner->map.arch.phys_root
+            child_proc->map->arch.phys_root != parent->owner->map->arch.phys_root
     );
     return child_proc->kobj.koid;
 }

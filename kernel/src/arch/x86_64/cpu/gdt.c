@@ -1,6 +1,5 @@
 #include "cpu/gdt.h"
 
-#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -61,7 +60,9 @@ static inline void set_tss_descriptor(tss_descriptor_t* desc, uintptr_t base, ui
 }
 
 void gdt_init(gdt_table_t* gdt, tss_t* tss) {
-    ASSERT(gdt);
+    if (!gdt) return;
+
+    KLOG_INIT_START("GDT");
 
     // 0: Null
     set_gdt_entry(&gdt->entries[0], 0, 0, 0, 0);
@@ -118,11 +119,13 @@ void gdt_init(gdt_table_t* gdt, tss_t* tss) {
 
     set_tss_descriptor(&gdt->tss, tss_base, tss_limit);
 
-    KLOG_DEBUG("GDT: table initialized tss_base=0x%lx limit=0x%x\n", tss_base, tss_limit);
+    KLOG_INIT_OK();
 }
 
 void tss_init(tss_t* tss, uintptr_t rsp) {
     ASSERT(tss);
+
+    KLOG_INIT_START("TSS");
     memset(tss, 0, sizeof(tss_t));
 
     if (!nmi_stack && !double_fault_stack) {
@@ -164,15 +167,13 @@ void tss_init(tss_t* tss, uintptr_t rsp) {
     }
 
     if (!nmi_stack || !double_fault_stack || !machine_check_stack || !debug_exception_stack) {
-        errno = ENOMEM;
-
+        KLOG_INIT_FAIL();
         PANIC(
-            "GDT: failed to allocate IST stacks nmi=%p df=%p mc=%p dbg=%p errno=%d\n",
+            "GDT: failed to allocate IST stacks nmi=%p df=%p mc=%p dbg=%p\n",
             nmi_stack,
             double_fault_stack,
             machine_check_stack,
-            debug_exception_stack,
-            errno
+            debug_exception_stack
         );
     }
 
@@ -185,15 +186,7 @@ void tss_init(tss_t* tss, uintptr_t rsp) {
     tss->ist[3] = (uintptr_t)debug_exception_stack + PAGE_SIZE_SMALL;
 
     tss->iomap_base = sizeof(tss_t);
-
-    KLOG_DEBUG(
-        "GDT: initialized TSS rsp0=0x%lx ist=[0x%lx,0x%lx,0x%lx,0x%lx]\n",
-        tss->rsp[0],
-        tss->ist[0],
-        tss->ist[1],
-        tss->ist[2],
-        tss->ist[3]
-    );
+    KLOG_INIT_OK();
 }
 
 void gdt_load(gdt_table_t* entry) {

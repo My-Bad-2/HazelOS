@@ -3,7 +3,6 @@
 
 #include "cpu/exception.h"
 #include "sched/process.h"
-#include "sched/sched_class.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,6 +15,7 @@ struct per_cpu_data;
 
 void scheduler_init(void);
 void scheduler_arch_init(void);
+void scheduler_init_kernel_process(void);
 void scheduler_init_per_cpu(struct per_cpu_data* cpu);
 bool scheduler_is_initialized(void);
 

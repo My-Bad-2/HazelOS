@@ -2,6 +2,7 @@
 
 #include "arch.h"
 #include "compiler.h"
+#include "cpu/smp.h"
 #include "libs/dlist.h"
 #include "libs/spinlock.h"
 #include "sched/process.h"

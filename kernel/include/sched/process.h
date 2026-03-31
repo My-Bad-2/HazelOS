@@ -53,8 +53,8 @@ typedef struct process {
     int exit_code;
     struct process* parent;
 
-    vm_space_t space;
-    pagemap_t map;
+    pagemap_t* map;
+    struct vm_space* vspace;
     struct cnode* root_cnode;
 
     alignas(CACHE_LINE_SIZE) qspinlock_t lock;
@@ -123,7 +123,8 @@ process_t* process_clone(
     process_t* parent,
     uint64_t flags,
     uint64_t* parent_proc_cap_id,
-    uint64_t* parent_cnode_id
+    uint64_t* parent_cnode_id,
+    uint64_t* parent_vspace_id
 );
 void process_release(struct kobject* kobj);
 
@@ -154,12 +155,13 @@ uint64_t thread_vclone(
     thread_t* parent,
     struct syscall_regs* regs,
     uint64_t* parent_proc_cap_id,
-    uint64_t* parent_cnode_cap_id
+    uint64_t* parent_cnode_cap_id,
+    uint64_t* parent_vspace_cap_id
 );
 
 int thread_change_exec(
     thread_t* t,
-    vm_space_t* new_space,
+    struct vm_space* new_space,
     uintptr_t entry_point,
     uintptr_t new_rsp,
     struct syscall_regs* regs

@@ -7,16 +7,24 @@
 #include "core/errors.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
+#include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/vmm.h"
 
-void pagemap_create(pagemap_t* map) {
-    if (!map) {
-        return;
+static kmem_cache_t* pagemap_cache = nullptr;
+
+pagemap_t* pagemap_create(void) {
+    if (!pagemap_cache) {
+        pagemap_cache =
+            kmem_cache_create("pagemap_cache", sizeof(pagemap_t), _Alignof(pagemap_t), 0, nullptr);
     }
+
+    pagemap_t* map = kmem_cache_alloc(pagemap_cache);
 
     create_spinlock(&map->lock);
     arch_mmu_create(&map->arch);
+
+    return map;
 }
 
 void pagemap_release(pagemap_t* map) {
@@ -27,6 +35,7 @@ void pagemap_release(pagemap_t* map) {
     size_t flags = acquire_interrupt_lock(&map->lock);
     arch_mmu_destroy(&map->arch);
     release_interrupt_lock(&map->lock, flags);
+    kmem_cache_free(pagemap_cache, map);
 }
 
 void pagemap_load(pagemap_t* map) {
@@ -227,7 +236,7 @@ int copy_between_spaces(
         size_t src_page_size, dst_page_size;
 
         if (!pagemap_resolve_vaddr(
-                &src_proc->map,
+                src_proc->map,
                 current_src_vaddr,
                 &src_paddr,
                 &src_flags,
@@ -237,7 +246,7 @@ int copy_between_spaces(
         }
 
         if (!pagemap_resolve_vaddr(
-                &dest_proc->map,
+                dest_proc->map,
                 current_dst_vaddr,
                 &dst_paddr,
                 &dst_flags,

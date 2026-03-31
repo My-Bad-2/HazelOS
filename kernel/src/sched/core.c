@@ -168,9 +168,7 @@ static inline void switch_mm_and_fpu(per_cpu_data_t* cpu, thread_t* curr, thread
 #endif
 
     cpu->kstack_top = next->kernel_stack_top;
-    if (next_proc && curr_proc != next_proc) {
-        pagemap_load(&next_proc->map);
-    }
+    if (next_proc && curr_proc != next_proc) pagemap_load(next_proc->map);
 
     thread_restore_fpu(next);
     cpu->reschedule_needed = false;
@@ -183,9 +181,7 @@ static inline void enqueue_and_check_preempt(per_cpu_data_t* cpu, thread_t* t) {
 
     if (cpu->curr_thread && sched_should_preempt(t, cpu->curr_thread)) {
         cpu->reschedule_needed = true;
-        if (cpu != smp_current_core()) {
-            smp_send_reschedule_ipi(cpu);
-        }
+        if (cpu != smp_current_core()) smp_send_reschedule_ipi(cpu);
     }
 }
 
@@ -442,12 +438,12 @@ static thread_t* pick_next_task(per_cpu_data_t* cpu, size_t* flags) {
     return cpu->idle_thread;
 }
 
-void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
-    if (cpu->is_bsp) {
-        kernel_proc = process_create("kernel_proc", true);
-        if (!kernel_proc) PANIC("SCHED: failed to create kernel process\n");
-    }
+void scheduler_init_kernel_process(void) {
+    kernel_proc = process_create("kernel_proc", true);
+    if (!kernel_proc) PANIC("SCHED: failed to create kernel process\n");
+}
 
+void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
     cpu->cfs_tree = RB_ROOT_CACHED;
     cpu->dl_tree  = RB_ROOT_CACHED;
     for (int i = 0; i < MAX_RT_PRIO; ++i) {

@@ -13,11 +13,11 @@
 
 extern void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_delta);
 
-static pagemap_t kernel_pagemap;
+static pagemap_t* kernel_pagemap = nullptr;
 static uintptr_t highest_address = 0;
 
 pagemap_t* vmm_get_kernel_pagemap() {
-    return &kernel_pagemap;
+    return kernel_pagemap;
 }
 
 static void vmm_map_memory(pagemap_t* map) {
@@ -117,23 +117,21 @@ static void vmm_map_memory(pagemap_t* map) {
 
 void vmm_init(void) {
     KLOG_INIT_START("Virtual Memory Manager");
-    pagemap_create(&kernel_pagemap);
+    kernel_pagemap = pagemap_create();
 
     uintptr_t kernel_base = (uintptr_t)kernel_file_request.response->executable_file->address;
 
-    uintptr_t phys_base = kernel_address_request.response->physical_base;
-    uintptr_t virt_base = kernel_address_request.response->virtual_base;
-
+    uintptr_t phys_base  = kernel_address_request.response->physical_base;
+    uintptr_t virt_base  = kernel_address_request.response->virtual_base;
     uintptr_t phys_delta = phys_base - virt_base;
 
     arch_mmu_init();
-    vmm_map_memory(&kernel_pagemap);
-    vmm_map_kernel(&kernel_pagemap, kernel_base, phys_delta);
-    pagemap_load(&kernel_pagemap);
-
-    uintptr_t vma_start = align_up(to_higher_half(highest_address), PAGE_SIZE_LARGE);
-    uintptr_t vma_end   = virt_base;
-
-    vmm_init_space(kernel_space, &kernel_pagemap, vma_start, vma_end);
+    vmm_map_memory(kernel_pagemap);
+    vmm_map_kernel(kernel_pagemap, kernel_base, phys_delta);
+    pagemap_load(kernel_pagemap);
     KLOG_INIT_OK();
+}
+
+const uintptr_t get_kernel_space_start_limit(void) {
+    return align_up(to_higher_half(highest_address), PAGE_SIZE_LARGE);
 }

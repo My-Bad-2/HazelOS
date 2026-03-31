@@ -2,6 +2,7 @@
 #define KERNEL_MEMORY_VMA_H 1
 
 #include "cpu/exception.h"
+#include "libs/kobject.h"
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
@@ -38,34 +39,33 @@ extern "C" {
 #define MREMAP_FIXED     0x02
 #define MREMAP_DONTUNMAP 0x04
 
-typedef struct vm_area {
+struct vm_area {
     struct rb_node rb_node;
 
-    size_t subtree_max_gap;  // Max gap in this subtree
-    size_t own_gap;          // Gap between prev->end and this->start
+    size_t subtree_max_gap;
+    size_t own_gap;
 
     uintptr_t start;
-    uintptr_t end;  // Exclusive: [Start, end)
-    size_t size;
-    size_t page_size;  // Actual page size used (4K, 2M or 1G)
-    uint32_t flags;
-    cache_type_t cache;
+    uintptr_t end;
 
-    vm_object_t* object;
+    struct vm_object* object;
     size_t object_offset;
-} vm_area_t;
 
-typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] {
+    uint32_t flags;
+    uint16_t cache;
+    uint8_t page_shift;  // 12 for 4K, 21 for 2M, 30 for 1G
+};
+
+struct [[gnu::aligned(CACHE_LINE_SIZE)]] vm_space {
+    struct kobject refcount;
     struct rb_root rb_root;
-    pagemap_t* map;
+    struct process* owner;
 
-    _Atomic(vm_area_t*) cached_vma;
+    _Atomic(struct vm_area*) cached_vma;
     rwlock_t lock;
 
-    uintptr_t start_limit;
-    uintptr_t end_limit;
     uintptr_t allocation_hint;
-} vm_space_t;
+};
 
 struct vmm_fault_info {
     bool is_present;
@@ -74,13 +74,23 @@ struct vmm_fault_info {
     bool is_exec;
 };
 
+static inline size_t vma_size(struct vm_area* vma) {
+    return vma->end - vma->start;
+}
+
+static inline size_t vma_page_size(struct vm_area* vma) {
+    return 1ul << vma->page_shift;
+}
+
 bool vmm_is_user_region(uintptr_t addr, size_t size);
 
-void vmm_init_space(vm_space_t* space, pagemap_t* map, uintptr_t start, uintptr_t end);
-void vmm_destroy_space(vm_space_t* space);
+struct vm_space* vmm_create_space(struct process* owner);
+void vmm_init_space(struct vm_space* space, struct process* owner);
+void vmm_destroy_space(struct vm_space* space);
+void vmm_space_release(struct kobject* ref);
 
 void* vmalloc(
-    vm_space_t* space,
+    struct vm_space* space,
     void* hint_addr,
     size_t size,
     uint32_t flags,
@@ -88,18 +98,23 @@ void* vmalloc(
     size_t alignment
 );
 
-void vmfree(vm_space_t* space, void* ptr, size_t size);
+void vmfree(struct vm_space* space, void* ptr, size_t size);
 
 struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code);
-bool vmm_handle_fault(vm_space_t* space, uintptr_t fault_addr, uint32_t error_code);
-bool vmm_clone_space(vm_space_t* parent, vm_space_t* child, pagemap_t* map);
+bool vmm_handle_fault(struct vm_space* space, uintptr_t fault_addr, uint32_t error_code);
+bool vmm_clone_space(struct vm_space* parent, struct vm_space* child);
 
 void pf_handler(interrupt_trapframe_t* tf);
 
-bool vmm_populate_vma_range(vm_space_t* space, vm_area_t* vma, uintptr_t start, size_t size);
+bool vmm_populate_vma_range(
+    struct vm_space* space,
+    struct vm_area* vma,
+    uintptr_t start,
+    size_t size
+);
 
 void* sys_mmap(
-    vm_space_t* space,
+    struct vm_space* space,
     void* addr,
     size_t length,
     int prot,
@@ -108,11 +123,11 @@ void* sys_mmap(
     long offset
 );
 
-int sys_munmap(vm_space_t* space, void* addr, size_t length);
-int sys_mprotect(vm_space_t* space, void* addr, size_t size, int prot);
+int sys_munmap(struct vm_space* space, void* addr, size_t length);
+int sys_mprotect(struct vm_space* space, void* addr, size_t size, int prot);
 
 void* sys_mremap(
-    vm_space_t* space,
+    struct vm_space* space,
     void* old_address,
     size_t old_size,
     size_t new_size,
@@ -120,7 +135,7 @@ void* sys_mremap(
     void* new_address
 );
 
-extern vm_space_t* kernel_space;
+extern struct vm_space* kernel_space;
 extern kmem_cache_t* vma_cache;
 
 void vma_cache_init(void);

@@ -97,7 +97,7 @@ size_t pagemap_get_flags(pagemap_t* map, uintptr_t virt_addr);
 bool pagemap_test_and_clear_dirty(pagemap_t* map, uintptr_t virt_addr);
 bool pagemap_test_and_clear_accessed(pagemap_t* map, uintptr_t virt_addr);
 
-void pagemap_create(pagemap_t* map);
+pagemap_t* pagemap_create(void);
 void pagemap_load(pagemap_t* map);
 void pagemap_release(pagemap_t* map);
 void pagemap_sync_kernel(pagemap_t* target_map);

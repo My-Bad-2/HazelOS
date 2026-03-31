@@ -883,7 +883,7 @@ void arch_mmu_init(void) {
     );
 }
 
-uintptr_t get_user_space_limit(void) {
+const uintptr_t get_user_space_end_limit(void) {
     return (paging_max_levels == 5) ? USER_SPACE_END_5L : USER_SPACE_END_4L;
 }
 
@@ -1305,5 +1305,5 @@ void arch_mmu_sync_kernel(arch_pagemap_t* target_map) {
 }
 
 bool vmm_is_user_region(uintptr_t addr, size_t size) {
-    return (addr >= USER_SPACE_START) && ((addr + size) <= get_user_space_limit());
+    return (addr >= USER_SPACE_START) && ((addr + size) <= get_user_space_end_limit());
 }

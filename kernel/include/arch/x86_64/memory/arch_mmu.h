@@ -9,8 +9,11 @@
 #define X86_MAX_PCID  4095
 #define X86_MAX_PKEYS 15
 
-#define USER_SPACE_END_4L 0x00007ffffffffffful
-#define USER_SPACE_END_5L 0x00fffffffffffffful
+#define USER_SPACE_END_4L     0x00007ffffffffffful
+#define USER_SPACE_END_5L     0x00fffffffffffffful
+#define KERNEL_SPACE_START_4L 0xffff800000000000ul
+#define KERNEL_SPACE_START_5L 0xff00000000000000ul
+#define KERNEL_SPACE_END      0xfffffffffffff000ul
 
 typedef struct {
     spinlock_t pcid_lock;

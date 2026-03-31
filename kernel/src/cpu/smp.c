@@ -1,22 +1,19 @@
 #include "cpu/smp.h"
 
-#include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "arch.h"
 #include "boot/boot.h"
-#include "drivers/acpi.h"
 #include "drivers/timer.h"
 #include "libs/kobject.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
 #include "memory/heap.h"
-#include "memory/memory.h"
 #include "memory/pagemap.h"
-#include "memory/vma.h"
+#include "memory/vmm.h"
 #include "sched/rcu.h"
 #include "sched/scheduler.h"
 
@@ -33,7 +30,9 @@ static void ap_entry_point(struct limine_mp_info* info) {
     per_cpu_data_t* cpu = (per_cpu_data_t*)info->extra_argument;
 
     arch_mmu_init();
-    pagemap_load(kernel_space->map);
+
+    pagemap_t* map = vmm_get_kernel_pagemap();
+    pagemap_load(map);
 
     arch_commit_cpu_state(cpu);
     scheduler_init_per_cpu(cpu);
@@ -52,24 +51,9 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
 
     if (cpu->is_bsp) {
         stack = bootstrap_stack;
-    } else {
-        stack = vmalloc(
-            kernel_space,
-            nullptr,
-            KSTACK_SIZE,
-            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
-            CACHE_WRITE_BACK,
-            PAGE_SIZE_SMALL
-        );
     }
 
-    if (!stack) {
-        errno = ENOMEM;
-        PANIC("SMP: failed to allocate kernel stack cpu=%u errno=%d", cpu->cpu_idx, errno);
-    }
-
-    cpu->kstack_top = (uintptr_t)stack + KSTACK_SIZE;
-    cpu->rcu        = kmalloc(sizeof(struct rcu_data));
+    cpu->rcu = kmalloc(sizeof(struct rcu_data));
 
     create_qspinlock(&cpu->lock);
 
@@ -103,8 +87,6 @@ void smp_init(void) {
     cpu_datas = kmalloc(sizeof(per_cpu_data_t) * num_cpus);
     memset(cpu_datas, 0, num_cpus * sizeof(per_cpu_data_t));
 
-    acpi_early_init();
-
     for (uint32_t i = 0; i < num_cpus; ++i) {
         struct limine_mp_info* info = mp_request.response->cpus[i];
         per_cpu_data_t* cpu         = &cpu_datas[i];
@@ -115,6 +97,10 @@ void smp_init(void) {
         cpu->cpu_idx  = i;
         cpu->self     = cpu;
         cpu->is_bsp   = (mp_request.response->bsp_lapic_id == info->lapic_id);
+
+        if (cpu->is_bsp) {
+            scheduler_init_kernel_process();
+        }
 
         init_cpu_state(cpu);
     }

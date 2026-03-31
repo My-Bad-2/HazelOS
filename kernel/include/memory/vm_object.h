@@ -17,7 +17,7 @@ typedef enum {
     VM_OBJ_SHADOW,
 } vm_object_type_t;
 
-typedef struct vm_object {
+struct vm_object {
     rwlock_t lock;
     _Atomic(size_t) ref_count;
 
@@ -28,19 +28,20 @@ typedef struct vm_object {
 
     void* vnode;
     struct vm_object* backing;
-} vm_object_t;
+};
 
-vm_object_t* vm_object_create(vm_object_type_t type, size_t size);
-void vm_object_ref(vm_object_t* obj);
-void vm_object_deref(vm_object_t* obj);
+struct vm_object* vm_object_create(vm_object_type_t type, size_t size);
+void vm_object_ref(struct vm_object* obj);
+void vm_object_deref(struct vm_object* obj);
 
-vm_object_t* vm_object_create_shadow(vm_object_t* parent_obj);
-uintptr_t vm_object_get_page(vm_object_t* obj, size_t offset, bool allocate_on_miss, bool is_write);
-uintptr_t vm_object_get_huge_page(vm_object_t* obj, size_t offset, bool is_write);
+struct vm_object* vm_object_create_shadow(struct vm_object* parent_obj);
+uintptr_t
+vm_object_get_page(struct vm_object* obj, size_t offset, bool allocate_on_miss, bool is_write);
+uintptr_t vm_object_get_huge_page(struct vm_object* obj, size_t offset, bool is_write);
 
-void vm_object_collapse(vm_object_t* obj);
-void vm_object_truncate(vm_object_t* obj, size_t start_offset, size_t end_offset);
-bool vm_object_pin_page(vm_object_t* obj, size_t offset, bool pin);
+void vm_object_collapse(struct vm_object* obj);
+void vm_object_truncate(struct vm_object* obj, size_t start_offset, size_t end_offset);
+bool vm_object_pin_page(struct vm_object* obj, size_t offset, bool pin);
 
 void vm_object_init(void);
 

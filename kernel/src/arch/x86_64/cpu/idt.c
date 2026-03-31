@@ -1,6 +1,5 @@
 #include "cpu/idt.h"
 
-#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -8,8 +7,7 @@
 #include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "libs/log.h"
-#include "memory/pagemap.h"
-#include "memory/vma.h"
+#include "memory/heap.h"
 
 #define IDT_ATTR_PRESENT   0x80
 #define IDT_ATTR_RING0     0x00
@@ -39,28 +37,15 @@ static void set_idt_gate(int vector, void* handler, uint8_t ist, uint8_t type_at
 }
 
 void idt_init(void) {
-    if (idt != nullptr) {
-        KLOG_DEBUG("IDT: already initialized\n");
-        return;
-    }
+    if (idt != nullptr) return;
 
-    idt = (idt_table_t*)vmalloc(
-        kernel_space,
-        nullptr,
-        sizeof(idt_table_t),
-        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
-        CACHE_WRITE_BACK,
-        sizeof(idt_table_t)
-    );
+    KLOG_INIT_START("IDT");
+
+    idt = kmalloc(sizeof(idt_table_t));
 
     if (!idt) {
-        errno = ENOMEM;
-        PANIC(
-            "IDT: failed to allocate IDT Table bytes=0x%zx errno=%d\n",
-            sizeof(idt_table_t),
-            errno
-        );
-        return;
+        KLOG_INIT_FAIL();
+        PANIC("IDT: failed to allocate IDT Table bytes=0x%zx\n", sizeof(idt_table_t));
     }
 
     memset(idt, 0, sizeof(idt_table_t));
@@ -96,7 +81,7 @@ void idt_init(void) {
         set_idt_gate(i, isr_stub_table[i], ist, flags);
     }
 
-    KLOG_DEBUG("IDT: initialized entries=%d\n", IDT_ENTRY_COUNT);
+    KLOG_INIT_OK();
 }
 
 void idt_load(void) {
@@ -109,6 +94,4 @@ void idt_load(void) {
     idtr.base  = (uint64_t)idt;
 
     asm volatile("lidt %0" ::"m"(idtr) : "memory");
-
-    KLOG_DEBUG("IDT: loaded idtr[limit=0x%x base=0x%lx]\n", idtr.limit, idtr.base);
 }

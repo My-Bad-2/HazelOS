@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <string.h>
 
+#include "arch.h"
+#include "compiler.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
 #include "libs/elf.h"
@@ -13,7 +15,6 @@
 #include "memory/paging.h"
 #include "memory/vma.h"
 #include "sched/process.h"
-#include "sched/scheduler.h"
 
 static uint32_t vmm_get_segment_flags(uint32_t elf_flags) {
     uint32_t flags = 0;
@@ -87,33 +88,54 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
 }
 
 struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code) {
-    struct vmm_fault_info info = {0};
-
-    info.is_present = (error_code & X86_PAGE_FAULT_PRESENT) != 0;
-    info.is_write   = (error_code & X86_PAGE_FAULT_WRITE) != 0;
-    info.is_user    = (error_code & X86_PAGE_FAULT_USER) != 0;
-    info.is_exec    = (error_code & X86_PAGE_FAULT_INSTRUCTION_FETCH) != 0;
-
-    return info;
+    return (struct vmm_fault_info){
+        .is_present = (error_code & X86_PAGE_FAULT_PRESENT) != 0,
+        .is_write   = (error_code & X86_PAGE_FAULT_WRITE) != 0,
+        .is_user    = (error_code & X86_PAGE_FAULT_USER) != 0,
+        .is_exec    = (error_code & X86_PAGE_FAULT_INSTRUCTION_FETCH) != 0
+    };
 }
 
 __attribute__((force_align_arg_pointer)) void pf_handler(interrupt_trapframe_t* tf) {
-    uintptr_t fault_addr = read_cr2();
-    thread_t* t          = smp_current_core()->curr_thread;
-    if (!t || !t->owner) {
-        PANIC("Early boot page fault at %p (RIP: %p)!\n", fault_addr, tf->rip);
+    uintptr_t fault_addr   = read_cr2();
+    struct vm_space* space = nullptr;
+
+    if (unlikely(fault_addr >= get_kernel_space_start_limit())) {
+        space = kernel_space;
+    } else {
+        thread_t* t = smp_current_core()->curr_thread;
+
+        if (likely(t && t->owner)) {
+            space = t->owner->vspace;
+        }
     }
 
-    process_t* proc   = t->owner;
-    vm_space_t* space = &proc->space;
+    if (unlikely(!space))
+        PANIC(
+            "Unhandled page fault at %p (RIP: %p)! Scheduler offline or VSpace missing.",
+            fault_addr,
+            tf->rip
+        );
 
-    if (vmm_handle_fault(space, fault_addr, tf->error_code)) {
-        return;
-    }
+    if (likely(vmm_handle_fault(space, fault_addr, tf->error_code))) return;
 
     if (tf->error_code & X86_PAGE_FAULT_USER) {
+        KLOG_CRIT(
+            "User-space segfault at %p (RIP: %p, Error: 0x%lx)\n",
+            fault_addr,
+            tf->rip,
+            tf->error_code
+        );
+
         process_exit(-EFAULT);
+
+        arch_halt(false);
     } else {
-        PANIC("Kernel page fault at %p! (RIP: %p)", fault_addr, tf->rip);
+        PANIC(
+            "Kernel page fault at %p! (RIP: %p, Error: 0x%lx)",
+            fault_addr,
+            tf->rip,
+            tf->error_code
+        );
     }
 }

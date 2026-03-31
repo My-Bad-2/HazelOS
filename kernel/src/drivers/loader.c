@@ -78,7 +78,7 @@ static bool load_segment(process_t* proc, Elf64_Phdr* phdr, void* base) {
 
     for (uintptr_t curr_v = page_start; curr_v < page_end; curr_v += PAGE_SIZE_SMALL) {
         vmalloc(
-            &proc->space,
+            proc->vspace,
             (void*)curr_v,
             PAGE_SIZE_SMALL,
             vmm_flags | VMM_FLAG_FIXED,
@@ -87,7 +87,7 @@ static bool load_segment(process_t* proc, Elf64_Phdr* phdr, void* base) {
         );
 
         // Technically any user page is accessible to the kernel via HHDM
-        uintptr_t phys_addr = pagemap_translate(&proc->map, curr_v);
+        uintptr_t phys_addr = pagemap_translate(proc->map, curr_v);
         void* virt          = (void*)to_higher_half(phys_addr);
 
         size_t offset_in_page = (curr_v < vaddr_start) ? (vaddr_start - curr_v) : 0;

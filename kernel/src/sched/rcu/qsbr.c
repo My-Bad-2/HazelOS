@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "boot/boot.h"
+#include "cpu/smp.h"
 #include "sched/rcu.h"
 #include "sched/scheduler.h"
 

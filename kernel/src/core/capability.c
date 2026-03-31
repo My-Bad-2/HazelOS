@@ -9,6 +9,7 @@
 #include "libs/slist.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
+#include "memory/vma.h"
 #include "sched/ipc.h"
 #include "sched/process.h"
 
@@ -69,6 +70,9 @@ static void cap_object_ref(uint8_t type, void* obj) {
         case CAP_TYPE_PROCESS:
             kref_get(&((struct process*)obj)->kobj);
             break;
+        case CAP_TYPE_VSPACE:
+            kref_get(&((struct vm_space*)obj)->refcount);
+            break;
         default:
             break;
     }
@@ -95,6 +99,9 @@ static void cap_object_unref(uint8_t type, void* obj) {
             break;
         case CAP_TYPE_PROCESS:
             kref_put(&((struct process*)obj)->kobj, process_release);
+            break;
+        case CAP_TYPE_VSPACE:
+            kref_put(&((struct vm_space*)obj)->refcount, vmm_space_release);
             break;
         default:
             break;

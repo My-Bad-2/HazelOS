@@ -6,7 +6,6 @@
 
 #include "boot/boot.h"
 #include "cpu/smp.h"
-#include "libs/dlist.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"

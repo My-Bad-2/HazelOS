@@ -100,7 +100,7 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         t->context_rsp = (uint64_t)&kstack->ctx;
     } else {
         t->user_stack = (void*)vmalloc(
-            &proc->space,
+            proc->vspace,
             nullptr,
             USTACK_SIZE,
             VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER | VMM_FLAG_STACK,
@@ -141,7 +141,7 @@ void arch_thread_destroy(thread_t* t) {
     if (t->fpu_buffer) kmem_cache_free(fpu_cache, t->fpu_buffer);
 
     if (likely(!t->owner->is_kernel && t->context_rsp != 0 && t->user_stack))
-        vmfree(&t->owner->space, t->user_stack, USTACK_SIZE);
+        vmfree(t->owner->vspace, t->user_stack, USTACK_SIZE);
 }
 
 void arch_thread_clone(thread_t* child, struct syscall_regs* tf, void* child_stack) {
@@ -181,23 +181,23 @@ void thread_restore_fpu(thread_t* t) {
 
 int thread_change_exec(
     thread_t* t,
-    vm_space_t* new_space,
+    struct vm_space* new_space,
     uintptr_t entry_point,
     uintptr_t new_rsp,
     struct syscall_regs* regs
 ) {
     if (unlikely(!t || !t->owner || !regs)) return -EINVAL;
 
-    process_t* proc      = t->owner;
-    vm_space_t old_space = proc->space;
+    process_t* proc            = t->owner;
+    struct vm_space* old_space = proc->vspace;
 
     acquire_qspinlock(&proc->lock);
-    proc->space = *new_space;
-    proc->map   = *new_space->map;
+    proc->vspace = new_space;
+    proc->map    = new_space->owner->map;
     release_qspinlock(&proc->lock);
 
-    pagemap_load(&proc->map);
-    vmm_destroy_space(&old_space);
+    pagemap_load(proc->map);
+    vmm_destroy_space(old_space);
 
     memset(regs, 0, sizeof(struct syscall_regs));
     regs->rip    = entry_point;

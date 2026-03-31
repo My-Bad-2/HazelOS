@@ -1,14 +1,17 @@
 #include "sched/process.h"
 
-#include <llvm-libc-macros/generic-error-number-macros.h>
+#include <errno.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "compiler.h"
 #include "core/capability.h"
+#include "cpu/smp.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
 #include "libs/kobject.h"
+#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/pagemap.h"
@@ -25,26 +28,29 @@ static bool capability_bootstrap_injection(
     struct process* parent,
     struct process* child,
     uint64_t* proc_cap_id,
-    uint64_t* cnode_cap_id
+    uint64_t* cnode_cap_id,
+    uint64_t* vspace_cap_id
 ) {
-    uint64_t parent_proc_cap_id;
-    struct capability* proc_cap = cap_alloc(parent->root_cnode, &parent_proc_cap_id);
-    if (unlikely(!proc_cap)) return false;
+    uint64_t p_cap_id, v_cap_id, c_cap_id;
+    struct capability* proc_cap   = cap_alloc(parent->root_cnode, &p_cap_id);
+    struct capability* cnode_cap  = cap_alloc(parent->root_cnode, &c_cap_id);
+    struct capability* vspace_cap = cap_alloc(parent->root_cnode, &v_cap_id);
 
-    uint64_t parent_cnode_cap_id;
-    struct capability* cnode_cap = cap_alloc(parent->root_cnode, &parent_cnode_cap_id);
-    if (unlikely(!cnode_cap)) {
-        cap_close(parent->root_cnode, parent_proc_cap_id);
+    if (unlikely(!proc_cap || !cnode_cap || !vspace_cap)) {
+        if (proc_cap) cap_close(parent->root_cnode, p_cap_id);
+        if (cnode_cap) cap_close(parent->root_cnode, c_cap_id);
+        if (vspace_cap) cap_close(parent->root_cnode, v_cap_id);
         return false;
     }
 
-    if (proc_cap_id) *proc_cap_id = parent_proc_cap_id;
-    if (cnode_cap_id) *cnode_cap_id = parent_cnode_cap_id;
+    if (proc_cap_id) *proc_cap_id = p_cap_id;
+    if (cnode_cap_id) *cnode_cap_id = c_cap_id;
+    if (vspace_cap_id) *vspace_cap_id = v_cap_id;
 
     acquire_qspinlock(&proc_cap->lock);
     atomic_store_explicit(&proc_cap->object_ptr, (uintptr_t)child, memory_order_release);
     proc_cap->type   = CAP_TYPE_PROCESS;
-    proc_cap->rights = RIGHT_ALL;
+    proc_cap->rights = RIGHT_ALL & ~RIGHT_CLOEXEC;
     release_qspinlock(&proc_cap->lock);
 
     acquire_qspinlock(&cnode_cap->lock);
@@ -57,13 +63,25 @@ static bool capability_bootstrap_injection(
     cnode_cap->rights = RIGHT_ALL;
     release_qspinlock(&cnode_cap->lock);
 
+    acquire_qspinlock(&vspace_cap->lock);
+    kref_get(&child->vspace->refcount);
+    atomic_store_explicit(&vspace_cap->object_ptr, (uintptr_t)child->vspace, memory_order_release);
+    vspace_cap->type   = CAP_TYPE_VSPACE;
+    vspace_cap->rights = RIGHT_ALL;
+    release_qspinlock(&vspace_cap->lock);
+
     return true;
 }
 
 process_t* process_create(const char* name, bool is_kernel) {
     if (!process_cache) {
-        process_cache =
-            kmem_cache_create("process_cache", sizeof(process_t), _Alignof(process_t), 0, nullptr);
+        process_cache = kmem_cache_create(
+            "process_cache",
+            sizeof(struct process),
+            _Alignof(struct process),
+            0,
+            nullptr
+        );
     }
 
     process_t* proc = kmem_cache_alloc(process_cache);
@@ -88,12 +106,39 @@ process_t* process_create(const char* name, bool is_kernel) {
     wait_queue_init(&proc->vfork_wait_queue);
 
     if (is_kernel) {
-        memcpy(&proc->map, vmm_get_kernel_pagemap(), sizeof(pagemap_t));
-        memcpy(&proc->space, kernel_space, sizeof(vm_space_t));
+        proc->map    = vmm_get_kernel_pagemap();
+        proc->vspace = kernel_space;
+
+        vmm_init_space(kernel_space, proc);
+        kref_get(&kernel_space->refcount);
     } else {
-        pagemap_create(&proc->map);
-        vmm_init_space(&proc->space, &proc->map, USER_SPACE_START, get_user_space_limit());
+        proc->map    = pagemap_create();
+        proc->vspace = vmm_create_space(proc);
+
+        if (!proc->vspace) {
+            pagemap_release(proc->map);
+            destroy_cspace(proc->root_cnode);
+            kmem_cache_free(process_cache, proc);
+            return nullptr;
+        }
     }
+
+    uint64_t v_cap_id        = 0;
+    struct capability* v_cap = cap_alloc(proc->root_cnode, &v_cap_id);
+    if (!v_cap) {
+        kref_put(&proc->vspace->refcount, vmm_space_release);
+        pagemap_release(proc->map);
+        destroy_cspace(proc->root_cnode);
+        kmem_cache_free(process_cache, proc);
+        return nullptr;
+    }
+
+    v_cap->badge  = 0;
+    v_cap->type   = CAP_TYPE_VSPACE;
+    v_cap->rights = RIGHT_ALL & ~RIGHT_CLOEXEC;
+    kref_get(&proc->vspace->refcount);
+    atomic_store_explicit(&v_cap->object_ptr, (uintptr_t)proc->vspace, memory_order_relaxed);
+    atomic_init(&v_cap->generation, 1);
 
     return proc;
 }
@@ -102,7 +147,8 @@ process_t* process_clone(
     process_t* parent,
     uint64_t flags,
     uint64_t* parent_proc_cap_id,
-    uint64_t* parent_cnode_id
+    uint64_t* parent_cnode_id,
+    uint64_t* parent_vspace_id
 ) {
     if (unlikely(!parent)) return nullptr;
 
@@ -126,21 +172,32 @@ process_t* process_clone(
 
     if (flags & CLONE_VM) {
         // Share address space
-        child->space = parent->space;
-        child->map   = parent->map;
+        child->vspace = parent->vspace;
+        child->map    = parent->map;
+        kref_get(&child->vspace->refcount);
     } else {
-        if (!vmm_clone_space(&parent->space, &child->space, &child->map)) {
+        child->map    = pagemap_create();
+        child->vspace = vmm_create_space(child);
+
+        if (!vmm_clone_space(parent->vspace, child->vspace)) {
+            if (child->vspace) kref_put(&child->vspace->refcount, vmm_space_release);
             destroy_cspace(child->root_cnode);
             kmem_cache_free(process_cache, child);
             return nullptr;
         }
     }
 
-    if (unlikely(
-            !capability_bootstrap_injection(parent, child, parent_proc_cap_id, parent_cnode_id)
-        )) {
-        if (!(flags & CLONE_VM)) vmm_destroy_space(&child->space);
+    if (unlikely(!capability_bootstrap_injection(
+            parent,
+            child,
+            parent_proc_cap_id,
+            parent_cnode_id,
+            parent_vspace_id
+        ))) {
+        kref_put(&child->vspace->refcount, vmm_space_release);
+
         destroy_cspace(child->root_cnode);
+        if (flags & CLONE_VM) pagemap_release(child->map);
         kmem_cache_free(process_cache, child);
         return nullptr;
     }
@@ -187,7 +244,10 @@ void process_release(struct kobject* obj) {
     process_t* proc = kref_entry(obj, struct process, kobj);
     wait_queue_wake_up_all(&proc->vfork_wait_queue);
 
-    if (!proc->is_kernel) pagemap_release(&proc->map);
+    if (proc->vspace && !proc->is_kernel) {
+        kref_put(&proc->vspace->refcount, vmm_space_release);
+        pagemap_release(proc->map);
+    }
 
     acquire_qspinlock(&global_process_lock);
     acquire_qspinlock(&proc->lock);
@@ -213,5 +273,6 @@ void process_release(struct kobject* obj) {
     if (parent) wait_queue_wake_up_all(&parent->wait_queue);
 
     destroy_cspace(proc->root_cnode);
+    pagemap_release(proc->map);
     kmem_cache_free(process_cache, proc);
 }

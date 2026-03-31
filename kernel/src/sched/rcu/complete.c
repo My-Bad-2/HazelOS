@@ -1,4 +1,5 @@
 #include "arch.h"
+#include "cpu/smp.h"
 #include "sched/rcu.h"
 #include "sched/scheduler.h"
 

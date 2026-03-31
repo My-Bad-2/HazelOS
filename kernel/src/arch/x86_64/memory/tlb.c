@@ -23,7 +23,7 @@ static qspinlock_t tlb_lock;
 void smp_tlb_shootdown(uintptr_t vaddr, size_t pages) {
     acquire_qspinlock(&tlb_lock);
 
-    current_shootdown.map   = &smp_current_core()->curr_thread->owner->map;
+    current_shootdown.map   = smp_current_core()->curr_thread->owner->map;
     current_shootdown.vaddr = vaddr;
     current_shootdown.pages = pages;
 

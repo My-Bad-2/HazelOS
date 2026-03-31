@@ -12,6 +12,7 @@
 #include "cpu/registers.h"
 #include "cpu/simd.h"
 #include "cpu/syscalls.h"
+#include "drivers/acpi.h"
 #include "drivers/timer.h"
 #include "libs/log.h"
 
@@ -46,6 +47,7 @@ void arch_commit_cpu_state(per_cpu_data_t* cpu) {
     write_msr(X86_MSR_IA32_TSC_AUX, cpu->cpu_idx);
 
     if (cpu->is_bsp) {
+        acpi_early_init();
         pic_init();
         ioapic_init();
         timer_init();

@@ -4,6 +4,7 @@
 
 #include "arch.h"
 #include "core/errors.h"
+#include "cpu/smp.h"
 #include "libs/dlist.h"
 #include "libs/spinlock.h"
 #include "sched/process.h"
@@ -20,7 +21,6 @@ struct semaphore* sema_create(int value) {
 
 void sema_init(struct semaphore* sem, int value) {
     if (!sem) return;
-
     sem->count = value;
     wait_queue_init(&sem->wait_queue);
 }

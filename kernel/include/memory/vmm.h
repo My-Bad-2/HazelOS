@@ -23,7 +23,8 @@ int copy_between_spaces(
     size_t len
 );
 
-uintptr_t get_user_space_limit(void);
+const uintptr_t get_user_space_end_limit(void);
+const uintptr_t get_kernel_space_start_limit(void);
 
 #ifdef __cplusplus
 }
