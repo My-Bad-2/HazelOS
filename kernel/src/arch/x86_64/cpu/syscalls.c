@@ -180,40 +180,53 @@ dispatch_sched_syscall(uint64_t operation, struct syscall_regs* regs, struct pro
     return res;
 }
 
-static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process* proc) {
+static uint64_t
+dispatch_mem_syscall(uint64_t operation, struct syscall_regs* regs, struct process* proc) {
+    uint64_t res = 0;
+
+    switch (operation) {
+        case 0x01:  // SYS_MEM_MMAP
+            res = (uintptr_t)sys_mmap(
+                proc,
+                (void*)regs->rdi,
+                regs->rsi,
+                (int)regs->rdx,
+                (int)regs->r10,
+                (int)regs->r8,
+                (int)regs->r9
+            );
+            break;
+        case 0x02:  // SYS_MEM_MUNMAP
+            res = (uint64_t)sys_munmap(proc, (void*)regs->rdi, regs->rsi);
+            break;
+        case 0x03:  // SYS_MEM_MREMAP
+            res = (uint64_t)sys_mremap(
+                proc,
+                (void*)regs->rdi,
+                regs->rsi,
+                regs->rdx,
+                (int)regs->r10,
+                (void*)regs->r8
+            );
+            break;
+        case 0x04:  // SYS_MEM_MPROTECT
+            res = (uint64_t)sys_mprotect(proc, (void*)regs->rdi, regs->rsi, (int)regs->rdx);
+            break;
+        default:
+            res = (uint64_t)ERR_DENIED;
+            break;
+    }
+
+    return res;
+}
+
+static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process*) {
     uint64_t res = 0;
     switch (regs->rax) {
         case SYS_WRITE:
             // RDI = FD; RSI = Buffer Pointer; RDX = count
             res = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
             break;
-        // case SYS_MMAP:
-        //     res = (uint64_t)sys_mmap(
-        //         proc->space,
-        //         (void*)regs->rdi,
-        //         regs->rsi,
-        //         (int)regs->rdx,
-        //         (int)regs->r10,
-        //         (int)regs->r8,
-        //         (long)regs->r9
-        //     );
-        //     break;
-        // case SYS_MPROTECT:
-        //     res = (uint64_t)sys_mprotect(proc->space, (void*)regs->rdi, regs->rsi,
-        //     (int)regs->rdx); break;
-        // case SYS_MUNMAP:
-        //     res = (uint64_t)sys_munmap(proc->space, (void*)regs->rdi, regs->rsi);
-        //     break;
-        // case SYS_MREMAP:
-        //     res = (uint64_t)sys_mremap(
-        //         proc->space,
-        //         (void*)regs->rdi,
-        //         regs->rsi,
-        //         regs->rdx,
-        //         (int)regs->r10,
-        //         (void*)regs->r8
-        //     );
-        //     break;
         case SYS_EXIT:
             sys_exit((int)regs->rdi);
             res = regs->rdi;
@@ -246,6 +259,9 @@ uint64_t syscall_dispatcher(struct syscall_regs* regs) {
             break;
         case SYS_CATEGORY_SCHED:
             res = dispatch_sched_syscall(operation, regs, proc);
+            break;
+        case SYS_CATEGORY_MEM:
+            res = dispatch_mem_syscall(operation, regs, proc);
             break;
         default:
             res = dispatch_misc_syscall(regs, proc);

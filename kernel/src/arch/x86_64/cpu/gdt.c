@@ -204,13 +204,4 @@ void gdt_load(gdt_table_t* entry) {
 
     flush_gdt(&gdtr, cs, ss);
     flush_tss(tss_offset);
-
-    KLOG_DEBUG(
-        "GDT: loaded gdtr[limit=0x%x base=0x%lx] cs=0x%x ss=0x%x tss=0x%x\n",
-        gdtr.limit,
-        gdtr.base,
-        cs,
-        ss,
-        tss_offset
-    );
 }

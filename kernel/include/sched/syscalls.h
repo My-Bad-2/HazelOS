@@ -13,6 +13,7 @@ extern "C" {
 #define SYS_CATEGORY_CAP   0x0100
 #define SYS_CATEGORY_IPC   0x0200
 #define SYS_CATEGORY_SCHED 0x0300
+#define SYS_CATEGORY_MEM   0x0400
 
 #define SYS_CAP_DELEGATE (SYS_CATEGORY_CAP | 0x01)  // Grant a capability to another CNode
 #define SYS_CAP_CLOSE    (SYS_CATEGORY_CAP | 0x02)  // Close a cap
@@ -31,16 +32,22 @@ extern "C" {
 #define SYS_IPC_NOTIFY              (SYS_CATEGORY_IPC | 0x09)
 
 #define SYS_SCHED_FORK (SYS_CATEGORY_SCHED | 0x01)
+#define SYS_SCHED_EXIT (SYS_CATEGORY_SCHED | 0x02)
 
-#define SYS_WRITE    0x01
-#define SYS_MMAP     0x09
-#define SYS_MPROTECT 0x0a
-#define SYS_MUNMAP   0x0b
-#define SYS_MREMAP   0x19
-#define SYS_CLONE    0x38
-#define SYS_FORK     0x39
-#define SYS_VFORK    0x3a
-#define SYS_EXIT     0x3c
+#define SYS_MEM_MMAP            (SYS_CATEGORY_MEM | 0x01)
+#define SYS_MEM_MUNMAP          (SYS_CATEGORY_MEM | 0x02)
+#define SYS_MEM_MREMAP          (SYS_CATEGORY_MEM | 0x03)
+#define SYS_MEM_MPROTECT        (SYS_CATEGORY_MEM | 0x04)
+#define SYS_MEM_VSPACE_MMAP     (SYS_CATEGORY_MEM | 0x05)
+#define SYS_MEM_VSPACE_MUNMAP   (SYS_CATEGORY_MEM | 0x06)
+#define SYS_MEM_VSPACE_MREMAP   (SYS_CATEGORY_MEM | 0x07)
+#define SYS_MEM_VSPACE_MPROTECT (SYS_CATEGORY_MEM | 0x08)
+
+#define SYS_WRITE 0x01
+#define SYS_CLONE 0x38
+#define SYS_FORK  0x39
+#define SYS_VFORK 0x3a
+#define SYS_EXIT  0x3c
 
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2

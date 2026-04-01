@@ -114,7 +114,7 @@ bool vmm_populate_vma_range(
 );
 
 void* sys_mmap(
-    struct vm_space* space,
+    struct process* proc,
     void* addr,
     size_t length,
     int prot,
@@ -122,12 +122,38 @@ void* sys_mmap(
     int fd,
     long offset
 );
-
-int sys_munmap(struct vm_space* space, void* addr, size_t length);
-int sys_mprotect(struct vm_space* space, void* addr, size_t size, int prot);
-
+int sys_munmap(struct process* proc, void* addr, size_t length);
+int sys_mprotect(struct process* proc, void* addr, size_t length, int prot);
 void* sys_mremap(
-    struct vm_space* space,
+    struct process* proc,
+    void* old_address,
+    size_t old_size,
+    size_t new_size,
+    int flags,
+    void* new_address
+);
+
+void* sys_vspace_map(
+    struct process* proc,
+    uint64_t vspace_cap,
+    void* addr,
+    size_t length,
+    int prot,
+    int flags,
+    int fd,
+    long offset
+);
+int sys_vspace_unmap(struct process* proc, uint64_t vspace_cap, void* addr, size_t length);
+int sys_vspace_protect(
+    struct process* proc,
+    uint64_t vspace_cap,
+    void* addr,
+    size_t length,
+    int prot
+);
+void* sys_vspace_remap(
+    struct process* proc,
+    uint64_t vspace_cap,
     void* old_address,
     size_t old_size,
     size_t new_size,

@@ -4,7 +4,7 @@
 #include "memory/pagemap.h"
 #include "sched/process.h"
 
-#define USER_SPACE_START 0x1000ul
+#define USER_SPACE_START 0x10000ul
 
 #ifdef __cplusplus
 extern "C" {

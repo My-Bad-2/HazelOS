@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "api/ipc.h"
+#include "api/memory.h"
 #include "api/syscalls.h"
 
 static int ipc_test(void) {
@@ -49,8 +50,8 @@ void user_start() {
 
     write(1, str, len);
 
-    uint64_t ret = fork();
     char buf[128];
+    uint64_t ret = fork();
     snprintf(buf, sizeof(buf), "Hello from Process (0x%lx)\n", ret);
     write(1, buf, sizeof(buf));
 

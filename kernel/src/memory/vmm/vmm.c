@@ -1,7 +1,5 @@
 #include "memory/vmm.h"
 
-#include <errno.h>
-
 #include "boot/boot.h"
 #include "boot/limine.h"
 #include "libs/log.h"
@@ -9,7 +7,6 @@
 #include "memory/arch_mmu.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
-#include "memory/vma.h"
 
 extern void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_delta);
 
