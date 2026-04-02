@@ -203,9 +203,10 @@ static void deactivate_slab(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
 
     if (atomic_load(&slab->in_use) == slab->total) {
     } else if (atomic_load(&slab->in_use) == 0 && slab->freelist) {
-        struct page* p_desc = virt_to_page((void*)((uintptr_t)slab->base & ~(PAGE_SIZE - 1)));
+        void* base_page     = (void*)((uintptr_t)slab->base & ~(PAGE_SIZE - 1));
+        struct page* p_desc = virt_to_page(base_page);
         p_desc->flags &= ~PAGE_FLAG_SLAB;
-        pmm_free((void*)from_higher_half((uintptr_t)p_desc));
+        pmm_free((void*)from_higher_half((uintptr_t)base_page));
 
         if (!(cache->flags & SLAB_NO_OFFSLAB)) {
             kmem_cache_free(&cache_metadata, slab);
@@ -352,16 +353,24 @@ kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, voi
 }
 
 void kmem_cache_destroy(kmem_cache_t* cache) {
-    pmm_free((void*)from_higher_half((uintptr_t)cache->cpu_slab));
+    if (cache->cpu_slab) {
+        for (size_t i = 0; i < mp_request.response->cpu_count; ++i) {
+            deactivate_slab(cache, &cache->cpu_slab[i]);
+        }
+
+        pmm_free((void*)from_higher_half((uintptr_t)cache->cpu_slab));
+    }
 
     struct slab *pos, *n;
     dlist_for_each_entry_safe(pos, n, &cache->partial, list) {
         dlist_del(&pos->list);
 
-        struct page* p_desc = virt_to_page(pos->base);
+        void* base_page = (void*)((uintptr_t)pos->base & ~(PAGE_SIZE - 1));
+
+        struct page* p_desc = virt_to_page(base_page);
         p_desc->flags &= ~PAGE_FLAG_SLAB;
 
-        pmm_free((void*)from_higher_half((uintptr_t)pos->base));
+        pmm_free((void*)from_higher_half((uintptr_t)base_page));
 
         if (!(cache->flags & SLAB_NO_OFFSLAB)) {
             kmem_cache_free(&cache_metadata, pos);
@@ -421,7 +430,7 @@ void kmem_cache_free(kmem_cache_t* cache, void* obj) {
     struct kmem_cache_cpu* cc = &cache->cpu_slab[arch_get_core_idx()];
     struct slab* slab         = virt_to_page(obj)->slab.slab_data;
 
-    if (likely(slab == cc->active)) {
+    if (likely(cc && slab == cc->active)) {
         void* curr_head = nullptr;
 
         do {

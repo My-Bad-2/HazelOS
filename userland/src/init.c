@@ -52,7 +52,9 @@ void user_start() {
 
     char buf[128];
     uint64_t ret = fork();
-    snprintf(buf, sizeof(buf), "Hello from Process (0x%lx)\n", ret);
+    void* res    = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE, 0, 0);
+    snprintf(buf, sizeof(buf), "Hello from Process child id = 0x%lx res = %p\n", ret, res);
+    munmmap(res, 0x1000);
     write(1, buf, sizeof(buf));
 
     exit(0);

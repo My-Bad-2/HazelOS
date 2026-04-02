@@ -359,7 +359,6 @@ void vmfree(struct vm_space* space, void* ptr, size_t size) {
         size_t unmap_size     = unmap_end - unmap_start;
 
         vmm_unmap_hardware_range(space, unmap_start, unmap_size, vma->page_shift);
-
         if (unmap_start == vma->start && unmap_end == vma->end) {
             // Case 1: Full VMA Removal
             if (unlikely(vma->flags & VMM_FLAG_STACK)) {
