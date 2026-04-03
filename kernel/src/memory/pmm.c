@@ -28,7 +28,7 @@
 #define SECTION_MASK      (SECTION_SIZE - 1)
 #define PAGES_PER_SECTION (SECTION_SIZE / PAGE_SIZE)
 
-#define MAX_PHYSMEM_BITS 48  // 48-bit physical address space
+#define MAX_PHYSMEM_BITS 52  // 52-bit physical address space
 #define MAX_SECTIONS     (1ul << (MAX_PHYSMEM_BITS - SECTION_SHIFT))
 
 #define ZONE_DMA_LIMIT    (PAGE_SIZE_MEDIUM * 16)  // 16MB

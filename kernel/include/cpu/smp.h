@@ -90,7 +90,7 @@ void topology_map_siblings(per_cpu_data_t* all_cpus, size_t count);
 
 void smp_send_reschedule_ipi(per_cpu_data_t* cpu);
 void smp_send_panic_ipi();
-void smp_tlb_shootdown(uintptr_t vaddr, size_t pages);
+void smp_tlb_shootdown(arch_pagemap_t* map, uintptr_t vaddr, size_t pages);
 
 irq_return_t ipi_tlb_shootdown_handler(interrupt_trapframe_t*, void*);
 void nmi_check_for_panic(per_cpu_data_t* cpu);

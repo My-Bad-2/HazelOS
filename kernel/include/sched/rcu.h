@@ -8,7 +8,6 @@
 #include "libs/dlist.h"
 #include "libs/slist.h"
 #include "libs/spinlock.h"
-#include "sched/process.h"
 
 #ifdef __cplusplus
 extern "C" {

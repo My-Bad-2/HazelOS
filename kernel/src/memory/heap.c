@@ -14,6 +14,7 @@
 #include "libs/spinlock.h"
 #include "memory/memory.h"
 #include "memory/pmm.h"
+#include "sched/rcu.h"
 
 #define PAGE_SIZE  PAGE_SIZE_SMALL
 #define PAGE_SHIFT PAGE_SHIFT_SMALL
@@ -41,6 +42,8 @@ struct slab {
     _Atomic(uint32_t) in_use;
     _Atomic(bool) is_active;
     uint32_t total;
+
+    struct rcu_head rcu;
 };
 
 struct [[gnu::aligned(CACHE_LINE_SIZE)]] kmem_cache_cpu {
@@ -241,6 +244,33 @@ static void deactivate_slab(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
     }
 }
 
+static void rcu_free_slab_callback(struct rcu_head* head) {
+    struct slab* slab   = (struct slab*)((char*)head - offsetof(struct slab, rcu));
+    kmem_cache_t* cache = slab->cache;
+
+    void* base_page     = (void*)align_down((uintptr_t)slab->base, PAGE_SIZE);
+    struct page* p_desc = virt_to_page(base_page);
+    p_desc->flags &= ~PAGE_FLAG_SLAB;
+
+    pmm_free((void*)from_higher_half((uintptr_t)base_page));
+
+    if (!(cache->flags & SLAB_NO_OFFSLAB)) kmem_cache_free(&cache_metadata, slab);
+}
+
+static void teardown_slab(kmem_cache_t* cache, struct slab* slab) {
+    if (cache->flags & SLAB_TYPESAFE_BY_RCU) {
+        call_rcu(&slab->rcu, rcu_free_slab_callback);
+    } else {
+        void* base_page     = (void*)align_down((uintptr_t)slab->base, PAGE_SIZE);
+        struct page* p_desc = virt_to_page(base_page);
+        p_desc->flags &= ~PAGE_FLAG_SLAB;
+
+        pmm_free((void*)from_higher_half((uintptr_t)base_page));
+
+        if (!(cache->flags & SLAB_NO_OFFSLAB)) kmem_cache_free(&cache_metadata, slab);
+    }
+}
+
 size_t kmem_cache_shrink(kmem_cache_t* cache) {
     size_t freed_pages = 0;
     struct slab *pos, *n;
@@ -250,18 +280,8 @@ size_t kmem_cache_shrink(kmem_cache_t* cache) {
     dlist_for_each_entry_safe(pos, n, &cache->partial_list, list) {
         if (atomic_load(&pos->in_use) == 0 && !atomic_load(&pos->is_active)) {
             dlist_del(&pos->list);
-
-            void* base_page  = (void*)((uintptr_t)pos->base & ~(PAGE_SIZE - 1));
-            size_t num_pages = 1ul << cache->alloc_order;
-
-            struct page* p_desc = virt_to_page(base_page);
-            p_desc->flags &= ~PAGE_FLAG_SLAB;
-
-            pmm_free((void*)from_higher_half((uintptr_t)base_page));
-
-            if (!(cache->flags & SLAB_NO_OFFSLAB)) kmem_cache_free(&cache_metadata, pos);
-
-            freed_pages += num_pages;
+            teardown_slab(cache, pos);
+            freed_pages += (1ul << cache->alloc_order);
         }
     }
 
@@ -563,14 +583,7 @@ void kmem_cache_free(kmem_cache_t* cache, void* obj) {
 
             release_spinlock(&cache->lock);
 
-            void* base_page     = (void*)((uintptr_t)slab->base & ~(PAGE_SIZE - 1));
-            struct page* p_desc = virt_to_page(base_page);
-            p_desc->flags &= ~PAGE_FLAG_SLAB;
-            p_desc->buddy.ref_count = 1;
-
-            pmm_free((void*)from_higher_half((uintptr_t)base_page));
-
-            if (!(cache->flags & SLAB_NO_OFFSLAB)) kmem_cache_free(&cache_metadata, slab);
+            teardown_slab(cache, slab);
             return;
         }
 

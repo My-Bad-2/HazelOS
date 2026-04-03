@@ -75,6 +75,7 @@ arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_flags, siz
 
 void arch_mmu_load(arch_pagemap_t* map);
 void arch_mmu_flush_tlb(arch_pagemap_t* map, uintptr_t virt, size_t length);
+void arch_mmu_flush_local(arch_pagemap_t* map, uintptr_t virt, size_t length, uint32_t cpu_id);
 
 int arch_mmu_shatter(arch_pagemap_t* map, uintptr_t virt);
 int arch_mmu_collapse(arch_pagemap_t* map, uintptr_t virt);
