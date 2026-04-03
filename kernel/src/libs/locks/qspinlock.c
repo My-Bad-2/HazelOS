@@ -166,9 +166,7 @@ bool test_qspinlock(qspinlock_t* lock) {
 size_t acquire_qinterrupt_lock(qspinlock_t* lock) {
     size_t flags = arch_save_flags();
 
-    if (lock) {
-        acquire_qspinlock(lock);
-    }
+    if (lock) acquire_qspinlock(lock);
 
     arch_disable_interrupts();
     return flags;

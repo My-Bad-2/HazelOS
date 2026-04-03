@@ -1,5 +1,5 @@
-#include "arch.h"
 #include "cpu/smp.h"
+#include "libs/spinlock.h"
 #include "sched/rcu.h"
 #include "sched/scheduler.h"
 
@@ -10,52 +10,50 @@ void init_completion(struct completion* x) {
 }
 
 void complete(struct completion* x) {
-    arch_disable_interrupts();
-    acquire_qspinlock(&x->lock);
+    size_t flags = acquire_qinterrupt_lock(&x->lock);
 
-    x->done++;
+    if (x->done < UINT32_MAX) x->done++;
 
-    if (!dlist_empty(&x->wait)) {
-        struct dlist_head* first    = x->wait.next;
-        struct completion_waiter* w = dlist_entry(first, struct completion_waiter, list);
+    struct dlist_head* iter = x->wait.next;
+    while (iter != &x->wait) {
+        struct completion_waiter* w = dlist_entry(iter, struct completion_waiter, list);
+        if (w->task->state == THREAD_BLOCKED) {
+            scheduler_unblock(w->task);
+            break;
+        }
 
-        scheduler_unblock(w->task);
+        iter = iter->next;
     }
 
-    release_qspinlock(&x->lock);
-    arch_enable_interrupts();
+    release_qinterrupt_lock(&x->lock, flags);
 }
 
 void wait_for_completion(struct completion* x) {
+    size_t flags = acquire_qinterrupt_lock(&x->lock);
+
+    if (x->done > 0) {
+        x->done--;
+        release_qinterrupt_lock(&x->lock, flags);
+        return;
+    }
+
     struct completion_waiter w;
     thread_t* curr = smp_current_core()->curr_thread;
 
     w.task = curr;
     dlist_init(&w.list);
-
-    arch_disable_interrupts();
-    acquire_qspinlock(&x->lock);
-
-    if (x->done > 0) {
-        x->done--;
-        release_qspinlock(&x->lock);
-        arch_enable_interrupts();
-        return;
-    }
-
     dlist_add_tail(&w.list, &x->wait);
 
     while (x->done == 0) {
         curr->state = THREAD_BLOCKED;
 
-        release_qspinlock(&x->lock);
+        release_qinterrupt_lock(&x->lock, flags);
         schedule();
-        acquire_qspinlock(&x->lock);
+        flags = acquire_qinterrupt_lock(&x->lock);
     }
 
     x->done--;
     dlist_del(&w.list);
 
-    release_qspinlock(&x->lock);
-    arch_enable_interrupts();
+    release_qinterrupt_lock(&x->lock, flags);
 }

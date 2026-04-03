@@ -34,6 +34,11 @@ struct rcu_head {
     void (*func)(struct rcu_head*);
 };
 
+struct sync_rcu_ctx {
+    struct rcu_head head;
+    struct completion done;
+};
+
 struct rcu_node {
     qspinlock_t lock;
     uint64_t qs_mask;       // Bitmask of CPUs pending QS
@@ -81,7 +86,7 @@ struct srcu_domain {
 
     struct srcu_cpu_data* per_cpu;
 
-    spinlock_t gp_lock;
+    qspinlock_t gp_lock;
     atomic_bool gp_active;
     atomic_bool gp_request;
     struct thread* gp_thread;
@@ -94,34 +99,6 @@ int srcu_read_lock(struct srcu_domain* ssp);
 void srcu_read_unlock(struct srcu_domain* ssp, int idx);
 void synchronize_srcu(struct srcu_domain* ssp);
 void call_srcu(struct srcu_domain* ssp, struct rcu_head* head, void (*func)(struct rcu_head*));
-
-struct [[gnu::aligned(CACHE_LINE_SIZE)]] qsbr_cpu_data {
-    atomic_size_t local_epoch;
-    struct slist_head pending;
-};
-
-struct qsbr_domain {
-    atomic_size_t global_epoch;
-    uint32_t cpu_count;
-
-    struct qsbr_cpu_data* per_cpu;
-
-    spinlock_t gp_lock;
-    atomic_bool gp_active;
-    atomic_bool gp_request;
-    struct thread* gp_thread;
-};
-
-extern struct qsbr_domain g_qsbr;
-
-void init_qsbr_domain(struct qsbr_domain* qsd);
-
-void qsbr_online(struct qsbr_domain* qsd);
-void qsbr_offline(struct qsbr_domain* qsd);
-void qsbr_checkpoint(struct qsbr_domain* qsd);
-
-void synchronize_qsbr(struct qsbr_domain* qsd);
-void call_qsbr(struct qsbr_domain* qsd, struct rcu_head* head, void (*func)(struct rcu_head*));
 
 #ifdef __cplusplus
 }

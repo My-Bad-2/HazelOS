@@ -103,11 +103,10 @@ void rcu_init(void) {
 
     process_t* kernel_proc = get_kernel_process();
     rcu_state.gp_thread =
-        thread_create("rcu_gp_thread", kernel_proc, SCHED_RR, rcu_gp_thread, nullptr, 0);
+        thread_create("rcu_gp_thread", kernel_proc, SCHED_RR, rcu_gp_thread, nullptr, 99);
     scheduler_add_thread(rcu_state.gp_thread);
 
-    // init_srcu_domain(&g_srcu);
-    // init_qsbr_domain(&g_qsbr);
+    init_srcu_domain(&g_srcu);
 
     KLOG_INIT_OK();
 }
@@ -221,11 +220,6 @@ void rcu_check_callbacks(void) {
         count++;
     }
 }
-
-struct sync_rcu_ctx {
-    struct rcu_head head;
-    struct completion done;
-};
 
 static void wakeme_after_rcu(struct rcu_head* head) {
     struct sync_rcu_ctx* ctx = container_of(head, struct sync_rcu_ctx, head);

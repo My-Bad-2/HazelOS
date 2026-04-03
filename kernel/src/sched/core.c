@@ -242,9 +242,7 @@ static void idle_task_entry(void*) {
             arch_enable_interrupts();
             schedule();
         } else {
-            // qsbr_offline(&g_qsbr);
             arch_halt(true);
-            // qsbr_online(&g_qsbr);
         }
     }
 }
@@ -722,9 +720,7 @@ process_t* get_kernel_process(void) {
 
 void preempt_disable(void) {
     per_cpu_data_t* cpu = smp_current_core();
-    if (likely(cpu && cpu->curr_thread)) {
-        cpu->curr_thread->preempt_count++;
-    }
+    if (likely(cpu && cpu->curr_thread)) cpu->curr_thread->preempt_count++;
 
     atomic_signal_fence(memory_order_seq_cst);
 }

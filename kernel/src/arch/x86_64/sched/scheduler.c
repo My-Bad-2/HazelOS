@@ -5,6 +5,7 @@
 #include "cpu/registers.h"
 #include "cpu/smp.h"
 #include "libs/log.h"
+#include "sched/rcu.h"
 
 static irq_return_t reschedule_handler(interrupt_trapframe_t*, void*) {
     smp_current_core()->reschedule_needed = true;

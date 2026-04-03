@@ -3,6 +3,9 @@
 
 #include "boot/boot.h"
 #include "cpu/smp.h"
+#include "libs/slist.h"
+#include "libs/spinlock.h"
+#include "sched/process.h"
 #include "sched/rcu.h"
 #include "sched/scheduler.h"
 
@@ -19,11 +22,9 @@ void init_srcu_domain(struct srcu_domain* ssp) {
     atomic_init(&ssp->idx, 0);
     atomic_init(&ssp->gp_active, false);
     atomic_init(&ssp->gp_request, false);
-    create_spinlock(&ssp->gp_lock);
+    create_qspinlock(&ssp->gp_lock);
 
-    for (uint32_t i = 0; i < cpus; ++i) {
-        slist_init(&ssp->per_cpu[i].pending);
-    }
+    for (uint32_t i = 0; i < cpus; ++i) slist_init(&ssp->per_cpu[i].pending);
 
     process_t* kernel_proc = get_kernel_process();
     ssp->gp_thread =
@@ -32,10 +33,12 @@ void init_srcu_domain(struct srcu_domain* ssp) {
 }
 
 int srcu_read_lock(struct srcu_domain* ssp) {
-    int idx = atomic_load_explicit(&ssp->idx, memory_order_acquire) & 1;
+    preempt_disable();
 
+    int idx      = atomic_load_explicit(&ssp->idx, memory_order_acquire) & 1;
     uint32_t cpu = smp_current_core()->cpu_idx;
     atomic_fetch_add_explicit(&ssp->per_cpu[cpu].lock_count[idx], 1, memory_order_relaxed);
+    preempt_enable();
 
     atomic_thread_fence(memory_order_seq_cst);
     return idx;
@@ -44,22 +47,26 @@ int srcu_read_lock(struct srcu_domain* ssp) {
 void srcu_read_unlock(struct srcu_domain* ssp, int idx) {
     atomic_thread_fence(memory_order_seq_cst);
 
+    preempt_disable();
     uint32_t cpu = smp_current_core()->cpu_idx;
     atomic_fetch_add_explicit(&ssp->per_cpu[cpu].unlock_count[idx & 1], 1, memory_order_relaxed);
+    preempt_enable();
 }
 
 void call_srcu(struct srcu_domain* ssp, struct rcu_head* head, void (*func)(struct rcu_head*)) {
-    head->func   = func;
-    uint32_t cpu = smp_current_core()->cpu_idx;
+    head->func = func;
 
+    preempt_disable();
+    uint32_t cpu = smp_current_core()->cpu_idx;
     slist_push_atomic(&head->node, &ssp->per_cpu[cpu].pending);
+    preempt_enable();
 
     if (!atomic_load_explicit(&ssp->gp_active, memory_order_relaxed)) {
         atomic_store_explicit(&ssp->gp_request, true, memory_order_relaxed);
 
-        acquire_spinlock(&ssp->gp_lock);
+        size_t flags = acquire_qinterrupt_lock(&ssp->gp_lock);
         scheduler_unblock(ssp->gp_thread);
-        release_spinlock(&ssp->gp_lock);
+        release_qinterrupt_lock(&ssp->gp_lock, flags);
     }
 }
 
@@ -78,53 +85,51 @@ static bool srcu_readers_drained(struct srcu_domain* ssp, int idx) {
 
 static void srcu_flip_and_wait(struct srcu_domain* ssp) {
     int old_idx = atomic_load_explicit(&ssp->idx, memory_order_relaxed) & 1;
-
-    atomic_store_explicit(&ssp->idx, old_idx ^ 1, memory_order_relaxed);
-
-    atomic_thread_fence(memory_order_seq_cst);
-
-    while (!srcu_readers_drained(ssp, old_idx)) {
-        scheduler_sleep(1);
-    }
+    atomic_store_explicit(&ssp->idx, old_idx ^ 1, memory_order_seq_cst);
+    while (!srcu_readers_drained(ssp, old_idx)) scheduler_sleep(1);
 }
 
 void synchronize_srcu(struct srcu_domain* ssp) {
-    acquire_spinlock(&ssp->gp_lock);
+    acquire_qspinlock(&ssp->gp_lock);
 
     srcu_flip_and_wait(ssp);
     srcu_flip_and_wait(ssp);
 
-    release_spinlock(&ssp->gp_lock);
+    release_qspinlock(&ssp->gp_lock);
 }
 
 static void srcu_gp_thread(void* arg) {
     struct srcu_domain* ssp = (struct srcu_domain*)arg;
     struct slist_head executing_list;
+    thread_t* self = smp_current_core()->curr_thread;
 
     while (true) {
-        acquire_spinlock(&ssp->gp_lock);
+        size_t flags = acquire_qinterrupt_lock(&ssp->gp_lock);
 
         while (!atomic_load_explicit(&ssp->gp_request, memory_order_relaxed)) {
-            release_spinlock(&ssp->gp_lock);
-            scheduler_block();
-            acquire_spinlock(&ssp->gp_lock);
+            self->state = THREAD_BLOCKED;
+            release_qinterrupt_lock(&ssp->gp_lock, flags);
+            schedule();
+            flags = acquire_qinterrupt_lock(&ssp->gp_lock);
         }
 
         atomic_store_explicit(&ssp->gp_request, false, memory_order_relaxed);
         atomic_store_explicit(&ssp->gp_active, true, memory_order_relaxed);
 
         slist_init(&executing_list);
-
         for (uint32_t i = 0; i < ssp->cpu_count; ++i) {
             struct slist_node* pending = slist_pop_all_atomic(&ssp->per_cpu[i].pending);
 
             if (pending) {
                 struct slist_head temp = {pending};
+
+                // Rever list to process older callbacks first
+                slist_reverse(&temp);
                 slist_splice(&temp, &executing_list);
             }
         }
 
-        release_spinlock(&ssp->gp_lock);
+        release_qinterrupt_lock(&ssp->gp_lock, flags);
 
         if (!slist_empty(&executing_list)) {
             synchronize_srcu(ssp);
