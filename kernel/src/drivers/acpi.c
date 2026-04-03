@@ -3,34 +3,30 @@
 #include <errno.h>
 #include <stdint.h>
 #include <uacpi/context.h>
-#include <uacpi/uacpi.h>
 
 #include "drivers/madt.h"
 #include "libs/log.h"
 #include "memory/heap.h"
+#include "uacpi/log.h"
 
 void acpi_early_init(void) {
-    KLOG_INFO("ACPI: early init start\n");
-
-    const size_t scratch_len = 4096 * sizeof(uint8_t);
+    KLOG_INIT_START("Early ACPI Tables");
+    const size_t scratch_len = 64ul * 1024;
     uint8_t* buf             = kmalloc(scratch_len);
 
     if (!buf) {
-        errno = ENOMEM;
-        KLOG_ERROR(
-            "ACPI: failed to allocate early table buffer size=%zu errno=%d\n",
-            scratch_len,
-            errno
-        );
+        KLOG_INIT_FAIL();
         return;
     }
 
-    uacpi_context_set_log_level(UACPI_LOG_DEBUG);
+    uacpi_context_set_log_level(UACPI_LOG_WARN);
     uacpi_setup_early_table_access(buf, scratch_len);
-
-    acpi_parse_tables();
-
     kfree(buf);
 
-    KLOG_INFO("ACPI: early init complete\n");
+    if (!acpi_parse_tables()) {
+        KLOG_INIT_FAIL();
+        return;
+    }
+
+    KLOG_INIT_OK();
 }

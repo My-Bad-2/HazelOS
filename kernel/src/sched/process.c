@@ -79,7 +79,7 @@ process_t* process_create(const char* name, bool is_kernel) {
             "process_cache",
             sizeof(struct process),
             _Alignof(struct process),
-            0,
+            SLAB_NEVER_MERGE | SLAB_HWCACHE_ALIGN,
             nullptr
         );
     }

@@ -88,8 +88,13 @@ thread_t* thread_create(
 ) {
     if (!thread_cache) {
         sema_init(&reaper_sema, 0);
-        thread_cache =
-            kmem_cache_create("thread_cache", sizeof(thread_t), _Alignof(thread_t), 0, nullptr);
+        thread_cache = kmem_cache_create(
+            "thread_cache",
+            sizeof(thread_t),
+            _Alignof(thread_t),
+            SLAB_NEVER_MERGE | SLAB_HWCACHE_ALIGN,
+            nullptr
+        );
     }
 
     va_list list;

@@ -242,9 +242,9 @@ static void idle_task_entry(void*) {
             arch_enable_interrupts();
             schedule();
         } else {
-            qsbr_offline(&g_qsbr);
+            // qsbr_offline(&g_qsbr);
             arch_halt(true);
-            qsbr_online(&g_qsbr);
+            // qsbr_online(&g_qsbr);
         }
     }
 }

@@ -1,4 +1,3 @@
-#include "sched/process.h"
 #ifndef KERNEL_SCHED_RCU_H
 #define KERNEL_SCHED_RCU_H 1
 
@@ -9,6 +8,7 @@
 #include "libs/dlist.h"
 #include "libs/slist.h"
 #include "libs/spinlock.h"
+#include "sched/process.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,7 +16,7 @@ extern "C" {
 
 struct completion {
     uint32_t done;
-    spinlock_t lock;
+    qspinlock_t lock;
     struct dlist_head wait;
 };
 
@@ -35,7 +35,7 @@ struct rcu_head {
 };
 
 struct rcu_node {
-    spinlock_t lock;
+    qspinlock_t lock;
     uint64_t qs_mask;       // Bitmask of CPUs pending QS
     uint64_t qs_mask_init;  // Bitmask of CPUs online for this node
     uint64_t gp_seq;        // Current GP sequence number

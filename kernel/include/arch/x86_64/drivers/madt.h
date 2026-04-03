@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-void acpi_parse_tables(void);
+bool acpi_parse_tables(void);
 
 struct acpi_madt_ioapic* acpi_get_ioapics(void);
 struct acpi_madt_interrupt_source_override* acpi_get_isos(void);

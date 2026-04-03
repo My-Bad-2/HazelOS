@@ -56,7 +56,6 @@ void simd_init(void) {
 
     if (!has_sse) {
         fpu_mode = FPU_NONE;
-        errno    = ENODEV;
         KLOG_WARN("SIMD: SSE not supported; disabling FPU context switching\n");
         return;
     }
@@ -136,23 +135,11 @@ cleanup:
 
         clean_state = kmalloc(size);
 
-        if (!clean_state) {
-            errno = ENOMEM;
-            PANIC("SIMD: Cannot allocate clean state buffer!\n");
-        }
+        if (!clean_state) PANIC("SIMD: Cannot allocate clean state buffer!\n");
 
         memset(clean_state, 0, size);
         simd_save(clean_state);
     }
-
-    KLOG_INFO(
-        "SIMD: initialized mode=%s save_size=%zu align=%zu\n",
-        (fpu_mode == FPU_AVXOPT) ? "AVXOPT"
-        : (fpu_mode == FPU_AVX)  ? "AVX"
-                                 : "SSE",
-        save_size,
-        (save_size != 512) ? 64 : 16
-    );
 }
 
 void simd_save(void* buffer) {
@@ -168,8 +155,6 @@ void simd_save(void* buffer) {
             break;
         case FPU_NONE:
         default:
-            errno = ENODEV;
-
             if (!warned_no_state) {
                 warned_no_state = true;
                 KLOG_WARN("SIMD: save requested with no FPU state initialized\n");
@@ -190,8 +175,6 @@ void simd_restore(void* buffer) {
             break;
         case FPU_NONE:
         default:
-            errno = ENODEV;
-
             if (!warned_no_state) {
                 warned_no_state = true;
                 KLOG_WARN("SIMD: restore requested with no FPU state initialized\n");

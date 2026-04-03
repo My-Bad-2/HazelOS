@@ -32,7 +32,7 @@ void vma_cache_init(void) {
         "vma_cache",
         sizeof(struct vm_area),
         _Alignof(struct vm_area),
-        0,
+        SLAB_NEVER_MERGE,
         nullptr
     );
 
@@ -40,7 +40,7 @@ void vma_cache_init(void) {
         "vmspace_cache",
         sizeof(struct vm_space),
         _Alignof(struct vm_space),
-        0,
+        SLAB_NEVER_MERGE | SLAB_HWCACHE_ALIGN,
         nullptr
     );
 

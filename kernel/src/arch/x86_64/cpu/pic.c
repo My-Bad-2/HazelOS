@@ -73,12 +73,6 @@ void pic_init(void) {
 
     // Mask all interrupts for now
     pic_disable();
-
-    KLOG_DEBUG(
-        "PIC: Remapped to master_offset: %u slave_offset: %u\n",
-        PLATFORM_INTERRUPT_BASE,
-        PLATFORM_INTERRUPT_BASE + 8
-    );
 }
 
 void pic_disable(void) {

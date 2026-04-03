@@ -47,12 +47,6 @@ static void ap_entry_point(struct limine_mp_info* info) {
 
 static void init_cpu_state(per_cpu_data_t* cpu) {
     ASSERT(cpu);
-    void* stack = nullptr;
-
-    if (cpu->is_bsp) {
-        stack = bootstrap_stack;
-    }
-
     cpu->rcu = kmalloc(sizeof(struct rcu_data));
 
     create_qspinlock(&cpu->lock);
@@ -61,14 +55,6 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
 
     timer_manager_init(cpu->timer_manager);
     arch_init_cpu_state(cpu);
-
-    KLOG_DEBUG(
-        "SMP: cpu=%u bsp=%d lapic=0x%x stack_top=0x%lx initialized\n",
-        cpu->cpu_idx,
-        cpu->is_bsp,
-        cpu->lapic_id,
-        cpu->kstack_top
-    );
 }
 
 void smp_init(void) {

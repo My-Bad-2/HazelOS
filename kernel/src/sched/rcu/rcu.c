@@ -7,12 +7,14 @@
 #include "boot/boot.h"
 #include "cpu/smp.h"
 #include "libs/log.h"
+#include "libs/slist.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
 
-#define RCU_FANOUT 64
+#define RCU_FANOUT                 64
+#define RCU_MAX_CALLBACKS_PER_TICK 100
 
 struct rcu_state {
     struct rcu_node* node_array;
@@ -25,20 +27,21 @@ struct rcu_state {
     atomic_bool gp_request;              // Wake-up flag for GP thread
 
     struct thread* gp_thread;
-    spinlock_t gp_lock;
+    qspinlock_t gp_lock;
 };
 
 static struct rcu_state rcu_state;
 static void rcu_gp_thread(void* arg);
 
 void rcu_init(void) {
+    KLOG_INIT_START("Read-Copy-Write");
     uint32_t cpus = mp_request.response->cpu_count;
 
     atomic_init(&rcu_state.gp_seq, 0);
     atomic_init(&rcu_state.completed_gp_seq, 0);
     atomic_init(&rcu_state.gp_active, false);
     atomic_init(&rcu_state.gp_request, false);
-    create_spinlock(&rcu_state.gp_lock);
+    create_qspinlock(&rcu_state.gp_lock);
 
     uint32_t num_leaves  = (cpus + RCU_FANOUT - 1) / RCU_FANOUT;
     uint32_t total_nodes = num_leaves + (num_leaves > 1 ? 1 : 0);
@@ -52,7 +55,7 @@ void rcu_init(void) {
 
     if (num_leaves == 1) {
         // Flat topology: Root node is the only leaf
-        create_spinlock(&root->lock);
+        create_qspinlock(&root->lock);
 
         root->group_num    = 0;
         root->level        = 0;
@@ -60,14 +63,14 @@ void rcu_init(void) {
         root->qs_mask_init = (cpus == 64) ? UINT64_MAX : ((1ul << cpus) - 1);
     } else {
         // Hierarchical topology: Root + Leaves
-        create_spinlock(&root->lock);
+        create_qspinlock(&root->lock);
         root->level        = 1;
-        root->qs_mask_init = (1ul << num_leaves) - 1;
+        root->qs_mask_init = (num_leaves == 64) ? UINT64_MAX : (1ul << num_leaves) - 1;
         root->parent       = nullptr;
 
         for (uint32_t i = 0; i < num_leaves; ++i) {
             struct rcu_node* leaf = &rcu_state.node_array[i + 1];
-            create_spinlock(&leaf->lock);
+            create_qspinlock(&leaf->lock);
             leaf->level     = 0;
             leaf->parent    = root;
             leaf->group_num = i;
@@ -103,41 +106,34 @@ void rcu_init(void) {
         thread_create("rcu_gp_thread", kernel_proc, SCHED_RR, rcu_gp_thread, nullptr, 0);
     scheduler_add_thread(rcu_state.gp_thread);
 
-    rcu_state.gp_thread->assigned_cpu  = 0;
-    rcu_state.gp_thread->affinity_mask = (1 << 0);
+    // init_srcu_domain(&g_srcu);
+    // init_qsbr_domain(&g_qsbr);
 
-    init_srcu_domain(&g_srcu);
-    init_qsbr_domain(&g_qsbr);
-
-    KLOG_INFO("RCU: Subsystem initialized for %u CPUs\n", cpus);
+    KLOG_INIT_OK();
 }
 
 void rcu_read_lock(void) {
     preempt_disable();
-
     struct rcu_data* rdp = smp_current_core()->rcu;
     rdp->nesting++;
-
     atomic_signal_fence(memory_order_acquire);
 }
 
 void rcu_read_unlock(void) {
     struct rcu_data* rdp = smp_current_core()->rcu;
-
     atomic_signal_fence(memory_order_release);
     rdp->nesting--;
-
     preempt_enable();
 }
 
 static void rcu_request_gp(void) {
     atomic_store_explicit(&rcu_state.gp_request, true, memory_order_release);
+    uint64_t flags = acquire_qinterrupt_lock(&rcu_state.gp_lock);
 
-    if (!atomic_load_explicit(&rcu_state.gp_active, memory_order_acquire)) {
-        acquire_spinlock(&rcu_state.gp_lock);
+    if (!atomic_load_explicit(&rcu_state.gp_active, memory_order_acquire))
         scheduler_unblock(rcu_state.gp_thread);
-        release_spinlock(&rcu_state.gp_lock);
-    }
+
+    release_qinterrupt_lock(&rcu_state.gp_lock, flags);
 }
 
 void call_rcu(struct rcu_head* head, void (*func)(struct rcu_head*)) {
@@ -145,20 +141,17 @@ void call_rcu(struct rcu_head* head, void (*func)(struct rcu_head*)) {
     struct rcu_data* rdp = smp_current_core()->rcu;
 
     slist_push_atomic(&head->node, &rdp->pending);
-
-    if (!atomic_load_explicit(&rcu_state.gp_active, memory_order_relaxed)) {
-        rcu_request_gp();
-    }
+    if (!atomic_load_explicit(&rcu_state.gp_active, memory_order_relaxed)) rcu_request_gp();
 }
 
 static bool rcu_report_qs_rnp(uint64_t mask, struct rcu_node* rnp, uint64_t gp_seq) {
     bool accepted = false;
+    if (rnp->gp_seq != gp_seq || !(rnp->qs_mask & mask)) return false;
 
     while (rnp != nullptr) {
-        acquire_spinlock(&rnp->lock);
-
+        size_t flags = acquire_qinterrupt_lock(&rnp->lock);
         if (rnp->gp_seq != gp_seq || !(rnp->qs_mask & mask)) {
-            release_spinlock(&rnp->lock);
+            release_qinterrupt_lock(&rnp->lock, flags);
             return accepted;
         }
 
@@ -166,18 +159,15 @@ static bool rcu_report_qs_rnp(uint64_t mask, struct rcu_node* rnp, uint64_t gp_s
         accepted = true;
 
         if (rnp->qs_mask != 0) {
-            release_spinlock(&rnp->lock);
+            release_qinterrupt_lock(&rnp->lock, flags);
             return true;
         }
 
         mask                    = 1ul << rnp->group_num;
         struct rcu_node* parent = rnp->parent;
+        if (!parent) scheduler_unblock(rcu_state.gp_thread);
 
-        if (parent == nullptr) {
-            scheduler_unblock(rcu_state.gp_thread);
-        }
-
-        release_spinlock(&rnp->lock);
+        release_qinterrupt_lock(&rnp->lock, flags);
         rnp = parent;
     }
 
@@ -191,6 +181,7 @@ void rcu_check_callbacks(void) {
 
     if (!slist_empty(&rdp->waiting) && rdp->waiting_gp_seq <= completed) {
         slist_splice(&rdp->waiting, &rdp->done);
+        slist_init(&rdp->waiting);
     }
 
     if (rdp->last_qs_seq != active) {
@@ -214,20 +205,20 @@ void rcu_check_callbacks(void) {
 
     if (slist_empty(&rdp->waiting) && !slist_empty(&rdp->next_waiting)) {
         slist_splice(&rdp->next_waiting, &rdp->waiting);
+        slist_init(&rdp->next_waiting);
         rdp->waiting_gp_seq = active + 1;
         rcu_request_gp();
     }
 
-    if (rdp->qs_pending && rdp->nesting == 0) {
-        if (rcu_report_qs_rnp(rdp->mask, rdp->node, active)) {
-            rdp->qs_pending = false;
-        }
-    }
+    if (rdp->qs_pending && rdp->nesting == 0)
+        if (rcu_report_qs_rnp(rdp->mask, rdp->node, active)) rdp->qs_pending = false;
 
     struct slist_node* node;
-    while ((node = slist_pop(&rdp->done)) != nullptr) {
+    uint32_t count = 0;
+    while (count < RCU_MAX_CALLBACKS_PER_TICK && (node = slist_pop(&rdp->done))) {
         struct rcu_head* cb = slist_entry(node, struct rcu_head, node);
         cb->func(cb);
+        count++;
     }
 }
 
@@ -256,41 +247,42 @@ static void rcu_gp_thread(void*) {
     thread_t* self = smp_current_core()->curr_thread;
 
     while (true) {
-        acquire_spinlock(&rcu_state.gp_lock);
+        size_t flags = acquire_qinterrupt_lock(&rcu_state.gp_lock);
 
         while (!atomic_load_explicit(&rcu_state.gp_request, memory_order_relaxed)) {
             self->state = THREAD_BLOCKED;
-            release_spinlock(&rcu_state.gp_lock);
+            release_qinterrupt_lock(&rcu_state.gp_lock, flags);
             schedule();
-            acquire_spinlock(&rcu_state.gp_lock);
+            flags = acquire_qinterrupt_lock(&rcu_state.gp_lock);
         }
 
         atomic_store_explicit(&rcu_state.gp_request, false, memory_order_relaxed);
-        release_spinlock(&rcu_state.gp_lock);
-
         atomic_store_explicit(&rcu_state.gp_active, true, memory_order_release);
+        release_qinterrupt_lock(&rcu_state.gp_lock, flags);
+
         uint64_t seq = atomic_fetch_add_explicit(&rcu_state.gp_seq, 1, memory_order_release) + 1;
 
         for (uint32_t i = 0; i < rcu_state.num_nodes; ++i) {
             struct rcu_node* rnp = &rcu_state.node_array[i];
-            acquire_spinlock(&rnp->lock);
-            rnp->gp_seq  = seq;
-            rnp->qs_mask = rnp->qs_mask_init;
-            release_spinlock(&rnp->lock);
+            flags                = acquire_qinterrupt_lock(&rcu_state.gp_lock);
+            rnp->gp_seq          = seq;
+            rnp->qs_mask         = rnp->qs_mask_init;
+            release_qinterrupt_lock(&rcu_state.gp_lock, flags);
         }
 
         // Wait for Tree to drain
         struct rcu_node* root = rcu_state.root;
         while (true) {
-            acquire_spinlock(&root->lock);
+            flags = acquire_qinterrupt_lock(&rcu_state.gp_lock);
 
             if (root->qs_mask == 0) {
-                release_spinlock(&root->lock);
+                release_qinterrupt_lock(&rcu_state.gp_lock, flags);
                 break;
             }
 
             self->state = THREAD_BLOCKED;
-            release_spinlock(&root->lock);
+            release_qinterrupt_lock(&rcu_state.gp_lock, flags);
+
             schedule();
         }
 

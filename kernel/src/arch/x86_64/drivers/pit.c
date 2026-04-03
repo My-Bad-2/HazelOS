@@ -18,19 +18,14 @@ static _Atomic(uint64_t) global_ticks = 0;
 static atomic_uint current_frequency  = 0;
 static bool warned_zero_freq          = false;
 
-static void set_pit_frequency(uint32_t freq) {
-    if (freq == 0) {
-        errno = EINVAL;
-        KLOG_WARN("PIT: requested zero frequency, defaulting to 1000 Hz\n");
-        freq = 1000;
-    }
+static bool set_pit_frequency(uint32_t freq) {
+    if (freq == 0) freq = 1000;
 
     uint32_t divisor = PIT_BASE_FREQ / freq;
-
     if (divisor == 0 || divisor > UINT16_MAX) {
-        errno = EINVAL;
+        KLOG_INIT_FAIL();
         KLOG_WARN("PIT: invalid divisor for freq=%u Hz\n", freq);
-        return;
+        return false;
     }
 
     atomic_store_explicit(&current_frequency, freq, memory_order_seq_cst);
@@ -42,8 +37,7 @@ static void set_pit_frequency(uint32_t freq) {
     io_write8(PIT_PORT_CH0, (uint8_t)(divisor & 0xff));
     io_wait();
     io_write8(PIT_PORT_CH0, (uint8_t)((divisor >> 8) & 0xff));
-
-    KLOG_DEBUG("PIT: frequency set to %u Hz (div=%u)\n", freq, divisor);
+    return true;
 }
 
 static uint16_t pit_read_hardware_count(void) {
@@ -86,10 +80,14 @@ void pit_disable(void) {
 }
 
 void pit_init(void) {
+    KLOG_INIT_START("PIT");
+
     const uint32_t freq = 1000;
-    set_pit_frequency(freq);
+    if (set_pit_frequency(freq)) {
+        KLOG_INIT_OK();
+    }
+
     timer_set_clock_source(CLOCK_PIT);
-    KLOG_INFO("PIT: initialized at %u Hz\n", freq);
 }
 
 void pit_mdelay(uint64_t ms) {

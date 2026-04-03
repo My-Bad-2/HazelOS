@@ -11,8 +11,6 @@
 #include "drivers/pit.h"
 #include "drivers/tsc.h"
 #include "libs/log.h"
-#include "sched/rcu.h"
-#include "sched/scheduler.h"
 
 static clock_source_t source = CLOCK_PIT;
 
@@ -66,15 +64,13 @@ void timer_set_clock_source(clock_source_t src) {
         case CLOCK_HPET:
         case CLOCK_TSC:
             source = src;
-            KLOG_INFO("TIMER: clock source set to %s\n", timer_clock_source_name(src));
-            return;
+            break;
         default:
             if (!warned_invalid_source) {
                 warned_invalid_source = true;
                 KLOG_WARN("TIMER: invalid clock source requested=%d\n", src);
             }
-
-            return;
+            break;
     }
 }
 

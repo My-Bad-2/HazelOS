@@ -5,13 +5,13 @@
 
 void init_completion(struct completion* x) {
     x->done = 0;
-    create_spinlock(&x->lock);
+    create_qspinlock(&x->lock);
     dlist_init(&x->wait);
 }
 
 void complete(struct completion* x) {
     arch_disable_interrupts();
-    acquire_spinlock(&x->lock);
+    acquire_qspinlock(&x->lock);
 
     x->done++;
 
@@ -22,7 +22,7 @@ void complete(struct completion* x) {
         scheduler_unblock(w->task);
     }
 
-    release_spinlock(&x->lock);
+    release_qspinlock(&x->lock);
     arch_enable_interrupts();
 }
 
@@ -34,11 +34,11 @@ void wait_for_completion(struct completion* x) {
     dlist_init(&w.list);
 
     arch_disable_interrupts();
-    acquire_spinlock(&x->lock);
+    acquire_qspinlock(&x->lock);
 
     if (x->done > 0) {
         x->done--;
-        release_spinlock(&x->lock);
+        release_qspinlock(&x->lock);
         arch_enable_interrupts();
         return;
     }
@@ -48,14 +48,14 @@ void wait_for_completion(struct completion* x) {
     while (x->done == 0) {
         curr->state = THREAD_BLOCKED;
 
-        release_spinlock(&x->lock);
+        release_qspinlock(&x->lock);
         schedule();
-        acquire_spinlock(&x->lock);
+        acquire_qspinlock(&x->lock);
     }
 
     x->done--;
     dlist_del(&w.list);
 
-    release_spinlock(&x->lock);
+    release_qspinlock(&x->lock);
     arch_enable_interrupts();
 }

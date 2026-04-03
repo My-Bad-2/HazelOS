@@ -7,7 +7,10 @@
 extern "C" {
 #endif
 
-#define SLAB_NO_OFFSLAB 0x8000
+#define SLAB_NO_OFFSLAB    0x8000
+#define SLAB_NEVER_MERGE   0x4000
+#define SLAB_HWCACHE_ALIGN 0x2000
+
 #if KERNEL_DEBUG
 #define SLAB_DEBUG_FREE 0x0100  // Poison memory on free
 #define SLAB_RED_ZONES  0x0200  // Add redzones

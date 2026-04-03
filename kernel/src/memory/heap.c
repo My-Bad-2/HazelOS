@@ -1,6 +1,5 @@
 #include "memory/heap.h"
 
-#include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -47,11 +46,15 @@ struct slab {
 struct [[gnu::aligned(CACHE_LINE_SIZE)]] kmem_cache_cpu {
     void* freelist;
     struct slab* active;
+    struct slab* partial;
 };
 
 struct kmem_cache {
+    struct dlist_head list;  // Node in global_cache_list
+    _Atomic(uint32_t) refcount;
+
     spinlock_t lock;
-    struct dlist_head partial;
+    struct dlist_head partial_list;
 
     size_t obj_size;         // Logical size
     size_t offset_freelist;  // Safe offset to store the freelist pointer
@@ -72,6 +75,9 @@ struct kmem_cache {
     struct kmem_cache_cpu* cpu_slab;
 };
 
+static struct dlist_head global_cache_list;
+static spinlock_t global_cache_lock;
+
 static kmem_cache_t cache_boot;
 static kmem_cache_t cache_metadata;
 static kmem_cache_t* kmalloc_caches[KMALLOC_CACHES_NUM];
@@ -86,7 +92,7 @@ static inline void** slab_freelist_ptr(kmem_cache_t* cache, void* obj) {
 
 static void add_partial_sorted(kmem_cache_t* cache, struct slab* slab) {
     struct dlist_head* curr;
-    dlist_for_each(curr, &cache->partial) {
+    dlist_for_each(curr, &cache->partial_list) {
         struct slab* s = dlist_entry(curr, struct slab, list);
         if (atomic_load(&slab->in_use) >= atomic_load(&s->in_use)) break;
     }
@@ -241,7 +247,7 @@ size_t kmem_cache_shrink(kmem_cache_t* cache) {
 
     acquire_spinlock(&cache->lock);
 
-    dlist_for_each_entry_safe(pos, n, &cache->partial, list) {
+    dlist_for_each_entry_safe(pos, n, &cache->partial_list, list) {
         if (atomic_load(&pos->in_use) == 0 && !atomic_load(&pos->is_active)) {
             dlist_del(&pos->list);
 
@@ -276,18 +282,41 @@ static void* slab_alloc_slow(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
         }
     }
 
-    if (cc) deactivate_slab(cache, cc);
+    if (cc && cc->partial) {
+        if (cc->active) deactivate_slab(cache, cc);
+
+        cc->active  = cc->partial;
+        cc->partial = nullptr;
+        if (cc->active) atomic_store(&cc->active->is_active, true);
+
+        cc->freelist         = cc->active->freelist;
+        cc->active->freelist = nullptr;
+
+        if (cc->freelist) {
+            void* obj    = cc->freelist;
+            cc->freelist = *slab_freelist_ptr(cache, obj);
+            atomic_fetch_add(&cc->active->in_use, 1);
+            return obj;
+        }
+    }
 
     acquire_spinlock(&cache->lock);
+    if (cc && cc->active) deactivate_slab(cache, cc);
 
     struct slab* new_active  = nullptr;
     struct slab* new_partial = nullptr;
 
-    if (!dlist_empty(&cache->partial)) {
-        new_active = dlist_entry(cache->partial.next, struct slab, list);
+    if (!dlist_empty(&cache->partial_list)) {
+        new_active = dlist_entry(cache->partial_list.next, struct slab, list);
         dlist_del_init(&new_active->list);
+
+        if (!dlist_empty(&cache->partial_list)) {
+            new_partial = dlist_entry(cache->partial_list.next, struct slab, list);
+            dlist_del_init(&new_partial->list);
+        }
     } else {
-        new_active = slab_grow(cache);
+        new_active  = slab_grow(cache);
+        new_partial = slab_grow(cache);
     }
 
     if (!new_active) {
@@ -296,7 +325,8 @@ static void* slab_alloc_slow(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
     }
 
     if (cc) {
-        cc->active = new_active;
+        cc->active  = new_active;
+        cc->partial = new_partial;
 
         atomic_store(&new_active->is_active, true);
         cc->freelist         = new_active->freelist;
@@ -324,9 +354,48 @@ static void* slab_alloc_slow(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
     return obj;
 }
 
+static kmem_cache_t*
+find_mergeable_cache(size_t size, size_t align, size_t flags, void (*ctor)(void*)) {
+    if (flags & SLAB_NEVER_MERGE) return nullptr;
+    if (ctor) return nullptr;
+
+#if KERNEL_DEBUG
+    size_t pad = (flags & SLAB_RED_ZONES) ? sizeof(uint64_t) : 0;
+#else
+    size_t pad = 0;
+#endif
+    size_t offset     = align_up(size + pad, sizeof(void*));
+    size_t final_size = align_up(offset + sizeof(void*), align);
+
+    struct dlist_head* curr;
+    acquire_spinlock(&global_cache_lock);
+    dlist_for_each(curr, &global_cache_list) {
+        kmem_cache_t* c = dlist_entry(curr, kmem_cache_t, list);
+
+        if (c->flags & SLAB_NEVER_MERGE) continue;
+
+        if (c->size == final_size || c->flags == flags && c->align == align && !c->ctor) {
+            atomic_fetch_add(&c->refcount, 1);
+            release_spinlock(&global_cache_lock);
+            return c;
+        }
+    }
+
+    release_spinlock(&global_cache_lock);
+    return nullptr;
+}
+
 kmem_cache_t*
 kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, void (*ctor)(void*)) {
-    align = (align < 8) ? 8 : align;
+    if (flags & SLAB_HWCACHE_ALIGN) {
+        align = align_up(align, CACHE_LINE_SIZE);
+        size  = align_up(size, CACHE_LINE_SIZE);
+    } else {
+        align = (align < 8) ? 8 : align;
+    }
+
+    kmem_cache_t* merged = find_mergeable_cache(size, align, flags, ctor);
+    if (merged) return merged;
 
     kmem_cache_t* cache = kmem_cache_alloc(&cache_boot);
     if (!cache) return nullptr;
@@ -352,7 +421,8 @@ kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, voi
     cache->color_next = 0;
     cache->color_max  = 0;
 
-    dlist_init(&cache->partial);
+    atomic_init(&cache->refcount, 1);
+    dlist_init(&cache->partial_list);
     create_spinlock(&cache->lock);
 
     size_t best_order = 0;
@@ -382,15 +452,18 @@ kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, voi
     void* cpu_phys     = pmm_alloc(div_roundup(struct_size, PAGE_SIZE));
     cache->cpu_slab    = (struct kmem_cache_cpu*)to_higher_half((uintptr_t)cpu_phys);
 
-    for (size_t i = 0; i < mp_request.response->cpu_count; ++i) {
-        cache->cpu_slab[i].freelist = nullptr;
-        cache->cpu_slab[i].active   = nullptr;
-    }
-
+    memset(cache->cpu_slab, 0, struct_size);
     return cache;
 }
 
 void kmem_cache_destroy(kmem_cache_t* cache) {
+    if (!cache) return;
+    if (atomic_fetch_sub(&cache->refcount, 1) > 1) return;
+
+    acquire_spinlock(&global_cache_lock);
+    dlist_del(&cache->list);
+    release_spinlock(&global_cache_lock);
+
     if (cache->cpu_slab) {
         for (size_t i = 0; i < mp_request.response->cpu_count; ++i)
             deactivate_slab(cache, &cache->cpu_slab[i]);
@@ -399,7 +472,7 @@ void kmem_cache_destroy(kmem_cache_t* cache) {
     }
 
     struct slab *pos, *n;
-    dlist_for_each_entry_safe(pos, n, &cache->partial, list) {
+    dlist_for_each_entry_safe(pos, n, &cache->partial_list, list) {
         dlist_del(&pos->list);
 
         void* base_page     = (void*)align_down((uintptr_t)pos->base, PAGE_SIZE_SMALL);
@@ -523,11 +596,15 @@ static void init_internal_cache(kmem_cache_t* cache, const char* name, size_t si
     cache->color_next = 0;
     cache->color_max  = 0;
 
-    dlist_init(&cache->partial);
+    dlist_init(&cache->partial_list);
     create_spinlock(&cache->lock);
 }
 
 void kheap_init(void) {
+    KLOG_INIT_START("Kernel Slab Allocator");
+    dlist_init(&global_cache_list);
+    create_spinlock(&global_cache_lock);
+
     init_internal_cache(&cache_boot, "kmem_cache", sizeof(kmem_cache_t));
     init_internal_cache(&cache_metadata, "slab_metadata", sizeof(struct slab));
 
@@ -537,6 +614,8 @@ void kheap_init(void) {
         snprintf(name, sizeof(name), "km-%lu", size);
         kmalloc_caches[i] = kmem_cache_create(name, size, size, 0, nullptr);
     }
+
+    KLOG_INIT_OK();
 }
 
 void* kmalloc(size_t size) {
