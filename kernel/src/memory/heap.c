@@ -40,11 +40,12 @@ struct slab {
     _Atomic(void*) remote_freelist;
 
     _Atomic(uint32_t) in_use;
+    _Atomic(bool) is_active;
     uint32_t total;
 };
 
 struct [[gnu::aligned(CACHE_LINE_SIZE)]] kmem_cache_cpu {
-    _Atomic(void*) freelist;
+    void* freelist;
     struct slab* active;
 };
 
@@ -52,19 +53,21 @@ struct kmem_cache {
     spinlock_t lock;
     struct dlist_head partial;
 
-    size_t obj_size;  // Logical size
-    size_t size;      // Aligned/Padded size
+    size_t obj_size;         // Logical size
+    size_t offset_freelist;  // Safe offset to store the freelist pointer
+    size_t size;             // Aligned/Padded size
     size_t align;
     size_t flags;
-
     size_t alloc_order;  // The power-of-two page multiplier
 
     size_t color_off;
     size_t color_max;
     size_t color_next;
 
-    void (*ctor)(void*);  // Constructor
+    void (*ctor)(void*);
+#if KERNEL_DEBUG
     char name[SLAB_NAME_MAX];
+#endif
 
     struct kmem_cache_cpu* cpu_slab;
 };
@@ -74,41 +77,47 @@ static kmem_cache_t cache_metadata;
 static kmem_cache_t* kmalloc_caches[KMALLOC_CACHES_NUM];
 
 static inline struct page* virt_to_page(void* addr) {
-    uintptr_t phys = from_higher_half((uintptr_t)addr);
-    return phys_to_page(phys);
+    return phys_to_page(from_higher_half((uintptr_t)addr));
+}
+
+static inline void** slab_freelist_ptr(kmem_cache_t* cache, void* obj) {
+    return (void**)((char*)obj + cache->offset_freelist);
 }
 
 static void add_partial_sorted(kmem_cache_t* cache, struct slab* slab) {
     struct dlist_head* curr;
-
     dlist_for_each(curr, &cache->partial) {
         struct slab* s = dlist_entry(curr, struct slab, list);
-
-        if (atomic_load(&slab->in_use) >= atomic_load(&s->in_use)) {
-            break;
-        }
+        if (atomic_load(&slab->in_use) >= atomic_load(&s->in_use)) break;
     }
 
     dlist_add_tail(&slab->list, curr);
 }
 
+#if KERNEL_DEBUG
 static void check_poison(kmem_cache_t* cache, void* obj) {
-    if (!(cache->flags & SLAB_DEBUG_FREE)) {
-        return;
-    }
-
-    uint8_t* mem = (uint8_t*)obj;
-    // Check first few bytes to ensure they haven't been modified since free
-    for (size_t i = sizeof(void*); i < cache->obj_size; ++i) {
-        if (unlikely(mem[i] != POISON_FREE)) {
-            KLOG_ERROR("Slab corruption in cache %s at %p", cache->name, obj);
-
-            if (cache->flags & SLAB_PANIC) {
-                PANIC("Slab Memory Corruption!");
+    if (cache->flags & SLAB_RED_ZONES) {
+        uint8_t* redzone = (uint8_t*)obj + cache->obj_size;
+        size_t pad       = cache->offset_freelist - cache->obj_size;
+        for (size_t i = 0; i < pad; ++i) {
+            if (unlikely(redzone[i] != POISON_END)) {
+                KLOG_ERROR("Slab Redzone corruption in %s at %p", cache->name, obj);
+                if (cache->flags & SLAB_PANIC) PANIC("Slab Memory Corruption!");
             }
         }
     }
+
+    if (!(cache->flags & SLAB_DEBUG_FREE)) return;
+
+    uint8_t* mem = (uint8_t*)obj;
+    for (size_t i = 0; i < cache->obj_size; ++i) {
+        if (unlikely(mem[i] != POISON_FREE)) {
+            KLOG_ERROR("Slab Use-After-Free corruption in %s at %p", cache->name, obj);
+            if (cache->flags & SLAB_PANIC) PANIC("Slab Memory Corruption!");
+        }
+    }
 }
+#endif
 
 static void format_slab(
     kmem_cache_t* cache,
@@ -122,22 +131,26 @@ static void format_slab(
     slab->cache = cache;
 
     atomic_init(&slab->in_use, 0);
+    atomic_init(&slab->is_active, false);
     dlist_init(&slab->list);
 
     char* base     = slab->base;
     slab->freelist = base;
 
-    for (size_t i = 0; i < total_objs - 1; ++i) {
-        *(void**)(base + (i * cache->size)) = base + ((i + 1) * cache->size);
+    for (size_t i = 0; i < total_objs; ++i) {
+        void* curr = base + (i * cache->size);
+        void* next = (i == total_objs - 1) ? nullptr : base + ((i + 1) * cache->size);
 
-        if (cache->ctor) {
-            cache->ctor(base + (i * cache->size));
+        *slab_freelist_ptr(cache, curr) = next;
+
+        if (cache->ctor) cache->ctor(curr);
+
+#if KERNEL_DEBUG
+        if (cache->flags & SLAB_RED_ZONES) {
+            size_t pad = cache->offset_freelist - cache->obj_size;
+            memset((char*)curr + cache->obj_size, POISON_END, pad);
         }
-    }
-
-    *(void**)(base + ((total_objs - 1) * cache->size)) = nullptr;
-    if (cache->ctor) {
-        cache->ctor(base + ((total_objs - 1) * cache->size));
+#endif
     }
 }
 
@@ -147,10 +160,9 @@ static struct slab* slab_grow(kmem_cache_t* cache) {
 
     void* phys = pmm_alloc(num_pages);
     if (!phys) {
-        if (cache->flags & SLAB_PANIC) {
-            PANIC("OOM in slab_grow");
-        }
-
+#if KERNEL_DEBUG
+        if (cache->flags & SLAB_PANIC) PANIC("OOM in slab_grow");
+#endif
         return nullptr;
     }
 
@@ -173,94 +185,126 @@ static struct slab* slab_grow(kmem_cache_t* cache) {
     atomic_init(&slab->remote_freelist, nullptr);
 
     size_t total_objs = available / cache->size;
+    size_t leftover   = available - (total_objs * cache->size);
 
-    size_t leftover     = available - (total_objs * cache->size);
     cache->color_max    = leftover / cache->color_off;
     size_t color_offset = cache->color_next * cache->color_off;
 
     cache->color_next++;
-    if (cache->color_next > cache->color_max) {
-        cache->color_next = 0;
-    }
+    if (cache->color_next > cache->color_max) cache->color_next = 0;
 
     format_slab(cache, slab, page, available / cache->size, color_offset);
 
     struct page* p_desc = virt_to_page(page);
     p_desc->flags |= PAGE_FLAG_SLAB;
     p_desc->slab.slab_data = slab;
-
     return slab;
 }
 
 // Retires the current active slab back to the global lists
 static void deactivate_slab(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
-    if (!cc->active) {
-        return;
-    }
+    if (!cc->active) return;
 
     struct slab* slab = cc->active;
-    slab->freelist    = atomic_exchange(&cc->freelist, nullptr);
+    atomic_store(&slab->is_active, false);
 
-    if (atomic_load(&slab->in_use) == slab->total) {
-    } else if (atomic_load(&slab->in_use) == 0 && slab->freelist) {
+    void* remote = atomic_exchange_explicit(&slab->remote_freelist, nullptr, memory_order_acq_rel);
+    if (cc->freelist) {
+        void* tail = cc->freelist;
+        while (*slab_freelist_ptr(cache, tail)) tail = *slab_freelist_ptr(cache, tail);
+        *slab_freelist_ptr(cache, tail) = remote;
+        slab->freelist                  = cc->freelist;
+    } else {
+        slab->freelist = remote;
+    }
+
+    cc->freelist = nullptr;
+    cc->active   = nullptr;
+
+    if (atomic_load(&slab->in_use) == 0) {
         void* base_page     = (void*)((uintptr_t)slab->base & ~(PAGE_SIZE - 1));
         struct page* p_desc = virt_to_page(base_page);
         p_desc->flags &= ~PAGE_FLAG_SLAB;
         pmm_free((void*)from_higher_half((uintptr_t)base_page));
 
-        if (!(cache->flags & SLAB_NO_OFFSLAB)) {
-            kmem_cache_free(&cache_metadata, slab);
-        }
-    } else {
+        if (!(cache->flags & SLAB_NO_OFFSLAB)) kmem_cache_free(&cache_metadata, slab);
+    } else if (atomic_load(&slab->in_use) < slab->total) {
+        acquire_spinlock(&cache->lock);
         add_partial_sorted(cache, slab);
+        release_spinlock(&cache->lock);
+    }
+}
+
+size_t kmem_cache_shrink(kmem_cache_t* cache) {
+    size_t freed_pages = 0;
+    struct slab *pos, *n;
+
+    acquire_spinlock(&cache->lock);
+
+    dlist_for_each_entry_safe(pos, n, &cache->partial, list) {
+        if (atomic_load(&pos->in_use) == 0 && !atomic_load(&pos->is_active)) {
+            dlist_del(&pos->list);
+
+            void* base_page  = (void*)((uintptr_t)pos->base & ~(PAGE_SIZE - 1));
+            size_t num_pages = 1ul << cache->alloc_order;
+
+            struct page* p_desc = virt_to_page(base_page);
+            p_desc->flags &= ~PAGE_FLAG_SLAB;
+
+            pmm_free((void*)from_higher_half((uintptr_t)base_page));
+
+            if (!(cache->flags & SLAB_NO_OFFSLAB)) kmem_cache_free(&cache_metadata, pos);
+
+            freed_pages += num_pages;
+        }
     }
 
-    cc->active = nullptr;
+    release_spinlock(&cache->lock);
+    return freed_pages;
 }
 
 static void* slab_alloc_slow(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
     if (cc && cc->active) {
         void* remote =
             atomic_exchange_explicit(&cc->active->remote_freelist, nullptr, memory_order_acq_rel);
-
         if (remote) {
-            atomic_store(&cc->freelist, remote);
-
-            void* obj = remote;
-            atomic_store(&cc->freelist, *(void**)obj);
+            cc->freelist = remote;
+            void* obj    = cc->freelist;
+            cc->freelist = *slab_freelist_ptr(cache, obj);
             atomic_fetch_add(&cc->active->in_use, 1);
             return obj;
         }
     }
 
+    if (cc) deactivate_slab(cache, cc);
+
     acquire_spinlock(&cache->lock);
 
-    if (cc) {
-        deactivate_slab(cache, cc);
-    }
-
-    struct slab* new_active = nullptr;
+    struct slab* new_active  = nullptr;
+    struct slab* new_partial = nullptr;
 
     if (!dlist_empty(&cache->partial)) {
         new_active = dlist_entry(cache->partial.next, struct slab, list);
-        dlist_del(&new_active->list);
+        dlist_del_init(&new_active->list);
     } else {
         new_active = slab_grow(cache);
+    }
 
-        if (!new_active) {
-            release_spinlock(&cache->lock);
-            return nullptr;
-        }
+    if (!new_active) {
+        release_spinlock(&cache->lock);
+        return nullptr;
     }
 
     if (cc) {
         cc->active = new_active;
-        atomic_store(&cc->freelist, new_active->freelist);
+
+        atomic_store(&new_active->is_active, true);
+        cc->freelist         = new_active->freelist;
         new_active->freelist = nullptr;
 
-        void* obj = atomic_load(&cc->freelist);
+        void* obj = cc->freelist;
         if (obj) {
-            atomic_store(&cc->freelist, *(void**)obj);
+            cc->freelist = *slab_freelist_ptr(cache, obj);
             atomic_fetch_add(&new_active->in_use, 1);
         }
 
@@ -270,13 +314,11 @@ static void* slab_alloc_slow(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
 
     void* obj = new_active->freelist;
     if (obj) {
-        new_active->freelist = *(void**)obj;
+        new_active->freelist = *slab_freelist_ptr(cache, obj);
         atomic_fetch_add(&new_active->in_use, 1);
     }
 
-    if (new_active->freelist) {
-        add_partial_sorted(cache, new_active);
-    }
+    if (new_active->freelist) add_partial_sorted(cache, new_active);
 
     release_spinlock(&cache->lock);
     return obj;
@@ -284,24 +326,27 @@ static void* slab_alloc_slow(kmem_cache_t* cache, struct kmem_cache_cpu* cc) {
 
 kmem_cache_t*
 kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, void (*ctor)(void*)) {
+    align = (align < 8) ? 8 : align;
+
     kmem_cache_t* cache = kmem_cache_alloc(&cache_boot);
+    if (!cache) return nullptr;
 
-    if (!cache) {
-        return nullptr;
-    }
-
+#if KERNEL_DEBUG
     strncpy(cache->name, name, SLAB_NAME_MAX);
+#endif
     cache->obj_size = size;
-    cache->align    = (align < 8) ? 8 : align;
+    cache->align    = align;
     cache->flags    = flags;
     cache->ctor     = ctor;
 
-    // Redzone calculation
-    size_t pad  = (flags & SLAB_RED_ZONES) ? sizeof(uint64_t) : 0;
-    cache->size = align_up(size + pad, cache->align);
-    if (cache->size < sizeof(void*)) {
-        cache->size = sizeof(void*);
-    }
+#if KERNEL_DEBUG
+    const size_t pad = (flags & SLAB_RED_ZONES) ? sizeof(uint64_t) : 0;
+#else
+    const size_t pad = 0;
+#endif
+
+    cache->offset_freelist = align_up(size + pad, sizeof(void*));
+    cache->size            = align_up(cache->offset_freelist + sizeof(void*), cache->align);
 
     cache->color_off  = CACHE_LINE_SIZE;
     cache->color_next = 0;
@@ -311,25 +356,18 @@ kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, voi
     create_spinlock(&cache->lock);
 
     size_t best_order = 0;
-    size_t max_order  = 3;  // Cap at order 3 (8 contiguous pages) to avoid stressing the PMM
+    size_t max_order  = 3;
 
     for (size_t order = 0; order <= max_order; ++order) {
         size_t page_bytes = PAGE_SIZE << order;
         size_t available  = page_bytes;
 
-        if (flags & SLAB_NO_OFFSLAB) {
-            available -= sizeof(struct slab);
-        }
+        if (flags & SLAB_NO_OFFSLAB) available -= sizeof(struct slab);
 
         size_t objs = available / cache->size;
-        if (objs == 0) {
-            continue;
-        }
+        if (objs == 0) continue;
 
         size_t waste = available - (objs * cache->size);
-
-        // If wasted space is less than 12.5% of the allocated block, this order is highly
-        // efficient.
         if (waste <= (page_bytes / 8)) {
             best_order = order;
             break;
@@ -345,8 +383,8 @@ kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, voi
     cache->cpu_slab    = (struct kmem_cache_cpu*)to_higher_half((uintptr_t)cpu_phys);
 
     for (size_t i = 0; i < mp_request.response->cpu_count; ++i) {
-        atomic_init(&cache->cpu_slab[i].freelist, nullptr);
-        cache->cpu_slab[i].active = nullptr;
+        cache->cpu_slab[i].freelist = nullptr;
+        cache->cpu_slab[i].active   = nullptr;
     }
 
     return cache;
@@ -354,9 +392,8 @@ kmem_cache_create(const char* name, size_t size, size_t align, size_t flags, voi
 
 void kmem_cache_destroy(kmem_cache_t* cache) {
     if (cache->cpu_slab) {
-        for (size_t i = 0; i < mp_request.response->cpu_count; ++i) {
+        for (size_t i = 0; i < mp_request.response->cpu_count; ++i)
             deactivate_slab(cache, &cache->cpu_slab[i]);
-        }
 
         pmm_free((void*)from_higher_half((uintptr_t)cache->cpu_slab));
     }
@@ -365,94 +402,73 @@ void kmem_cache_destroy(kmem_cache_t* cache) {
     dlist_for_each_entry_safe(pos, n, &cache->partial, list) {
         dlist_del(&pos->list);
 
-        void* base_page = (void*)((uintptr_t)pos->base & ~(PAGE_SIZE - 1));
-
+        void* base_page     = (void*)align_down((uintptr_t)pos->base, PAGE_SIZE_SMALL);
         struct page* p_desc = virt_to_page(base_page);
         p_desc->flags &= ~PAGE_FLAG_SLAB;
 
         pmm_free((void*)from_higher_half((uintptr_t)base_page));
 
-        if (!(cache->flags & SLAB_NO_OFFSLAB)) {
-            kmem_cache_free(&cache_metadata, pos);
-        }
+        if (!(cache->flags & SLAB_NO_OFFSLAB)) kmem_cache_free(&cache_metadata, pos);
     }
 
     kmem_cache_free(&cache_boot, cache);
 }
 
 void* kmem_cache_alloc(kmem_cache_t* cache) {
-    if (unlikely(!cache->cpu_slab)) {
-        return slab_alloc_slow(cache, nullptr);
-    }
+    if (unlikely(!cache->cpu_slab)) return slab_alloc_slow(cache, nullptr);
 
     uint32_t flags = arch_save_flags();
+    arch_disable_interrupts();
 
     struct kmem_cache_cpu* cc = &cache->cpu_slab[arch_get_core_idx()];
-    void* obj                 = nullptr;
-    void* next                = nullptr;
 
-    do {
-        obj = atomic_load_explicit(&cc->freelist, memory_order_acquire);
-        if (unlikely(!obj)) {
-            arch_restore_flags(flags);
-            return slab_alloc_slow(cache, cc);
-        }
-
-        next = *(void**)obj;
-    } while (!atomic_compare_exchange_weak_explicit(
-        &cc->freelist,
-        &obj,
-        next,
-        memory_order_release,
-        memory_order_relaxed
-    ));
-
-    atomic_fetch_add(&cc->active->in_use, 1);
-
-    if (obj) {
-        *(void**)obj = nullptr;
-        check_poison(cache, obj);
+    void* obj = cc->freelist;
+    if (likely(obj)) {
+        cc->freelist = *slab_freelist_ptr(cache, obj);
+        atomic_fetch_add(&cc->active->in_use, 1);
+        prefetch(cc->freelist, 1, 0);
+    } else {
+        obj = slab_alloc_slow(cache, cc);
     }
 
     arch_restore_flags(flags);
+
+#if KERNEL_DEBUG
+    if (obj) check_poison(cache, obj);
+#endif
+
     return obj;
 }
 
 void kmem_cache_free(kmem_cache_t* cache, void* obj) {
-    if (unlikely(!obj)) {
-        return;
-    }
+    if (unlikely(!obj)) return;
 
-    if (cache->flags & SLAB_DEBUG_FREE) {
-        memset((uint8_t*)obj + sizeof(void*), POISON_FREE, cache->obj_size - sizeof(void*));
-    }
+#if KERNEL_DEBUG
+    if (cache->flags & SLAB_DEBUG_FREE) memset(obj, POISON_FREE, cache->obj_size);
+#endif
 
-    struct kmem_cache_cpu* cc = &cache->cpu_slab[arch_get_core_idx()];
+    uint32_t flags = arch_save_flags();
+    arch_disable_interrupts();
+
+    struct kmem_cache_cpu* cc = cache->cpu_slab ? &cache->cpu_slab[arch_get_core_idx()] : nullptr;
     struct slab* slab         = virt_to_page(obj)->slab.slab_data;
 
+    // Core returning object to its own active slab
     if (likely(cc && slab == cc->active)) {
-        void* curr_head = nullptr;
-
-        do {
-            curr_head    = atomic_load_explicit(&cc->freelist, memory_order_acquire);
-            *(void**)obj = curr_head;
-        } while (!atomic_compare_exchange_weak_explicit(
-            &cc->freelist,
-            &curr_head,
-            obj,
-            memory_order_release,
-            memory_order_relaxed
-        ));
-
+        *slab_freelist_ptr(cache, obj) = cc->freelist;
+        cc->freelist                   = obj;
         atomic_fetch_sub(&slab->in_use, 1);
+        arch_restore_flags(flags);
         return;
     }
 
-    void* curr_remote = nullptr;
+    arch_restore_flags(flags);
 
+    // Freeing remotely
+    void* curr_remote = nullptr;
     do {
-        curr_remote  = atomic_load_explicit(&slab->remote_freelist, memory_order_acquire);
-        *(void**)obj = curr_remote;
+        curr_remote = atomic_load_explicit(&slab->remote_freelist, memory_order_acquire);
+        *slab_freelist_ptr(cache, obj) = curr_remote;
     } while (!atomic_compare_exchange_weak_explicit(
         &slab->remote_freelist,
         &curr_remote,
@@ -464,50 +480,44 @@ void kmem_cache_free(kmem_cache_t* cache, void* obj) {
     uint32_t prior_in_use = atomic_fetch_sub(&slab->in_use, 1);
 
     if (prior_in_use == slab->total) {
-        if (slab->total == 1) {
-            goto teardown_slab;
-        } else {
-            acquire_spinlock(&cache->lock);
-            add_partial_sorted(cache, slab);
-            release_spinlock(&cache->lock);
-        }
+        acquire_spinlock(&cache->lock);
+        if (!atomic_load(&slab->is_active)) add_partial_sorted(cache, slab);
+        release_spinlock(&cache->lock);
     } else if (prior_in_use == 1) {
         acquire_spinlock(&cache->lock);
+        if (atomic_load(&slab->in_use) == 0 && !atomic_load(&slab->is_active)) {
+            if (!dlist_empty(&slab->list)) dlist_del(&slab->list);
 
-        if (likely(atomic_load(&slab->in_use) == 0)) {
-            dlist_del(&slab->list);
             release_spinlock(&cache->lock);
-            goto teardown_slab;
+
+            void* base_page     = (void*)((uintptr_t)slab->base & ~(PAGE_SIZE - 1));
+            struct page* p_desc = virt_to_page(base_page);
+            p_desc->flags &= ~PAGE_FLAG_SLAB;
+            p_desc->buddy.ref_count = 1;
+
+            pmm_free((void*)from_higher_half((uintptr_t)base_page));
+
+            if (!(cache->flags & SLAB_NO_OFFSLAB)) kmem_cache_free(&cache_metadata, slab);
+            return;
         }
 
         release_spinlock(&cache->lock);
     }
-
-    return;
-teardown_slab: {
-    void* base_page  = (void*)((uintptr_t)slab->base & ~(PAGE_SIZE - 1));
-    size_t num_pages = (cache->alloc_order > 0) ? (1ul << cache->alloc_order) : 1;
-
-    struct page* p_desc = virt_to_page(base_page);
-    p_desc->flags &= ~PAGE_FLAG_SLAB;
-    p_desc->buddy.ref_count = 1;
-
-    pmm_free((void*)from_higher_half((uintptr_t)base_page));
-
-    if (!(cache->flags & SLAB_NO_OFFSLAB)) {
-        kmem_cache_free(&cache_metadata, slab);
-    }
-}
 }
 
 static void init_internal_cache(kmem_cache_t* cache, const char* name, size_t size) {
+#if KERNEL_DEBUG
     strncpy(cache->name, name, SLAB_NAME_MAX);
-    cache->obj_size = size;
-    cache->size     = align_up(size, 8);
-    cache->align    = 8;
-    cache->flags    = SLAB_NO_OFFSLAB;
-    cache->cpu_slab = nullptr;
-    cache->ctor     = nullptr;
+#endif
+
+    cache->obj_size        = size;
+    cache->offset_freelist = align_up(size, sizeof(void*));
+    cache->size            = align_up(cache->offset_freelist + sizeof(void*), 8);
+    cache->align           = 8;
+    cache->flags           = SLAB_NO_OFFSLAB;
+    cache->alloc_order     = 0;
+    cache->cpu_slab        = nullptr;
+    cache->ctor            = nullptr;
 
     cache->color_off  = CACHE_LINE_SIZE;
     cache->color_next = 0;
@@ -530,19 +540,11 @@ void kheap_init(void) {
 }
 
 void* kmalloc(size_t size) {
-    if (size == 0) {
-        return nullptr;
-    }
+    if (size == 0) return nullptr;
 
     if (size > PAGE_SIZE) {
         void* phys = pmm_alloc(div_roundup(size, PAGE_SIZE));
-
-        if (!phys) {
-            KLOG_WARN("kmalloc: pmm_alloc failed for size %lu", size);
-            errno = ENOMEM;
-            return nullptr;
-        }
-
+        if (!phys) return nullptr;
         return (void*)to_higher_half((uintptr_t)phys);
     }
 
@@ -552,22 +554,14 @@ void* kmalloc(size_t size) {
         idx        = blk - KMALLOC_SHIFT_LOW;
     }
 
-    if (unlikely(idx >= KMALLOC_CACHES_NUM)) {
-        KLOG_ERROR("kmalloc: Invalid size %lu, idx %lu", size, idx);
-        errno = EINVAL;
-        return nullptr;
-    }
-
+    if (unlikely(idx >= KMALLOC_CACHES_NUM)) return nullptr;
     return kmem_cache_alloc(kmalloc_caches[idx]);
 }
 
 void kfree(void* ptr) {
-    if (!ptr) {
-        return;
-    }
+    if (!ptr) return;
 
     struct page* p_desc = virt_to_page(ptr);
-
     if (!(p_desc->flags & PAGE_FLAG_SLAB)) {
         pmm_free((void*)from_higher_half((uintptr_t)ptr));
         return;

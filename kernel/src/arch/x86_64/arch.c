@@ -7,6 +7,7 @@
 #include "drivers/term.h"
 #include "drivers/tsc.h"
 #include "drivers/uart.h"
+#include "libs/symbols.h"
 
 #define MIX_K1 0xff51afd7ed558ccdul
 #define MIX_K2 0xc4ceb9fe1a85ec53ul
