@@ -57,11 +57,22 @@ size_t copy_to_user(void* dest, const void* src, size_t len);
 
 void syscalls_init(void);
 int64_t sys_write(uint32_t fd, const char* user_buf, size_t count);
-uint64_t sys_fork(struct syscall_regs* tf);
-uint64_t sys_vfork(struct syscall_regs* tf);
-uint64_t sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf);
-int sys_execv(const char* path, const char* argv[], struct syscall_regs* tf);
+
+int64_t sys_cap_clone(
+    uint64_t flags,
+    void* child_stack,
+    struct syscall_regs* regs,
+    uint64_t* out_proc_cap,
+    uint64_t* out_thread_cap,
+    uint64_t* out_cnode_cap,
+    uint64_t* out_vspace_cap
+);
+
+int64_t sys_fork(struct syscall_regs* tf);
 void sys_exit(int exit_code);
+uint64_t sys_vfork(struct syscall_regs* tf);
+int64_t sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf);
+int sys_waitpid(int64_t pid, int* status, int options);
 
 #ifdef __cplusplus
 }

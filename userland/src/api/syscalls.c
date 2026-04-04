@@ -16,5 +16,5 @@ uint64_t fork(void) {
 }
 
 void exit(int exit_code) {
-    syscall(SYS_EXIT, exit_code);
+    syscall(SYS_SCHED_EXIT, exit_code);
 }

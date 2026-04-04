@@ -158,6 +158,7 @@ int cap_move(
     struct cnode* dest_root,
     uint64_t* new_cap_id
 );
+int cspace_find_by_koid(struct cnode* root, uint64_t target_koid, uint64_t* out_cap_id);
 
 int sys_cap_delegate(
     struct cnode* root_cnode,

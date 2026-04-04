@@ -170,7 +170,11 @@ dispatch_sched_syscall(uint64_t operation, struct syscall_regs* regs, struct pro
 
     switch (operation) {
         case 0x01:  // SYS_SCHED_FORK
-            res = sys_fork(regs);
+            res = (uint64_t)sys_fork(regs);
+            break;
+        case 0x02:  // SYS_SCHED_EXIT
+            sys_exit((int)regs->rdi);
+            res = regs->rdi;
             break;
         default:
             res = (uint64_t)ERR_DENIED;
@@ -226,10 +230,6 @@ static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process*
         case SYS_WRITE:
             // RDI = FD; RSI = Buffer Pointer; RDX = count
             res = (uint64_t)sys_write((uint32_t)regs->rdi, (void*)regs->rsi, regs->rdx);
-            break;
-        case SYS_EXIT:
-            sys_exit((int)regs->rdi);
-            res = regs->rdi;
             break;
         default:
             KLOG_DEBUG("Syscall %lu called!\n", regs->rax);

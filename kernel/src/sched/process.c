@@ -7,11 +7,11 @@
 
 #include "compiler.h"
 #include "core/capability.h"
+#include "core/posix_emul.h"
 #include "cpu/smp.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
 #include "libs/kobject.h"
-#include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/pagemap.h"
@@ -99,9 +99,13 @@ process_t* process_create(const char* name, bool is_kernel) {
 #endif
 
     create_qspinlock(&proc->lock);
+    create_qspinlock(&proc->posix_lock);
+
+    dlist_init(&proc->posix_children);
     dlist_init(&proc->thread_list);
     dlist_init(&proc->children_list);
     dlist_init(&proc->sibling_node);
+
     wait_queue_init(&proc->wait_queue);
     wait_queue_init(&proc->vfork_wait_queue);
 
@@ -242,6 +246,7 @@ void process_release(struct kobject* obj) {
     if (unlikely(!obj)) return;
 
     process_t* proc = kref_entry(obj, struct process, kobj);
+    posix_cleanup_all_children(proc);
     wait_queue_wake_up_all(&proc->vfork_wait_queue);
 
     if (proc->vspace && !proc->is_kernel) {

@@ -8,8 +8,6 @@
 #include "cpu/smp.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
-#include "memory/pagemap.h"
-#include "sched/process.h"
 
 struct tlb_shootdown_data {
     arch_pagemap_t* map;

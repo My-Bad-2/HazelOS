@@ -535,6 +535,62 @@ int cap_move(
     return ERR_OK;
 }
 
+#define MAX_SEARCH_DEPTH 64
+
+static uint64_t get_object_koid(uint8_t, void* obj) {
+    if (!obj) return 0;
+
+    struct kobject* base = (struct kobject*)obj;
+    return base->koid;
+}
+
+int cspace_find_by_koid(struct cnode* root, uint64_t target_koid, uint64_t* out_cap_id) {
+    if (unlikely(!root || target_koid == 0)) return ERR_INVALID_CAP;
+
+    struct cnode** queue = (struct cnode**)kmalloc(MAX_SEARCH_DEPTH * sizeof(struct cnode*));
+    if (!queue) return ERR_NO_MEM;
+
+    size_t head = 0;
+    size_t tail = 0;
+
+    queue[tail++] = root;
+
+    while (head < tail) {
+        struct cnode* current = queue[head++];
+        for (size_t i = 0; i < current->capacity; i++) {
+            struct capability* cap = &current->slots[i];
+
+            uint8_t type =
+                atomic_load_explicit((_Atomic uint8_t*)(&cap->type), memory_order_acquire);
+            if (type == CAP_TYPE_NONE) continue;
+
+            void* obj =
+                (void*)(uintptr_t)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
+            if (!obj) continue;
+
+            if (type == CAP_TYPE_CNODE) {
+                if (tail < MAX_SEARCH_DEPTH) queue[tail++] = (struct cnode*)obj;
+            } else if (type != CAP_TYPE_WEAK) {
+                uint64_t koid = get_object_koid(type, obj);
+
+                if (koid == target_koid) {
+                    uint8_t gen = atomic_load_explicit(&cap->generation, memory_order_relaxed);
+                    uint64_t found_id =
+                        ((uint64_t)gen << 56) | current->path_prefix | (i << current->index_shift);
+
+                    if (out_cap_id) *out_cap_id = found_id;
+
+                    kfree((void*)queue);
+                    return ERR_OK;
+                }
+            }
+        }
+    }
+
+    kfree((void*)queue);
+    return ERR_INVALID_CAP;  // Not found
+}
+
 int sys_cap_delegate(
     struct cnode* root_cnode,
     uint64_t dest_cnode_id,

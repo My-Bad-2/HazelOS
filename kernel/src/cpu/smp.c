@@ -48,6 +48,7 @@ static void ap_entry_point(struct limine_mp_info* info) {
 static void init_cpu_state(per_cpu_data_t* cpu) {
     ASSERT(cpu);
     cpu->rcu = kmalloc(sizeof(struct rcu_data));
+    memset(cpu->rcu, 0, sizeof(struct rcu_data));
 
     create_qspinlock(&cpu->lock);
 

@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "core/posix_emul.h"
 #include "cpu/syscalls.h"
 #include "drivers/timer.h"
 #include "libs/dlist.h"
@@ -22,6 +23,9 @@
 #define CLONE_FS     0x200
 #define CLONE_THREAD 0x400
 #define CLONE_VFORK  0x800
+
+#define WNOHANG   1
+#define WUNTRACED 2
 
 typedef enum {
     THREAD_READY = 0,
@@ -65,6 +69,9 @@ typedef struct process {
 
     struct wait_queue wait_queue;
     struct wait_queue vfork_wait_queue;
+
+    qspinlock_t posix_lock;
+    struct dlist_head posix_children;
 
 #if KERNEL_DEBUG
     char name[32];

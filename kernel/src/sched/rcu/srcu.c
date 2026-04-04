@@ -123,7 +123,7 @@ static void srcu_gp_thread(void* arg) {
             if (pending) {
                 struct slist_head temp = {pending};
 
-                // Rever list to process older callbacks first
+                // Reverse list to process older callbacks first
                 slist_reverse(&temp);
                 slist_splice(&temp, &executing_list);
             }
