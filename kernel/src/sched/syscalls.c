@@ -1,4 +1,4 @@
-#include "cpu/syscalls.h"
+#include "core/syscalls.h"
 
 #include <errno.h>
 #include <llvm-libc-macros/generic-error-number-macros.h>
@@ -9,17 +9,27 @@
 #include "core/capability.h"
 #include "core/errors.h"
 #include "cpu/smp.h"
+#include "cpu/syscalls.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
-#include "sched/syscalls.h"
 
 extern void arch_syscalls_init(void);
 
 void syscalls_init(void) {
     arch_syscalls_init();
+}
+
+static inline bool write_cap_out(uint64_t* ptr, uint64_t val) {
+    if (!ptr) return true;
+
+    if (vmm_is_user_region((uintptr_t)ptr, sizeof(uint64_t)))
+        return copy_to_user(ptr, &val, sizeof(uint64_t));
+
+    *ptr = val;
+    return true;
 }
 
 int64_t sys_write(uint32_t fd, const char* user_buf, size_t count) {
@@ -57,48 +67,7 @@ int64_t sys_write(uint32_t fd, const char* user_buf, size_t count) {
     return (int64_t)bytes_processed;
 }
 
-int64_t sys_fork(struct syscall_regs* regs) {
-    uint64_t proc_cap, cnode_cap, vspace_cap;
-
-    int64_t err = sys_cap_clone(0, nullptr, regs, &proc_cap, nullptr, &cnode_cap, &vspace_cap);
-    if (err < 0) return err;
-
-    thread_t* curr = smp_current_core()->curr_thread;
-
-    struct capability* cap = cap_lookup(curr->owner->root_cnode, proc_cap, RIGHT_READ);
-    process_t* child_proc =
-        (process_t*)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
-    uint64_t child_koid = child_proc->kobj.koid;
-
-    cap_close(curr->owner->root_cnode, cnode_cap);
-    cap_close(curr->owner->root_cnode, vspace_cap);
-
-    return (int64_t)child_koid;
-}
-
-uint64_t sys_vfork(struct syscall_regs* tf) {
-    per_cpu_data_t* cpu = smp_current_core();
-    thread_t* parent    = cpu->curr_thread;
-
-    uint64_t parent_cap_id, parent_cnode_id, parent_vspace_id;
-    return thread_vclone(parent, tf, &parent_cap_id, &parent_cnode_id, &parent_vspace_id);
-}
-
-void sys_exit(int exit_code) {
-    process_exit(exit_code);
-}
-
-static inline bool write_cap_out(uint64_t* ptr, uint64_t val) {
-    if (!ptr) return true;
-
-    if (vmm_is_user_region((uintptr_t)ptr, sizeof(uint64_t)))
-        return copy_to_user(ptr, &val, sizeof(uint64_t));
-
-    *ptr = val;
-    return true;
-}
-
-int64_t sys_cap_clone(
+static int64_t sys_cap_clone(
     uint64_t flags,
     void* child_stack,
     struct syscall_regs* regs,
@@ -180,4 +149,27 @@ int64_t sys_cap_clone(
     scheduler_add_thread(child_thread);
     if (flags & CLONE_VFORK) scheduler_yield();
     return ERR_OK;
+}
+
+int64_t sys_fork(struct syscall_regs* regs) {
+    uint64_t proc_cap, cnode_cap, vspace_cap;
+
+    int64_t err = sys_cap_clone(0, nullptr, regs, &proc_cap, nullptr, &cnode_cap, &vspace_cap);
+    if (err < 0) return err;
+
+    thread_t* curr = smp_current_core()->curr_thread;
+
+    struct capability* cap = cap_lookup(curr->owner->root_cnode, proc_cap, RIGHT_READ);
+    process_t* child_proc =
+        (process_t*)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
+    uint64_t child_koid = child_proc->kobj.koid;
+
+    cap_close(curr->owner->root_cnode, cnode_cap);
+    cap_close(curr->owner->root_cnode, vspace_cap);
+
+    return (int64_t)child_koid;
+}
+
+void sys_exit(int exit_code) {
+    process_exit(exit_code);
 }

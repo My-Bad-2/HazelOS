@@ -119,7 +119,16 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     qspinlock_t lock;
 } thread_t;
 
-process_t* process_create(const char* name, bool is_kernel);
+process_t* process_create(
+    const char* name,
+    bool is_kernel,
+    struct vm_space* vspace,
+    uint64_t* out_proc_cap,
+    uint64_t* out_cnode_cap,
+    uint64_t* out_vspace_cap,
+    int* error_code
+);
+
 process_t* process_clone(
     process_t* parent,
     uint64_t flags,

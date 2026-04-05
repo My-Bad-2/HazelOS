@@ -7,6 +7,7 @@
 
 #include "compiler.h"
 #include "core/capability.h"
+#include "core/errors.h"
 #include "cpu/smp.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
@@ -72,8 +73,18 @@ static bool capability_bootstrap_injection(
     return true;
 }
 
-process_t* process_create(const char* name, bool is_kernel) {
-    if (!process_cache) {
+process_t* process_create(
+    const char* name,
+    bool is_kernel,
+    struct vm_space* vspace,
+    uint64_t* out_proc_cap,
+    uint64_t* out_cnode_cap,
+    uint64_t* out_vspace_cap,
+    int* error_code
+) {
+    if (error_code) *error_code = ERR_OK;
+
+    if (unlikely(!process_cache)) {
         process_cache = kmem_cache_create(
             "process_cache",
             sizeof(struct process),
@@ -84,13 +95,20 @@ process_t* process_create(const char* name, bool is_kernel) {
     }
 
     process_t* proc = kmem_cache_alloc(process_cache);
-    if (unlikely(!proc)) return nullptr;
+    if (unlikely(!proc)) {
+        if (error_code) *error_code = ERR_NO_MEM;
+        return nullptr;
+    }
 
     memset(proc, 0, sizeof(process_t));
     kref_init(&proc->kobj, CAP_TYPE_PROCESS);
+
     proc->state      = PROCESS_ALIVE;
     proc->is_kernel  = is_kernel;
     proc->root_cnode = create_cspace();
+    proc->vspace     = vspace;
+    proc->map        = vspace->map;
+
 #if KERNEL_DEBUG
     if (likely(name)) strncpy(proc->name, name, sizeof(proc->name) - 1);
 #else
@@ -105,40 +123,50 @@ process_t* process_create(const char* name, bool is_kernel) {
     wait_queue_init(&proc->wait_queue);
     wait_queue_init(&proc->vfork_wait_queue);
 
-    if (is_kernel) {
-        proc->map    = vmm_get_kernel_pagemap();
-        proc->vspace = kernel_space;
+    uint64_t p_cap_id = 0, c_cap_id = 0, v_cap_id = 0;
 
-        vmm_init_space(kernel_space, proc);
-        kref_get(&kernel_space->refcount);
-    } else {
-        proc->map    = pagemap_create();
-        proc->vspace = vmm_create_space(proc);
-
-        if (!proc->vspace) {
-            pagemap_release(proc->map);
-            destroy_cspace(proc->root_cnode);
-            kmem_cache_free(process_cache, proc);
-            return nullptr;
-        }
-    }
-
-    uint64_t v_cap_id        = 0;
+    struct capability* p_cap = cap_alloc(proc->root_cnode, &p_cap_id);
+    struct capability* c_cap = cap_alloc(proc->root_cnode, &c_cap_id);
     struct capability* v_cap = cap_alloc(proc->root_cnode, &v_cap_id);
-    if (!v_cap) {
-        kref_put(&proc->vspace->refcount, vmm_space_release);
-        pagemap_release(proc->map);
+
+    if (unlikely(!p_cap || !c_cap || !v_cap)) {
+        if (p_cap) cap_close(proc->root_cnode, p_cap_id);
+        if (c_cap) cap_close(proc->root_cnode, c_cap_id);
+        if (v_cap) cap_close(proc->root_cnode, v_cap_id);
+
         destroy_cspace(proc->root_cnode);
         kmem_cache_free(process_cache, proc);
+
+        if (error_code) *error_code = ERR_CAP_EXHAUSTED;
         return nullptr;
     }
 
+    // Process Self-Reference Capability
+    p_cap->badge  = 0;
+    p_cap->type   = CAP_TYPE_PROCESS;
+    p_cap->rights = RIGHT_ALL & ~RIGHT_CLOEXEC;
+    kref_get(&proc->kobj);
+    atomic_store_explicit(&p_cap->object_ptr, (uintptr_t)proc, memory_order_relaxed);
+    atomic_init(&p_cap->generation, 1);
+
+    // Root CNode Capability
+    c_cap->badge  = 0;
+    c_cap->type   = CAP_TYPE_CNODE;
+    c_cap->rights = RIGHT_ALL & ~RIGHT_CLOEXEC;
+    atomic_store_explicit(&c_cap->object_ptr, (uintptr_t)proc->root_cnode, memory_order_relaxed);
+    atomic_init(&c_cap->generation, 1);
+
+    // VSpace Capability
     v_cap->badge  = 0;
     v_cap->type   = CAP_TYPE_VSPACE;
     v_cap->rights = RIGHT_ALL & ~RIGHT_CLOEXEC;
     kref_get(&proc->vspace->refcount);
     atomic_store_explicit(&v_cap->object_ptr, (uintptr_t)proc->vspace, memory_order_relaxed);
     atomic_init(&v_cap->generation, 1);
+
+    if (out_proc_cap) *out_proc_cap = p_cap_id;
+    if (out_cnode_cap) *out_cnode_cap = c_cap_id;
+    if (out_vspace_cap) *out_vspace_cap = v_cap_id;
 
     return proc;
 }

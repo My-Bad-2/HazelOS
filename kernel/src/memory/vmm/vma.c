@@ -15,7 +15,6 @@
 #include "memory/pagemap.h"
 #include "memory/vm_object.h"
 #include "memory/vmm.h"
-#include "sched/process.h"
 
 #include "../internal/vma_tree.h"
 
@@ -47,28 +46,29 @@ void vma_cache_init(void) {
     vm_object_init();
 }
 
-void vmm_init_space(struct vm_space* space, struct process* owner) {
+void vmm_init_space(struct vm_space* space, bool is_kernel) {
     memset(space, 0, sizeof(struct vm_space));
     space->rb_root         = RB_ROOT;
-    space->owner           = owner;
-    space->allocation_hint = owner->is_kernel ? get_kernel_space_start_limit() : USER_SPACE_START;
+    space->map             = is_kernel ? vmm_get_kernel_pagemap() : pagemap_create();
+    space->allocation_hint = is_kernel ? get_kernel_space_start_limit() : USER_SPACE_START;
 
     atomic_init(&space->cached_vma, nullptr);
     create_rwlock(&space->lock);
     kref_init(&space->refcount, CAP_TYPE_VSPACE);
 }
 
-struct vm_space* vmm_create_space(struct process* owner) {
+struct vm_space* vmm_create_space(bool is_kernel) {
     struct vm_space* space = kmem_cache_alloc(vmspace_cache);
     if (!space) return nullptr;
 
-    vmm_init_space(space, owner);
+    vmm_init_space(space, is_kernel);
     return space;
 }
 
 void vmm_space_release(struct kobject* ref) {
     struct vm_space* space = kref_entry(ref, struct vm_space, refcount);
-    if (unlikely(space->owner->is_kernel)) PANIC("VMM: Attempted to destroy Kernel VSpace!");
+    if (unlikely(space->map == vmm_get_kernel_pagemap()))
+        PANIC("VMM: Attempted to destroy Kernel VSpace!");
 
     vmm_destroy_space(space);
     kmem_cache_free(vmspace_cache, space);
@@ -91,10 +91,10 @@ vmm_unmap_hardware_range(struct vm_space* space, uintptr_t start, size_t size, u
     uintptr_t end    = start + size;
     size_t page_size = 1ul << page_shift;
 
-    if (unlikely(!space->owner || !space->owner->map)) return;
+    if (unlikely(!space->map)) return;
 
     while (addr < end) {
-        uintptr_t phys = pagemap_translate(space->owner->map, addr);
+        uintptr_t phys = pagemap_translate(space->map, addr);
 
         if (phys) {
             pagemap_unmap_args_t args = {
@@ -103,7 +103,7 @@ vmm_unmap_hardware_range(struct vm_space* space, uintptr_t start, size_t size, u
                 .free_phys = false,
             };
 
-            pagemap_unmap(space->owner->map, &args);
+            pagemap_unmap(space->map, &args);
         }
 
         addr += page_size;
@@ -118,7 +118,7 @@ bool vmm_populate_vma_range(
 ) {
     if (vma->flags & VMM_FLAG_GUARD) return true;
     if ((vma->flags & VMM_FLAG_DEMAND) && !(vma->flags & VMM_FLAG_POPULATE)) return true;
-    if (unlikely(!space->owner || !space->owner->map)) return false;
+    if (unlikely(!space->map)) return false;
 
     uintptr_t addr   = start;
     uintptr_t end    = start + size;
@@ -146,7 +146,7 @@ bool vmm_populate_vma_range(
             .page_size = page_size,
         };
 
-        if (unlikely(!pagemap_map(space->owner->map, &args))) {
+        if (unlikely(!pagemap_map(space->map, &args))) {
             if (addr > start) vmm_unmap_hardware_range(space, start, addr - start, vma->page_shift);
             return false;
         }
@@ -183,9 +183,10 @@ void* vmalloc(
     uint8_t final_shift = select_page_shift(size, addr);
     size_t align        = max(1ul << final_shift, alignment);
 
-    uintptr_t safe_start =
-        space->owner->is_kernel ? get_kernel_space_start_limit() : USER_SPACE_START;
-    uintptr_t safe_end = space->owner->is_kernel ? KERNEL_SPACE_END : get_user_space_end_limit();
+    const bool is_kernel = (space->map == vmm_get_kernel_pagemap());
+
+    uintptr_t safe_start = is_kernel ? get_kernel_space_start_limit() : USER_SPACE_START;
+    uintptr_t safe_end   = is_kernel ? KERNEL_SPACE_END : get_user_space_end_limit();
 
     if (unlikely(
             is_fixed &&
@@ -441,12 +442,12 @@ void vmm_destroy_space(struct vm_space* space) {
 }
 
 bool vmm_clone_space(struct vm_space* parent, struct vm_space* child) {
-    if (unlikely(!parent || !child || !parent->owner || !child->owner)) return false;
+    if (unlikely(!parent || !child || !parent->map || !child->map)) return false;
 
     acquire_read(&parent->lock);
     acquire_write(&child->lock);
 
-    pagemap_clone(child->owner->map, parent->owner->map);
+    pagemap_clone(child->map, parent->map);
 
     struct rb_node* node = rb_first(&parent->rb_root);
     while (node) {
@@ -475,9 +476,9 @@ bool vmm_clone_space(struct vm_space* parent, struct vm_space* child) {
 
             for (uintptr_t addr = parent_vma->start; addr < parent_vma->end;
                  addr += vma_page_size(parent_vma)) {
-                if (pagemap_translate(parent->owner->map, addr)) {
+                if (pagemap_translate(parent->map, addr)) {
                     prot_args.virt_addr = (void*)addr;
-                    pagemap_protect(parent->owner->map, &prot_args);
+                    pagemap_protect(parent->map, &prot_args);
                 }
             }
         } else {

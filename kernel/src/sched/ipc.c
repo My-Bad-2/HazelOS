@@ -9,6 +9,7 @@
 #include "compiler.h"
 #include "core/capability.h"
 #include "core/errors.h"
+#include "core/syscalls.h"
 #include "cpu/smp.h"
 #include "cpu/syscalls.h"
 #include "libs/dlist.h"
@@ -18,7 +19,6 @@
 #include "memory/heap.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
-#include "sched/syscalls.h"
 #include "uapi/ipc.h"
 
 static kmem_cache_t* channel_cache      = nullptr;

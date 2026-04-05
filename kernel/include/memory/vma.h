@@ -59,7 +59,7 @@ struct vm_area {
 struct [[gnu::aligned(CACHE_LINE_SIZE)]] vm_space {
     struct kobject refcount;
     struct rb_root rb_root;
-    struct process* owner;
+    pagemap_t* map;
 
     _Atomic(struct vm_area*) cached_vma;
     rwlock_t lock;
@@ -84,8 +84,8 @@ static inline size_t vma_page_size(struct vm_area* vma) {
 
 bool vmm_is_user_region(uintptr_t addr, size_t size);
 
-struct vm_space* vmm_create_space(struct process* owner);
-void vmm_init_space(struct vm_space* space, struct process* owner);
+struct vm_space* vmm_create_space(bool is_kernel);
+void vmm_init_space(struct vm_space* space, bool is_kernel);
 void vmm_destroy_space(struct vm_space* space);
 void vmm_space_release(struct kobject* ref);
 
@@ -113,6 +113,7 @@ bool vmm_populate_vma_range(
     size_t size
 );
 
+struct process;
 void* sys_mmap(
     struct process* proc,
     void* addr,

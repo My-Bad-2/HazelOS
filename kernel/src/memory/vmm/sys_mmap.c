@@ -136,7 +136,7 @@ static int do_mprotect(struct vm_space* space, void* addr, size_t length, int pr
 
         vma->flags = (vma->flags & perm_mask) | (new_prot_flags & ~perm_mask);
 
-        if (!(vma->flags & VMM_FLAG_DEMAND) && space->owner && space->owner->map) {
+        if (!(vma->flags & VMM_FLAG_DEMAND) && space->map) {
             uint32_t pte_flags = vma->flags;
             if (vma->flags & VMM_FLAG_COW) pte_flags &= ~VMM_FLAG_WRITE;
 
@@ -148,7 +148,7 @@ static int do_mprotect(struct vm_space* space, void* addr, size_t length, int pr
 
             for (uintptr_t p = vma->start; p < vma->end; p += vma_page_size(vma)) {
                 prot_args.virt_addr = (void*)p;
-                pagemap_protect(space->owner->map, &prot_args);
+                pagemap_protect(space->map, &prot_args);
             }
         }
 
@@ -222,8 +222,7 @@ static void* do_mremap(
         size_t extra_size         = new_size - old_size;
         struct rb_node* next_node = rb_next(&vma->rb_node);
 
-        uintptr_t safe_end =
-            space->owner->is_kernel ? KERNEL_SPACE_END : get_user_space_end_limit();
+        uintptr_t safe_end = get_user_space_end_limit();
         uintptr_t next_start =
             next_node ? rb_entry(next_node, struct vm_area, rb_node)->start : safe_end;
 
@@ -296,9 +295,9 @@ static void* do_mremap(
     uintptr_t current_old = old_addr;
     uintptr_t current_new = new_start;
 
-    if (likely(space->owner && space->owner->map)) {
+    if (likely(space->map)) {
         while (current_old < old_addr + old_size) {
-            uintptr_t phys = pagemap_translate(space->owner->map, current_old);
+            uintptr_t phys = pagemap_translate(space->map, current_old);
 
             if (phys) {
                 pagemap_unmap_args_t unmap_args = {
@@ -307,7 +306,7 @@ static void* do_mremap(
                     .free_phys = false,
                 };
 
-                pagemap_unmap(space->owner->map, &unmap_args);
+                pagemap_unmap(space->map, &unmap_args);
 
                 uint32_t pte_flags = vma_flags;
                 if (vma_flags & VMM_FLAG_COW) pte_flags &= ~VMM_FLAG_WRITE;
@@ -321,7 +320,7 @@ static void* do_mremap(
                     .page_size = page_size,
                 };
 
-                pagemap_map(space->owner->map, &map_args);
+                pagemap_map(space->map, &map_args);
             }
 
             current_old += page_size;

@@ -14,6 +14,8 @@
 #include "drivers/timer.h"
 #include "libs/log.h"
 #include "libs/spinlock.h"
+#include "memory/vma.h"
+#include "memory/vmm.h"
 #include "sched/ipc.h"
 #include "sched/process.h"
 #include "sched/rcu.h"
@@ -437,7 +439,9 @@ static thread_t* pick_next_task(per_cpu_data_t* cpu, size_t* flags) {
 }
 
 void scheduler_init_kernel_process(void) {
-    kernel_proc = process_create("kernel_proc", true);
+    kernel_space->map = vmm_get_kernel_pagemap();
+    kernel_proc =
+        process_create("kernel_proc", true, kernel_space, nullptr, nullptr, nullptr, nullptr);
     if (!kernel_proc) PANIC("SCHED: failed to create kernel process\n");
 }
 

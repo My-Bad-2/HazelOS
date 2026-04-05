@@ -193,7 +193,7 @@ int thread_change_exec(
 
     acquire_qspinlock(&proc->lock);
     proc->vspace = new_space;
-    proc->map    = new_space->owner->map;
+    proc->map    = new_space->map;
     release_qspinlock(&proc->lock);
 
     pagemap_load(proc->map);

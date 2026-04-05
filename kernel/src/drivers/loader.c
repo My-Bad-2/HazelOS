@@ -127,7 +127,9 @@ thread_t* load_elf(void* address) {
         return nullptr;
     }
 
-    init_process = process_create("user_init", false);
+    struct vm_space* vspace = vmm_create_space(false);
+
+    init_process = process_create("user_init", false, vspace, nullptr, nullptr, nullptr, nullptr);
     if (!init_process) {
         KLOG_ERROR("Loader: Failed to create process\n");
         return nullptr;

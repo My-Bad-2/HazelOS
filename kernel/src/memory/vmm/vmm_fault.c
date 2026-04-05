@@ -7,7 +7,6 @@
 #include "memory/memory.h"
 #include "memory/vm_object.h"
 #include "memory/vma.h"
-#include "sched/process.h"
 
 #include "../internal/vma_tree.h"
 
@@ -27,7 +26,7 @@ bool vmm_handle_fault(struct vm_space* space, uintptr_t fault_addr, uint32_t err
     if (unlikely(info.is_user && !(vma->flags & VMM_FLAG_USER))) goto segfault;
     if (unlikely(info.is_exec && !(vma->flags & VMM_FLAG_EXECUTE))) goto segfault;
     if (unlikely(info.is_write && !(vma->flags & VMM_FLAG_WRITE))) goto segfault;
-    if (unlikely(!space->owner || !space->owner->map)) goto unhandled_fault;
+    if (unlikely(!space->map)) goto unhandled_fault;
 
     uintptr_t map_page_size = vma_page_size(vma);
     uintptr_t aligned_addr  = align_down(fault_addr, map_page_size);
@@ -70,7 +69,7 @@ bool vmm_handle_fault(struct vm_space* space, uintptr_t fault_addr, uint32_t err
         .free_phys = false,
     };
 
-    pagemap_unmap(space->owner->map, &unmap_args);
+    pagemap_unmap(space->map, &unmap_args);
 
     pagemap_map_args_t args = {
         .virt_addr = (void*)aligned_addr,
@@ -81,7 +80,7 @@ bool vmm_handle_fault(struct vm_space* space, uintptr_t fault_addr, uint32_t err
         .page_size = map_page_size,
     };
 
-    if (unlikely(!pagemap_map(space->owner->map, &args))) goto unhandled_fault;
+    if (unlikely(!pagemap_map(space->map, &args))) goto unhandled_fault;
     if (unlikely(vma->object && vma->object->type == VM_OBJ_SHADOW))
         vm_object_collapse(vma->object);
 

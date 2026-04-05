@@ -1,4 +1,4 @@
-#include "sched/syscalls.h"
+#include "core/syscalls.h"
 
 #include <stdint.h>
 #include <string.h>

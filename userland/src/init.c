@@ -2,62 +2,21 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "api/ipc.h"
 #include "api/memory.h"
 #include "api/syscalls.h"
-
-static int ipc_test(void) {
-    uint64_t chan_read, chan_write;
-    uint64_t port_cap = 0;
-
-    write(1, "Creating endpoints...\n", 23);
-
-    if (ipc_channel_create(&chan_read, &chan_write) < 0) {
-        write(1, "FAIL: Channel creation\n", 24);
-        return 1;
-    }
-
-    if (ipc_port_create(&port_cap) < 0) {
-        write(1, "FAIL: Port creation\n", 21);
-        return 1;
-    }
-
-    write(1, "Binding port...\n", 17);
-
-    int res = ipc_bind(port_cap, chan_read, 0xDEADBEEF);
-    if (res < 0) {
-        write(1, "FAIL: Port binding\n", 20);
-        return 1;
-    }
-
-    write(1, "Cleaning up capabilities...\n", 29);
-
-    if (ipc_close(chan_read) < 0 || ipc_close(chan_write) < 0 || ipc_close(port_cap) < 0) {
-        write(1, "FAIL: Capability teardown\n", 27);
-        return 1;
-    }
-
-    write(1, "Capabilities test passed!\n", 27);
-    return 0;
-}
 
 // NOLINTNEXTLINE
 void user_start() {
     const char* str = "Hello from Userspace!\n";
     size_t len      = strlen(str) + 1;
 
-    ipc_test();
-
     write(1, str, len);
 
     char buf[128];
-    uint64_t ret = fork();
-    void* res    = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE, 0, 0);
-    snprintf(buf, sizeof(buf), "Hello from Process child id = 0x%lx res = %p\n", ret, res);
-    munmmap(res, 0x1000);
+    void* ptr = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE, 0, 0);
+    snprintf(buf, sizeof(buf), "mmap test = %p\n", ptr);
+    munmmap(ptr, 0x1000);
     write(1, buf, sizeof(buf));
-
-    exit(0);
 
     while (true);
 }

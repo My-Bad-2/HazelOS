@@ -5,6 +5,7 @@
 #include "compiler.h"
 #include "core/capability.h"
 #include "core/errors.h"
+#include "core/syscalls.h"
 #include "cpu/cpu.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
@@ -13,7 +14,6 @@
 #include "memory/vma.h"
 #include "sched/ipc.h"
 #include "sched/process.h"
-#include "sched/syscalls.h"
 #include "uapi/ipc.h"
 
 // AMD64 Technology 24593—Rev. 3.42—March 2024 Pg. no. 175 System Instructions

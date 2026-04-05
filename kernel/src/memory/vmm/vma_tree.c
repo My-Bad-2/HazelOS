@@ -12,8 +12,10 @@
 
 #define max(a, b) ((a) > (b) ? (a) : (b))
 
-#define SAFE_START(s) ((s)->owner->is_kernel ? get_kernel_space_start_limit() : USER_SPACE_START)
-#define SAFE_END(s)   ((s)->owner->is_kernel ? KERNEL_SPACE_END : get_user_space_end_limit())
+#define IS_KERNEL_MAP(map) ((map) == vmm_get_kernel_pagemap())
+
+#define SAFE_START(s) (IS_KERNEL_MAP((s)->map) ? get_kernel_space_start_limit() : USER_SPACE_START)
+#define SAFE_END(s)   (IS_KERNEL_MAP((s)->map) ? KERNEL_SPACE_END : get_user_space_end_limit())
 
 bool vma_compute_subtree_gap(struct rb_node* node) {
     struct vm_area* vma = rb_entry(node, struct vm_area, rb_node);
