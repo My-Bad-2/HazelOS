@@ -257,3 +257,14 @@ void reaper_task_entry(void*) {
         kref_put(&dead_thread->kobj, thread_release);
     }
 }
+
+void thread_wait(thread_t* t, int* exit_code) {
+    if (unlikely(!t)) return;
+
+    wait_event(&t->join_queue, t->state == THREAD_TERMINATED);
+
+    acquire_qspinlock(&t->lock);
+    if (exit_code) *exit_code = t->exit_code;
+    t->state = THREAD_TERMINATED;
+    release_qspinlock(&t->lock);
+}

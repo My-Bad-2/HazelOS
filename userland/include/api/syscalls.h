@@ -21,6 +21,9 @@ extern "C" {
 #define SYS_CLONE    0x38
 #define SYS_VFORK    0x3a
 
+#define WNOHANG   1
+#define WUNTRACED 2
+
 int64_t write(int fd, const char* str, size_t len);
 uint64_t fork(void);
 void exit(int exit_code);

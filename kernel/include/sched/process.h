@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "core/posix_emul.h"
 #include "cpu/syscalls.h"
 #include "drivers/timer.h"
 #include "libs/dlist.h"
@@ -23,9 +22,6 @@
 #define CLONE_FS     0x200
 #define CLONE_THREAD 0x400
 #define CLONE_VFORK  0x800
-
-#define WNOHANG   1
-#define WUNTRACED 2
 
 typedef enum {
     THREAD_READY = 0,
@@ -69,9 +65,6 @@ typedef struct process {
 
     struct wait_queue wait_queue;
     struct wait_queue vfork_wait_queue;
-
-    qspinlock_t posix_lock;
-    struct dlist_head posix_children;
 
 #if KERNEL_DEBUG
     char name[32];
@@ -119,10 +112,11 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
 
     struct dlist_head process_node;
     struct dlist_head wait_node;
-    struct wait_queue join_queue;
 
     timer_event_t sleep_timer;
     struct thread_ipc_state ipc_state;
+    struct wait_queue join_queue;
+    qspinlock_t lock;
 } thread_t;
 
 process_t* process_create(const char* name, bool is_kernel);
@@ -175,6 +169,7 @@ int thread_change_exec(
 );
 
 [[noreturn, gnu::used]] void thread_exit(int exit_code);
+void thread_wait(thread_t* t, int* exit_code);
 void thread_join(thread_t* t, int* exit_code);
 
 bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);

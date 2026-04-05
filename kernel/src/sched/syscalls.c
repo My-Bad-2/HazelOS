@@ -1,15 +1,16 @@
 #include "cpu/syscalls.h"
 
 #include <errno.h>
+#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdatomic.h>
 #include <stdint.h>
 
 #include "compiler.h"
 #include "core/capability.h"
 #include "core/errors.h"
-#include "core/posix_emul.h"
 #include "cpu/smp.h"
 #include "libs/log.h"
+#include "libs/spinlock.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
@@ -81,42 +82,6 @@ uint64_t sys_vfork(struct syscall_regs* tf) {
 
     uint64_t parent_cap_id, parent_cnode_id, parent_vspace_id;
     return thread_vclone(parent, tf, &parent_cap_id, &parent_cnode_id, &parent_vspace_id);
-}
-
-int64_t sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* regs) {
-    uint64_t proc_cap = 0, thread_cap = 0, cnode_cap = 0, vspace_cap = 0;
-
-    int64_t err =
-        sys_cap_clone(flags, child_stack, regs, &proc_cap, &thread_cap, &cnode_cap, &vspace_cap);
-    if (err < 0) return err;
-
-    thread_t* curr      = smp_current_core()->curr_thread;
-    struct cnode* croot = curr->owner->root_cnode;
-    if (flags & CLONE_THREAD) {
-        struct capability* tcap = cap_lookup(croot, thread_cap, RIGHT_READ);
-        thread_t* child_thread =
-            (thread_t*)atomic_load_explicit(&tcap->object_ptr, memory_order_acquire);
-
-        uint64_t child_tid = child_thread->kobj.koid;
-
-        // POSIX programs don't manage capability limits. We must close the thread capability
-        // immediately to prevent CSpace memory leak.
-        cap_close(croot, thread_cap);
-        return (int64_t)child_tid;
-    }
-
-    struct capability* cap = cap_lookup(croot, proc_cap, RIGHT_READ);
-    process_t* child_proc =
-        (process_t*)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
-
-    uint64_t child_pid = child_proc->kobj.koid;
-    posix_register_child_emulation(curr->owner, child_pid, proc_cap);
-
-    cap_close(croot, cnode_cap);
-    cap_close(croot, vspace_cap);
-    cap_close(croot, vspace_cap);
-
-    return (int64_t)child_pid;
 }
 
 void sys_exit(int exit_code) {

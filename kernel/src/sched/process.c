@@ -7,7 +7,6 @@
 
 #include "compiler.h"
 #include "core/capability.h"
-#include "core/posix_emul.h"
 #include "cpu/smp.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
@@ -99,9 +98,6 @@ process_t* process_create(const char* name, bool is_kernel) {
 #endif
 
     create_qspinlock(&proc->lock);
-    create_qspinlock(&proc->posix_lock);
-
-    dlist_init(&proc->posix_children);
     dlist_init(&proc->thread_list);
     dlist_init(&proc->children_list);
     dlist_init(&proc->sibling_node);
@@ -234,8 +230,9 @@ uint64_t process_wait(process_t* proc, int* exit_code) {
     process_t* proc = smp_current_core()->curr_thread->owner;
 
     acquire_qspinlock(&proc->lock);
-    proc->state     = PROCESS_ZOMBIE;
-    proc->exit_code = exit_code;
+    proc->state       = PROCESS_ZOMBIE;
+    proc->exit_code   = exit_code;
+    process_t* parent = proc->parent;
     release_qspinlock(&proc->lock);
 
     wait_queue_wake_up_all(&proc->wait_queue);
@@ -246,7 +243,6 @@ void process_release(struct kobject* obj) {
     if (unlikely(!obj)) return;
 
     process_t* proc = kref_entry(obj, struct process, kobj);
-    posix_cleanup_all_children(proc);
     wait_queue_wake_up_all(&proc->vfork_wait_queue);
 
     if (proc->vspace && !proc->is_kernel) {

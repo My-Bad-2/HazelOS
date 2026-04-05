@@ -45,12 +45,11 @@ extern "C" {
 
 #define SYS_WRITE 0x01
 #define SYS_CLONE 0x38
-#define SYS_FORK  0x39
-#define SYS_VFORK 0x3a
-#define SYS_EXIT  0x3c
 
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
+
+#define OPTION_WAIT_NOHANG 1
 
 size_t copy_from_user(void* dest, const void* src, size_t len);
 size_t copy_to_user(void* dest, const void* src, size_t len);
@@ -58,6 +57,7 @@ size_t copy_to_user(void* dest, const void* src, size_t len);
 void syscalls_init(void);
 int64_t sys_write(uint32_t fd, const char* user_buf, size_t count);
 
+int64_t sys_cap_wait(uint64_t obj_cap_id, int* out_exit_code, int options);
 int64_t sys_cap_clone(
     uint64_t flags,
     void* child_stack,
@@ -70,9 +70,14 @@ int64_t sys_cap_clone(
 
 int64_t sys_fork(struct syscall_regs* tf);
 void sys_exit(int exit_code);
-uint64_t sys_vfork(struct syscall_regs* tf);
 int64_t sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf);
-int sys_waitpid(int64_t pid, int* status, int options);
+
+int64_t sys_process_create(
+    const char* name,
+    uint64_t* out_proc_cap,
+    uint64_t* out_cnode_cap,
+    uint64_t* out_vspace_cap
+);
 
 #ifdef __cplusplus
 }
