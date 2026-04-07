@@ -236,7 +236,7 @@ int copy_between_spaces(
         size_t src_page_size, dst_page_size;
 
         if (!pagemap_resolve_vaddr(
-                src_proc->map,
+                src_proc->vspace->map,
                 current_src_vaddr,
                 &src_paddr,
                 &src_flags,
@@ -246,7 +246,7 @@ int copy_between_spaces(
         }
 
         if (!pagemap_resolve_vaddr(
-                dest_proc->map,
+                dest_proc->vspace->map,
                 current_dst_vaddr,
                 &dst_paddr,
                 &dst_flags,

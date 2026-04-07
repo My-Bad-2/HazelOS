@@ -87,7 +87,7 @@ static bool load_segment(process_t* proc, Elf64_Phdr* phdr, void* base) {
         );
 
         // Technically any user page is accessible to the kernel via HHDM
-        uintptr_t phys_addr = pagemap_translate(proc->map, curr_v);
+        uintptr_t phys_addr = pagemap_translate(proc->vspace->map, curr_v);
         void* virt          = (void*)to_higher_half(phys_addr);
 
         size_t offset_in_page = (curr_v < vaddr_start) ? (vaddr_start - curr_v) : 0;
@@ -127,9 +127,10 @@ thread_t* load_elf(void* address) {
         return nullptr;
     }
 
+    uint64_t p_cap, v_cap, c_cap;
     struct vm_space* vspace = vmm_create_space(false);
 
-    init_process = process_create("user_init", false, vspace, nullptr, nullptr, nullptr, nullptr);
+    init_process = process_create("user_init", false, vspace, nullptr);
     if (!init_process) {
         KLOG_ERROR("Loader: Failed to create process\n");
         return nullptr;
@@ -144,8 +145,27 @@ thread_t* load_elf(void* address) {
         }
     }
 
-    thread_t* t =
-        thread_create("user_init", init_process, SCHED_NORMAL, (void*)ehdr->e_entry, nullptr, 0);
+    void* stack = vmalloc(
+        init_process->vspace,
+        nullptr,
+        USTACK_SIZE,
+        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK | VMM_FLAG_COW | VMM_FLAG_USER,
+        CACHE_WRITE_BACK,
+        PAGE_SIZE_SMALL
+    );
+
+    uintptr_t stack_top = (uintptr_t)stack + USTACK_SIZE;
+    thread_t* t         = thread_create(
+        "user_init",
+        init_process,
+        vspace,
+        SCHED_NORMAL,
+        ehdr->e_entry,
+        0,
+        stack_top,
+        nullptr,
+        0
+    );
 
     return t;
 }

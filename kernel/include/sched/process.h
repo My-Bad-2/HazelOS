@@ -11,17 +11,22 @@
 #include "libs/kobject.h"
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"
-#include "memory/pagemap.h"
 #include "memory/vma.h"
 #include "sched/ipc.h"
 #include "sched/wait.h"
 
 #define MAX_RT_PRIO 100
 
-#define CLONE_VM     0x100
-#define CLONE_FS     0x200
-#define CLONE_THREAD 0x400
-#define CLONE_VFORK  0x800
+// Creates a new thread inside the caller's process, otherwise create a new process
+#define CLONE_INTO_CURRENT_PROCESS (1 << 0)
+// Child shares the parent's vspace otherise perform a deep-copy (CoW) of the VSpace
+#define CLONE_SHARE_VSPACE (1 << 1)
+// The kernel deep-copies the parent's CNode tree to the child.
+#define CLONE_COPY_CSPACE (1 << 2)
+// The new thread is created in THREAD_SUSPENDED state, the paent must explicityl start it via IPC
+#define CLONE_SUSPENDED (1 << 3)
+// The parent thread yields the CPU immediately so the child can run.
+#define CLONE_VFORK (1 << 4)
 
 typedef enum {
     THREAD_READY = 0,
@@ -53,7 +58,6 @@ typedef struct process {
     int exit_code;
     struct process* parent;
 
-    pagemap_t* map;
     struct vm_space* vspace;
     struct cnode* root_cnode;
 
@@ -84,7 +88,6 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     uintptr_t context_rsp;
     void* kernel_stack;
     uintptr_t kernel_stack_top;
-    void* user_stack;
     void* fpu_buffer;
 
     uint16_t state;
@@ -119,23 +122,10 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     qspinlock_t lock;
 } thread_t;
 
-process_t* process_create(
-    const char* name,
-    bool is_kernel,
-    struct vm_space* vspace,
-    uint64_t* out_proc_cap,
-    uint64_t* out_cnode_cap,
-    uint64_t* out_vspace_cap,
-    int* error_code
-);
+process_t*
+process_create(const char* name, bool is_kernel, struct vm_space* vspace, int* error_code);
 
-process_t* process_clone(
-    process_t* parent,
-    uint64_t flags,
-    uint64_t* parent_proc_cap_id,
-    uint64_t* parent_cnode_id,
-    uint64_t* parent_vspace_id
-);
+process_t* process_clone(process_t* parent, uint64_t flags, int* error_code);
 void process_release(struct kobject* kobj);
 
 [[noreturn]] void process_exit(int exit_code);
@@ -149,9 +139,12 @@ process_t* get_kernel_process(void);
 thread_t* thread_create(
     const char* name,
     process_t* proc,
+    struct vm_space* space,
     uint8_t policy,
-    void (*entry)(void*),
-    void* args,
+    uintptr_t entry_rip,
+    uint64_t args,
+    uintptr_t user_rsp,
+    int* err_code,
     ...
 );
 void thread_release(struct kobject* kobj);
@@ -159,31 +152,24 @@ thread_t* thread_clone(
     process_t* target_proc,
     thread_t* parent,
     struct syscall_regs* regs,
-    void* child_stack
-);
-uint64_t thread_vclone(
-    thread_t* parent,
-    struct syscall_regs* regs,
-    uint64_t* parent_proc_cap_id,
-    uint64_t* parent_cnode_cap_id,
-    uint64_t* parent_vspace_cap_id
-);
-
-int thread_change_exec(
-    thread_t* t,
-    struct vm_space* new_space,
-    uintptr_t entry_point,
-    uintptr_t new_rsp,
-    struct syscall_regs* regs
+    uintptr_t rsp_override,
+    uintptr_t rip_override,
+    int* error_code
 );
 
 [[noreturn, gnu::used]] void thread_exit(int exit_code);
 void thread_wait(thread_t* t, int* exit_code);
 void thread_join(thread_t* t, int* exit_code);
 
-bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg);
+int arch_thread_init(thread_t* t, uintptr_t entry_rip, uint64_t arg, uintptr_t user_rsp);
 void arch_thread_destroy(thread_t* t);
-void arch_thread_clone(thread_t* child, struct syscall_regs* tf, void* child_stack);
+int arch_thread_clone(
+    thread_t* child,
+    thread_t* parent,
+    struct syscall_regs* tf,
+    uintptr_t rsp_override,
+    uintptr_t rip_override
+);
 
 void reaper_task_entry(void* args);
 void thread_save_fpu(thread_t* t);

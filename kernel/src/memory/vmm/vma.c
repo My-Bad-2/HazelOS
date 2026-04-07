@@ -71,6 +71,7 @@ void vmm_space_release(struct kobject* ref) {
         PANIC("VMM: Attempted to destroy Kernel VSpace!");
 
     vmm_destroy_space(space);
+    pagemap_release(space->map);
     kmem_cache_free(vmspace_cache, space);
 }
 

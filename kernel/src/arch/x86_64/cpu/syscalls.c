@@ -1,15 +1,15 @@
-#include "cpu/syscalls.h"
+#include "core/syscalls.h"
 
 #include <stdint.h>
 
 #include "compiler.h"
 #include "core/capability.h"
 #include "core/errors.h"
-#include "core/syscalls.h"
 #include "cpu/cpu.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
+#include "cpu/syscalls.h"
 #include "libs/log.h"
 #include "memory/vma.h"
 #include "sched/ipc.h"
@@ -169,12 +169,37 @@ dispatch_sched_syscall(uint64_t operation, struct syscall_regs* regs, struct pro
     uint64_t res = 0;
 
     switch (operation) {
-        case 0x01:  // SYS_SCHED_FORK
-            res = (uint64_t)sys_fork(regs);
+        case 0x01:  // SYS_SCHED_SPAWN_PROCESS
+            res = (uint64_t)sys_process_create(
+                (const char*)regs->rdi,
+                (uint64_t*)regs->rsi,
+                (uint64_t*)regs->rdx,
+                (uint64_t*)regs->r10
+            );
             break;
-        case 0x02:  // SYS_SCHED_EXIT
-            sys_exit((int)regs->rdi);
-            res = regs->rdi;
+        case 0x02:  // SYS_SCHED_SPAWN_THREAD
+            res = (uint64_t)sys_thread_spawn(
+                regs->rdi,
+                regs->rsi,
+                regs->rdx,
+                regs->r10,
+                regs->r8,
+                (uint64_t*)regs->r9
+            );
+            break;
+        case 0x03:
+            struct clone_args args;
+            copy_from_user(&args, (struct clone_args*)regs->r10, sizeof(struct clone_args));
+            res = (uint64_t)sys_clone(
+                regs->rdi,
+                regs->rsi,
+                regs->rdx,
+                regs,
+                args.out_proc_cap,
+                args.out_thread_cap,
+                args.out_cnode_cap,
+                args.out_vspace_cap
+            );
             break;
         default:
             res = (uint64_t)ERR_DENIED;

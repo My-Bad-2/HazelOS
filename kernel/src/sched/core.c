@@ -170,7 +170,7 @@ static inline void switch_mm_and_fpu(per_cpu_data_t* cpu, thread_t* curr, thread
 #endif
 
     cpu->kstack_top = next->kernel_stack_top;
-    if (next_proc && curr_proc != next_proc) pagemap_load(next_proc->map);
+    if (next_proc && curr_proc != next_proc) pagemap_load(next_proc->vspace->map);
 
     thread_restore_fpu(next);
     cpu->reschedule_needed = false;
@@ -440,8 +440,7 @@ static thread_t* pick_next_task(per_cpu_data_t* cpu, size_t* flags) {
 
 void scheduler_init_kernel_process(void) {
     kernel_space->map = vmm_get_kernel_pagemap();
-    kernel_proc =
-        process_create("kernel_proc", true, kernel_space, nullptr, nullptr, nullptr, nullptr);
+    kernel_proc       = process_create("kernel_proc", true, kernel_space, nullptr);
     if (!kernel_proc) PANIC("SCHED: failed to create kernel process\n");
 }
 
@@ -461,8 +460,16 @@ void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
     cpu->reschedule_needed = false;
     atomic_store_explicit(&cpu->cpu_load, 0, memory_order_relaxed);
 
-    thread_t* idle =
-        thread_create("idle_thread", kernel_proc, SCHED_IDLE, idle_task_entry, nullptr);
+    thread_t* idle = thread_create(
+        "idle_thread",
+        kernel_proc,
+        kernel_space,
+        SCHED_IDLE,
+        (uintptr_t)idle_task_entry,
+        0,
+        0,
+        nullptr
+    );
     if (!idle) PANIC("SCHED: failed to create idle thread for cpu=%u\n", cpu->cpu_idx);
 
     idle->sched_class   = &idle_sched_class;

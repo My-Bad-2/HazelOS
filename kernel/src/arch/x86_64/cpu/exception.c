@@ -266,8 +266,16 @@ int register_threaded_irq(
 
     action->wakeup_semaphore = sema_create(0);
 
-    action->thread =
-        thread_create(thread_name, get_kernel_process(), SCHED_FIFO, irq_thread_runner, action);
+    action->thread = thread_create(
+        thread_name,
+        get_kernel_process(),
+        kernel_space,
+        SCHED_FIFO,
+        (uintptr_t)irq_thread_runner,
+        (uintptr_t)action,
+        0,
+        nullptr
+    );
     scheduler_add_thread(action->thread);
 
     size_t flags = acquire_interrupt_lock(nullptr);

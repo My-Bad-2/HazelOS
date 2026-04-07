@@ -1,4 +1,5 @@
 #include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "boot/boot.h"
@@ -27,8 +28,17 @@ void init_srcu_domain(struct srcu_domain* ssp) {
     for (uint32_t i = 0; i < cpus; ++i) slist_init(&ssp->per_cpu[i].pending);
 
     process_t* kernel_proc = get_kernel_process();
-    ssp->gp_thread =
-        thread_create("srcu_gp_thread", kernel_proc, SCHED_RR, srcu_gp_thread, ssp, 99);
+    ssp->gp_thread         = thread_create(
+        "srcu_gp_thread",
+        kernel_proc,
+        kernel_space,
+        SCHED_RR,
+        (uintptr_t)srcu_gp_thread,
+        (uintptr_t)ssp,
+        0,
+        nullptr,
+        99
+    );
     scheduler_add_thread(ssp->gp_thread);
 }
 

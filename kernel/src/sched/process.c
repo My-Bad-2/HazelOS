@@ -1,6 +1,5 @@
 #include "sched/process.h"
 
-#include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
@@ -14,9 +13,7 @@
 #include "libs/kobject.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
-#include "memory/pagemap.h"
 #include "memory/vma.h"
-#include "memory/vmm.h"
 #include "sched/scheduler.h"
 #include "sched/wait.h"
 
@@ -73,15 +70,8 @@ static bool capability_bootstrap_injection(
     return true;
 }
 
-process_t* process_create(
-    const char* name,
-    bool is_kernel,
-    struct vm_space* vspace,
-    uint64_t* out_proc_cap,
-    uint64_t* out_cnode_cap,
-    uint64_t* out_vspace_cap,
-    int* error_code
-) {
+process_t*
+process_create(const char* name, bool is_kernel, struct vm_space* vspace, int* error_code) {
     if (error_code) *error_code = ERR_OK;
 
     if (unlikely(!process_cache)) {
@@ -107,7 +97,6 @@ process_t* process_create(
     proc->is_kernel  = is_kernel;
     proc->root_cnode = create_cspace();
     proc->vspace     = vspace;
-    proc->map        = vspace->map;
 
 #if KERNEL_DEBUG
     if (likely(name)) strncpy(proc->name, name, sizeof(proc->name) - 1);
@@ -123,111 +112,59 @@ process_t* process_create(
     wait_queue_init(&proc->wait_queue);
     wait_queue_init(&proc->vfork_wait_queue);
 
-    uint64_t p_cap_id = 0, c_cap_id = 0, v_cap_id = 0;
-
-    struct capability* p_cap = cap_alloc(proc->root_cnode, &p_cap_id);
-    struct capability* c_cap = cap_alloc(proc->root_cnode, &c_cap_id);
-    struct capability* v_cap = cap_alloc(proc->root_cnode, &v_cap_id);
-
-    if (unlikely(!p_cap || !c_cap || !v_cap)) {
-        if (p_cap) cap_close(proc->root_cnode, p_cap_id);
-        if (c_cap) cap_close(proc->root_cnode, c_cap_id);
-        if (v_cap) cap_close(proc->root_cnode, v_cap_id);
-
-        destroy_cspace(proc->root_cnode);
-        kmem_cache_free(process_cache, proc);
-
-        if (error_code) *error_code = ERR_CAP_EXHAUSTED;
-        return nullptr;
-    }
-
-    // Process Self-Reference Capability
-    p_cap->badge  = 0;
-    p_cap->type   = CAP_TYPE_PROCESS;
-    p_cap->rights = RIGHT_ALL & ~RIGHT_CLOEXEC;
-    kref_get(&proc->kobj);
-    atomic_store_explicit(&p_cap->object_ptr, (uintptr_t)proc, memory_order_relaxed);
-    atomic_init(&p_cap->generation, 1);
-
-    // Root CNode Capability
-    c_cap->badge  = 0;
-    c_cap->type   = CAP_TYPE_CNODE;
-    c_cap->rights = RIGHT_ALL & ~RIGHT_CLOEXEC;
-    atomic_store_explicit(&c_cap->object_ptr, (uintptr_t)proc->root_cnode, memory_order_relaxed);
-    atomic_init(&c_cap->generation, 1);
-
-    // VSpace Capability
-    v_cap->badge  = 0;
-    v_cap->type   = CAP_TYPE_VSPACE;
-    v_cap->rights = RIGHT_ALL & ~RIGHT_CLOEXEC;
-    kref_get(&proc->vspace->refcount);
-    atomic_store_explicit(&v_cap->object_ptr, (uintptr_t)proc->vspace, memory_order_relaxed);
-    atomic_init(&v_cap->generation, 1);
-
-    if (out_proc_cap) *out_proc_cap = p_cap_id;
-    if (out_cnode_cap) *out_cnode_cap = c_cap_id;
-    if (out_vspace_cap) *out_vspace_cap = v_cap_id;
-
     return proc;
 }
 
-process_t* process_clone(
-    process_t* parent,
-    uint64_t flags,
-    uint64_t* parent_proc_cap_id,
-    uint64_t* parent_cnode_id,
-    uint64_t* parent_vspace_id
-) {
-    if (unlikely(!parent)) return nullptr;
+process_t* process_clone(process_t* parent, uint64_t flags, int* error_code) {
+    if (error_code) *error_code = ERR_OK;
 
-    process_t* child = kmem_cache_alloc(process_cache);
-    if (unlikely(!child)) return nullptr;
+    if (unlikely(!parent)) {
+        *error_code = ERR_INVALID;
+        return nullptr;
+    }
 
-    memset(child, 0, sizeof(process_t));
-    kref_init(&child->kobj, CAP_TYPE_PROCESS);
-    child->state      = PROCESS_ALIVE;
-    child->root_cnode = cnode_clone(parent->root_cnode);
-#if KERNEL_DEBUG
-    strncpy(child->name, parent->name, sizeof(child->name) - 1);
-#endif
+    struct vm_space* child_vspace = nullptr;
 
-    create_qspinlock(&child->lock);
-    dlist_init(&child->thread_list);
-    dlist_init(&child->children_list);
-    dlist_init(&child->sibling_node);
-    wait_queue_init(&child->wait_queue);
-    wait_queue_init(&child->vfork_wait_queue);
-
-    if (flags & CLONE_VM) {
-        // Share address space
-        child->vspace = parent->vspace;
-        child->map    = parent->map;
-        kref_get(&child->vspace->refcount);
+    if (flags & CLONE_SHARE_VSPACE) {
+        child_vspace = parent->vspace;
+        kref_get(&child_vspace->refcount);
     } else {
-        child->map    = pagemap_create();
-        child->vspace = vmm_create_space(child);
+        child_vspace = vmm_create_space(false);
 
-        if (!vmm_clone_space(parent->vspace, child->vspace)) {
-            if (child->vspace) kref_put(&child->vspace->refcount, vmm_space_release);
-            destroy_cspace(child->root_cnode);
-            kmem_cache_free(process_cache, child);
+        if (!child_vspace || !vmm_clone_space(parent->vspace, child_vspace)) {
+            if (child_vspace) vmm_space_release(&child_vspace->refcount);
+            if (error_code) *error_code = ERR_NO_MEM;
             return nullptr;
         }
     }
 
-    if (unlikely(!capability_bootstrap_injection(
-            parent,
-            child,
-            parent_proc_cap_id,
-            parent_cnode_id,
-            parent_vspace_id
-        ))) {
-        kref_put(&child->vspace->refcount, vmm_space_release);
+    int error = 0;
 
-        destroy_cspace(child->root_cnode);
-        if (flags & CLONE_VM) pagemap_release(child->map);
-        kmem_cache_free(process_cache, child);
+    process_t* child = process_create(
+#if KERNEL_DEBUG
+        parent->name,
+#else
+        nullptr,
+#endif
+        false,
+        child_vspace,
+        &error
+    );
+
+    if (unlikely(!child)) {
+        if (!(flags & CLONE_SHARE_VSPACE)) vmm_space_release(&child_vspace->refcount);
+        if (error_code) *error_code = error;
         return nullptr;
+    }
+
+    if (flags & CLONE_COPY_CSPACE) {
+        // Deep copy the CNode tree, allowing the child to access the parent's IPC channels
+        child->root_cnode = cnode_clone(parent->root_cnode);
+        if (!child->root_cnode) {
+            kref_put(&child->kobj, process_release);
+            if (error_code) *error_code = ERR_NO_MEM;
+            return nullptr;
+        }
     }
 
     child->parent = parent;
@@ -275,7 +212,6 @@ void process_release(struct kobject* obj) {
 
     if (proc->vspace && !proc->is_kernel) {
         kref_put(&proc->vspace->refcount, vmm_space_release);
-        pagemap_release(proc->map);
     }
 
     acquire_qspinlock(&global_process_lock);
@@ -302,6 +238,5 @@ void process_release(struct kobject* obj) {
     if (parent) wait_queue_wake_up_all(&parent->wait_queue);
 
     destroy_cspace(proc->root_cnode);
-    pagemap_release(proc->map);
     kmem_cache_free(process_cache, proc);
 }

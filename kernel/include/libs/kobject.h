@@ -24,6 +24,8 @@ struct kobject {
 void koid_init(void);
 struct koid_allocator* koid_get_current_allocator(void);
 uint64_t generate_koid(struct koid_allocator* core, uint8_t object_type);
+void* get_object_from_koid(uint64_t koid, uint8_t type);
+int register_koid(uint64_t koid, void* obj);
 
 static inline void kref_init(struct kobject* obj, uint8_t type) {
     obj->koid = generate_koid(koid_get_current_allocator(), type);

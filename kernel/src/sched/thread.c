@@ -5,6 +5,8 @@
 #include "arch.h"
 #include "compiler.h"
 #include "core/capability.h"
+#include "core/errors.h"
+#include "cpu/smp.h"
 #include "cpu/syscalls.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
@@ -34,18 +36,39 @@ static void process_insert_thread(process_t* p, thread_t* t) {
 static thread_t* thread_create_internal(
     const char* name,
     process_t* proc,
+    struct vm_space* vspace,
     uint8_t policy,
-    void (*entry)(void*),
-    void* args,
+    uintptr_t entry_rip,
+    uint64_t args,
+    uintptr_t user_rsp,
+    int* error_code,
     va_list arg
 ) {
-    if (unlikely(!entry || !proc)) return nullptr;
+    if (error_code) *error_code = ERR_OK;
+
+    thread_t* curr      = smp_current_core()->curr_thread;
+    struct cnode* croot = curr ? curr->owner->root_cnode : get_kernel_process()->root_cnode;
+
+    if (unlikely(!proc || !vspace || proc->state != PROCESS_ALIVE)) {
+        if (error_code) *error_code = ERR_SRCH;
+        return nullptr;
+    }
+
+    // Ensure the VSpace capability actually matches the process we are injecting into
+    if (unlikely(proc->vspace != vspace)) {
+        if (error_code) *error_code = ERR_INVALID;
+        return nullptr;
+    }
 
     thread_t* t = kmem_cache_alloc(thread_cache);
-    if (unlikely(!t)) return nullptr;
-    memset(t, 0, sizeof(thread_t));
+    if (unlikely(!t)) {
+        if (error_code) *error_code = ERR_NO_MEM;
+        return nullptr;
+    }
 
+    memset(t, 0, sizeof(thread_t));
     kref_init(&t->kobj, CAP_TYPE_THREAD);
+
     t->owner        = proc;
     t->state        = THREAD_READY;
     t->assigned_cpu = UINT32_MAX;
@@ -66,8 +89,11 @@ static thread_t* thread_create_internal(
     t->sched_class         = sc;
     if (sc->init_task) sc->init_task(t, arg);
 
-    if (!arch_thread_init(t, entry, args)) {
+    int ret = arch_thread_init(t, entry_rip, args, user_rsp);
+
+    if (ret != ERR_OK) {
         kmem_cache_free(thread_cache, t);
+        if (error_code) *error_code = ret;
         return nullptr;
     }
 
@@ -75,15 +101,19 @@ static thread_t* thread_create_internal(
     process_insert_thread(proc, t);
     proc->thread_count++;
     release_qspinlock(&proc->lock);
+
     return t;
 }
 
 thread_t* thread_create(
     const char* name,
     process_t* proc,
+    struct vm_space* vspace,
     uint8_t policy,
-    void (*entry)(void*),
-    void* args,
+    uintptr_t entry_rip,
+    uint64_t args,
+    uintptr_t user_rsp,
+    int* error_code,
     ...
 ) {
     if (!thread_cache) {
@@ -97,10 +127,21 @@ thread_t* thread_create(
         );
     }
 
-    va_list list;
-    va_start(list, args);
-    thread_t* t = thread_create_internal(name, proc, policy, entry, args, list);
-    va_end(list);
+    va_list arg;
+    va_start(arg, error_code);
+    thread_t* t = thread_create_internal(
+        name,
+        proc,
+        vspace,
+        policy,
+        entry_rip,
+        args,
+        user_rsp,
+        error_code,
+        arg
+    );
+
+    va_end(arg);
 
     return t;
 }
@@ -109,12 +150,22 @@ thread_t* thread_clone(
     process_t* target_proc,
     thread_t* parent,
     struct syscall_regs* regs,
-    void* child_stack
+    uintptr_t rsp_override,
+    uintptr_t rip_override,
+    int* error_code
 ) {
-    if (unlikely(!target_proc || !parent || !regs)) return nullptr;
+    if (error_code) *error_code = ERR_OK;
+    if (unlikely(!target_proc || !parent || !regs)) {
+        if (error_code) *error_code = ERR_INVALID;
+        return nullptr;
+    }
 
     thread_t* child = kmem_cache_alloc(thread_cache);
-    if (unlikely(!child)) return nullptr;
+    if (unlikely(!child)) {
+        if (error_code) *error_code = ERR_NO_MEM;
+        return nullptr;
+    }
+
     memset(child, 0, sizeof(thread_t));
 
     kref_init(&child->kobj, CAP_TYPE_THREAD);
@@ -124,6 +175,7 @@ thread_t* thread_clone(
     child->policy        = parent->policy;
     child->sched_class   = parent->sched_class;
     child->affinity_mask = parent->affinity_mask;
+
 #if KERNEL_DEBUG
     if (likely(parent->name)) strncpy(child->name, parent->name, 31);
 #endif
@@ -143,13 +195,22 @@ thread_t* thread_clone(
         CACHE_WRITE_BACK,
         PAGE_SIZE_SMALL
     );
+
     if (unlikely(!child->kernel_stack)) {
         kmem_cache_free(thread_cache, child);
+        if (error_code) *error_code = ERR_NO_MEM;
         return nullptr;
     }
 
     child->kernel_stack_top = (uintptr_t)child->kernel_stack + KSTACK_SIZE;
-    arch_thread_clone(child, regs, child_stack);
+
+    int error = arch_thread_clone(child, parent, regs, rsp_override, rip_override);
+    if (error != ERR_OK && error != ERR_CHILD) {
+        vmfree(kernel_space, child->kernel_stack, KSTACK_SIZE);
+        kmem_cache_free(thread_cache, child);
+        if (error_code) *error_code = error;
+        return nullptr;
+    }
 
     acquire_qspinlock(&target_proc->lock);
     process_insert_thread(target_proc, child);
@@ -157,38 +218,6 @@ thread_t* thread_clone(
     release_qspinlock(&target_proc->lock);
 
     return child;
-}
-
-uint64_t thread_vclone(
-    thread_t* parent,
-    struct syscall_regs* tf,
-    uint64_t* parent_proc_cap_id,
-    uint64_t* parent_cnode_cap_id,
-    uint64_t* parent_vspace_cap_id
-) {
-    process_t* child_proc = process_clone(
-        parent->owner,
-        CLONE_VM,
-        parent_proc_cap_id,
-        parent_cnode_cap_id,
-        parent_vspace_cap_id
-    );
-    if (unlikely(!child_proc)) return 0;
-
-    thread_t* child_thread = thread_clone(child_proc, parent, tf, nullptr);
-    if (unlikely(!child_thread)) {
-        kref_put(&child_proc->kobj, process_release);
-        return 0;
-    }
-
-    scheduler_add_thread(child_thread);
-
-    wait_event(
-        &child_proc->vfork_wait_queue,
-        child_proc->state == PROCESS_DEAD || child_proc->state == PROCESS_ZOMBIE ||
-            child_proc->map->arch.phys_root != parent->owner->map->arch.phys_root
-    );
-    return child_proc->kobj.koid;
 }
 
 void thread_exit(int exit_code) {

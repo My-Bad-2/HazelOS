@@ -35,8 +35,9 @@ extern "C" {
 #define SYS_IPC_NOTIFY              (SYS_CATEGORY_IPC | 0x09)
 
 // Scheduling/Thread/Process syscalls
-#define SYS_SCHED_FORK (SYS_CATEGORY_SCHED | 0x01)
-#define SYS_SCHED_EXIT (SYS_CATEGORY_SCHED | 0x02)
+#define SYS_SCHED_SPAWN_PROCESS (SYS_CATEGORY_SCHED | 0x01)
+#define SYS_SCHED_SPAWN_THREAD  (SYS_CATEGORY_SCHED | 0x02)
+#define SYS_SCHED_CLONE         (SYS_CATEGORY_SCHED | 0x03)
 
 // VSpace Syscalls
 #define SYS_MEM_MMAP            (SYS_CATEGORY_MEM | 0x01)
@@ -64,12 +65,17 @@ int64_t sys_write(uint32_t fd, const char* user_buf, size_t count);
 
 int64_t sys_fork(struct syscall_regs* tf);
 void sys_exit(int exit_code);
-int64_t sys_clone(uint64_t flags, void* child_stack, struct syscall_regs* tf);
 
 // --- Scheduling Category ---
+struct clone_args {
+    uint64_t* out_proc_cap;
+    uint64_t* out_cnode_cap;
+    uint64_t* out_vspace_cap;
+    uint64_t* out_thread_cap;
+};
+
 int64_t sys_process_create(
     const char* name,
-    void* vspace,
     uint64_t* out_proc_cap,
     uint64_t* out_cnode_cap,
     uint64_t* out_vspace_cap
@@ -77,11 +83,28 @@ int64_t sys_process_create(
 
 int64_t sys_thread_spawn(
     uint64_t target_proc_cap,
+    uint64_t target_vspace_cap,
     uintptr_t entry_rip,
     uintptr_t stack_rsp,
     uint64_t arg1,
     uint64_t* out_thread_cap
 );
+
+int64_t sys_clone(
+    uint64_t flags,
+    uintptr_t child_rsp_override,
+    uintptr_t child_rip_override,
+    struct syscall_regs* regs,
+    uint64_t* out_proc_cap,
+    uint64_t* out_thread_cap,
+    uint64_t* out_cnode_cap,
+    uint64_t* out_vspace_cap
+);
+
+void sys_sched_yield(void);
+
+[[noreturn]] void thread_exit(int exit_code);
+[[noreturn]] void thread_exit(int exit_code);
 
 #ifdef __cplusplus
 }

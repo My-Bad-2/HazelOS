@@ -1,14 +1,13 @@
-#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "compiler.h"
+#include "core/errors.h"
 #include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
 #include "cpu/simd.h"
-#include "cpu/smp.h"
 #include "cpu/syscalls.h"
 #include "libs/log.h"
 #include "libs/math.h"
@@ -38,7 +37,7 @@ struct user_stack_layout {
     uint64_t thread_exit;
 };
 
-struct fork_stack_layout {
+struct clone_stack_layout {
     switch_context_t ctx;
     struct syscall_regs regs;
     uint64_t thread_exit;
@@ -57,13 +56,13 @@ static inline void ensure_fpu_cache_initialized(void) {
     }
 }
 
-bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
-    if (unlikely(!t || !entry)) return false;
+int arch_thread_init(thread_t* t, uintptr_t entry_rip, uint64_t arg1, uintptr_t user_rsp) {
+    if (unlikely(!t || !entry_rip)) return ERR_INVALID;
 
     ensure_fpu_cache_initialized();
 
     t->fpu_buffer = kmem_cache_alloc(fpu_cache);
-    if (unlikely(!t->fpu_buffer)) return false;
+    if (unlikely(!t->fpu_buffer)) return ERR_NO_MEM;
 
     t->kernel_stack = vmalloc(
         kernel_space,
@@ -73,9 +72,10 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         CACHE_WRITE_BACK,
         PAGE_SIZE_SMALL
     );
+
     if (unlikely(!t->kernel_stack)) {
         kmem_cache_free(fpu_cache, t->fpu_buffer);
-        return false;
+        return ERR_NO_MEM;
     }
 
     const size_t fpu_size = simd_get_save_size();
@@ -93,45 +93,28 @@ bool arch_thread_init(thread_t* t, void (*entry)(void*), void* arg) {
         struct kernel_stack_layout* kstack = (struct kernel_stack_layout*)sp;
         memset(kstack, 0, sizeof(struct kernel_stack_layout));
 
-        kstack->entry   = (uint64_t)entry;
-        kstack->args    = (uint64_t)arg;
+        kstack->entry   = entry_rip;
+        kstack->args    = arg1;
         kstack->ctx.rip = (uint64_t)kernel_thread_entry;
 
         t->context_rsp = (uint64_t)&kstack->ctx;
     } else {
-        t->user_stack = (void*)vmalloc(
-            proc->vspace,
-            nullptr,
-            USTACK_SIZE,
-            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER | VMM_FLAG_STACK,
-            CACHE_WRITE_BACK,
-            PAGE_SIZE_SMALL
-        );
-
-        if (unlikely(!t->user_stack)) {
-            vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
-            kmem_cache_free(fpu_cache, t->fpu_buffer);
-            return false;
-        }
-
         sp -= sizeof(struct user_stack_layout);
         struct user_stack_layout* ustack = (struct user_stack_layout*)sp;
         memset(ustack, 0, sizeof(struct user_stack_layout));
 
-        uint64_t rsp = align_down((uintptr_t)t->user_stack + USTACK_SIZE, 0x10);
-
-        ustack->tf.rip    = (uint64_t)entry;
-        ustack->tf.rdi    = (uint64_t)arg;
+        ustack->tf.rip    = entry_rip;
+        ustack->tf.rdi    = arg1;
         ustack->tf.cs     = USER_CODE | 3;
         ustack->tf.ss     = USER_DATA | 3;
         ustack->tf.rflags = X86_FLAGS_IF | X86_FLAGS_RESERVED_ONES;
-        ustack->tf.rsp    = rsp;
+        ustack->tf.rsp    = user_rsp;
         ustack->ctx.rip   = (uint64_t)isr_restore_path;
 
         t->context_rsp = (uint64_t)&ustack->ctx;
     }
 
-    return true;
+    return ERR_OK;
 }
 
 void arch_thread_destroy(thread_t* t) {
@@ -139,36 +122,41 @@ void arch_thread_destroy(thread_t* t) {
 
     if (t->kernel_stack) vmfree(kernel_space, t->kernel_stack, KSTACK_SIZE);
     if (t->fpu_buffer) kmem_cache_free(fpu_cache, t->fpu_buffer);
-
-    if (likely(!t->owner->is_kernel && t->context_rsp != 0 && t->user_stack))
-        vmfree(t->owner->vspace, t->user_stack, USTACK_SIZE);
 }
 
-void arch_thread_clone(thread_t* child, struct syscall_regs* tf, void* child_stack) {
-    if (unlikely(!child || !tf)) return;
+int arch_thread_clone(
+    thread_t* child,
+    thread_t* parent,
+    struct syscall_regs* tf,
+    uintptr_t rsp_override,
+    uintptr_t rip_override
+) {
+    if (unlikely(!child || !tf)) return ERR_INVALID;
 
     ensure_fpu_cache_initialized();
     child->fpu_buffer = kmem_cache_alloc(fpu_cache);
-    if (unlikely(!child->fpu_buffer)) PANIC("THREAD: fpu buffer allocation failed\n");
+    if (unlikely(!child->fpu_buffer)) return ERR_NO_MEM;
 
-    thread_t* parent = smp_current_core()->curr_thread;
     thread_save_fpu(parent);
 
     size_t fpu_size = simd_get_save_size();
     memcpy(child->fpu_buffer, parent->fpu_buffer, fpu_size);
 
     uintptr_t sp = align_down(child->kernel_stack_top, 0x10);
-    sp -= sizeof(struct fork_stack_layout);
+    sp -= sizeof(struct clone_stack_layout);
 
-    struct fork_stack_layout* layout = (struct fork_stack_layout*)sp;
-    memset(layout, 0, sizeof(struct fork_stack_layout));
+    struct clone_stack_layout* layout = (struct clone_stack_layout*)sp;
+    memset(layout, 0, sizeof(struct clone_stack_layout));
 
     layout->regs     = *tf;
     layout->regs.rax = 0;
 
-    if (child_stack) layout->regs.rsp = (uintptr_t)child_stack;
+    if (rsp_override) layout->regs.rsp = rsp_override;
+    if (rip_override) layout->regs.rip = rip_override;
+
     layout->ctx.rip    = (uint64_t)syscall_restore_path;
     child->context_rsp = (uint64_t)&layout->ctx;
+    return ERR_OK;
 }
 
 void thread_save_fpu(thread_t* t) {
@@ -177,33 +165,4 @@ void thread_save_fpu(thread_t* t) {
 
 void thread_restore_fpu(thread_t* t) {
     if (likely(t && t->fpu_buffer)) simd_restore(t->fpu_buffer);
-}
-
-int thread_change_exec(
-    thread_t* t,
-    struct vm_space* new_space,
-    uintptr_t entry_point,
-    uintptr_t new_rsp,
-    struct syscall_regs* regs
-) {
-    if (unlikely(!t || !t->owner || !regs)) return -EINVAL;
-
-    process_t* proc            = t->owner;
-    struct vm_space* old_space = proc->vspace;
-
-    acquire_qspinlock(&proc->lock);
-    proc->vspace = new_space;
-    proc->map    = new_space->map;
-    release_qspinlock(&proc->lock);
-
-    pagemap_load(proc->map);
-    vmm_destroy_space(old_space);
-
-    memset(regs, 0, sizeof(struct syscall_regs));
-    regs->rip    = entry_point;
-    regs->rsp    = new_rsp;
-    regs->rflags = X86_FLAGS_IF | X86_FLAGS_RESERVED_ONES;
-
-    wait_queue_wake_up_all(&proc->vfork_wait_queue);
-    return 0;
 }

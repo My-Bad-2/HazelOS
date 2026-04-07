@@ -102,8 +102,17 @@ void rcu_init(void) {
     }
 
     process_t* kernel_proc = get_kernel_process();
-    rcu_state.gp_thread =
-        thread_create("rcu_gp_thread", kernel_proc, SCHED_RR, rcu_gp_thread, nullptr, 99);
+    rcu_state.gp_thread    = thread_create(
+        "rcu_gp_thread",
+        kernel_proc,
+        kernel_space,
+        SCHED_RR,
+        (uintptr_t)rcu_gp_thread,
+        0,
+        0,
+        nullptr,
+        99
+    );
     scheduler_add_thread(rcu_state.gp_thread);
 
     init_srcu_domain(&g_srcu);
