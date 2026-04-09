@@ -48,63 +48,24 @@ static struct cnode* alloc_cnode_skeleton(struct cnode* template_cnode) {
     return new_node;
 }
 
-static void cap_object_ref(uint8_t type, void* obj) {
-    if (!obj) {
-        return;
-    }
-
-    switch (type) {
-        case CAP_TYPE_CHANNEL:
-            kref_get(&((struct ipc_channel*)obj)->refcount);
-            break;
-        case CAP_TYPE_PORT_SET:
-            kref_get(&((struct ipc_port_set*)obj)->refcount);
-            break;
-        case CAP_TYPE_NOTIFICATION:
-            kref_get(&((struct ipc_notification*)obj)->refcount);
-            break;
-        case CAP_TYPE_REPLY:
-        case CAP_TYPE_THREAD:
-            kref_get(&((struct thread*)obj)->kobj);
-            break;
-        case CAP_TYPE_PROCESS:
-            kref_get(&((struct process*)obj)->kobj);
-            break;
-        case CAP_TYPE_VSPACE:
-            kref_get(&((struct vm_space*)obj)->refcount);
-            break;
-        default:
-            break;
-    }
+void cap_object_ref(uint8_t, void* obj) {
+    if (likely(obj)) kref_get((struct kobject*)obj);
 }
 
-static void cap_object_unref(uint8_t type, void* obj) {
-    if (!obj) {
-        return;
-    }
+typedef void (*kobj_release_fn)(struct kobject*);
+static const kobj_release_fn destructor_table[] = {
+    [CAP_TYPE_NONE]     = nullptr,
+    [CAP_TYPE_ENDPOINT] = ipc_endpoint_release,
+    [CAP_TYPE_PORT]     = ipc_port_release,
+    [CAP_TYPE_THREAD]   = thread_release,
+    [CAP_TYPE_PROCESS]  = process_release,
+    [CAP_TYPE_VSPACE]   = vmm_space_release,
+};
 
-    switch (type) {
-        case CAP_TYPE_CHANNEL:
-            kref_put(&((struct ipc_channel*)obj)->refcount, ipc_channel_release);
-            break;
-        case CAP_TYPE_PORT_SET:
-            kref_put(&((struct ipc_port_set*)obj)->refcount, ipc_port_set_release);
-            break;
-        case CAP_TYPE_NOTIFICATION:
-            kref_put(&((struct ipc_notification*)obj)->refcount, ipc_notification_release);
-            break;
-        case CAP_TYPE_REPLY:
-        case CAP_TYPE_THREAD:
-            kref_put(&((struct thread*)obj)->kobj, thread_release);
-            break;
-        case CAP_TYPE_PROCESS:
-            kref_put(&((struct process*)obj)->kobj, process_release);
-            break;
-        case CAP_TYPE_VSPACE:
-            kref_put(&((struct vm_space*)obj)->refcount, vmm_space_release);
-            break;
-        default:
-            break;
+void cap_object_unref(uint8_t type, void* obj) {
+    if (likely(obj) && type < sizeof(destructor_table) / sizeof(destructor_table[0])) {
+        kobj_release_fn release_fn = destructor_table[type];
+        if (release_fn) kref_put((struct kobject*)obj, release_fn);
     }
 }
 
@@ -443,9 +404,7 @@ int cap_close(struct cnode* root, uint64_t cap_id) {
     slist_push(&target_cap->free_node, &target_cnode->free_list);
     release_qinterrupt_lock(&target_cnode->lock, irq_state);
 
-    if (type != CAP_TYPE_WEAK && type != CAP_TYPE_CNODE) {
-        cap_object_unref(type, obj);
-    }
+    if (type != CAP_TYPE_WEAK && type != CAP_TYPE_CNODE) cap_object_unref(type, obj);
 
     return ERR_OK;
 }

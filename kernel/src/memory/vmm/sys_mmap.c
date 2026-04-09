@@ -3,6 +3,7 @@
 
 #include "compiler.h"
 #include "core/capability.h"
+#include "libs/log.h"
 #include "libs/math.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"

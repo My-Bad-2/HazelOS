@@ -178,7 +178,7 @@ int register_koid(uint64_t full_koid, void* object) {
     struct koid_node* leaf = (struct koid_node*)current;
     idx                    = payload & 0x1FF;
 
-    if (unlikely(atomic_load_explicit(&leaf->slots[idx], memory_order_relaxed) != NULL)) {
+    if (unlikely(atomic_load_explicit(&leaf->slots[idx], memory_order_relaxed) != nullptr)) {
         release_spinlock(&koid_write_lock);
         return ERR_EXIST;
     }

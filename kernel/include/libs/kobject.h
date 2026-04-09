@@ -38,7 +38,7 @@ static inline void kref_get(struct kobject* obj) {
 
 static inline int kref_put(struct kobject* obj, void (*release)(struct kobject* kref)) {
     if (atomic_fetch_sub_explicit(&obj->ref_count, 1, memory_order_acq_rel) == 1) {
-        release(obj);
+        if (release) release(obj);
         return 1;
     }
 

@@ -8,7 +8,6 @@
 #include "core/syscalls.h"
 #include "cpu/smp.h"
 #include "libs/kobject.h"
-#include "libs/log.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"

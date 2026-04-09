@@ -6,59 +6,64 @@
 
 #define SYS_CATEGORY_IPC 0x0200
 
-#define SYS_IPC_CHANNEL_CREATE      (SYS_CATEGORY_IPC | 0x01)
-#define SYS_IPC_PORT_CREATE         (SYS_CATEGORY_IPC | 0x02)
-#define SYS_IPC_BIND                (SYS_CATEGORY_IPC | 0x03)
-#define SYS_IPC_CALL                (SYS_CATEGORY_IPC | 0x04)
-#define SYS_IPC_WAIT                (SYS_CATEGORY_IPC | 0x05)
-#define SYS_IPC_SEND                (SYS_CATEGORY_IPC | 0x06)
-#define SYS_IPC_RECV                (SYS_CATEGORY_IPC | 0x07)
-#define SYS_IPC_NOTIFICATION_CREATE (SYS_CATEGORY_IPC | 0x08)
-#define SYS_IPC_NOTIFY              (SYS_CATEGORY_IPC | 0x09)
+#define SYS_IPC_ENDPOINT_CREATE (SYS_CATEGORY_IPC | 0x01)
+#define SYS_IPC_PORT_CREATE     (SYS_CATEGORY_IPC | 0x02)
+#define SYS_IPC_PORT_BIND       (SYS_CATEGORY_IPC | 0x03)
+#define SYS_IPC_PORT_WAIT       (SYS_CATEGORY_IPC | 0x04)
+#define SYS_IPC_CHANNEL_WRITE   (SYS_CATEGORY_IPC | 0x05)
+#define SYS_IPC_CHANNEL_READ    (SYS_CATEGORY_IPC | 0x06)
+#define SYS_IPC_CHANNEL_CALL    (SYS_CATEGORY_IPC | 0x07)
 
-#define IPC_MAX_HANDLES 1024
+#define IPC_SIGNAL_READABLE    (1ul << 0)
+#define IPC_SIGNAL_WRITABLE    (1ul << 1)
+#define IPC_SIGNAL_PEER_CLOSED (1ul << 2)
 
-#define IPC_EVENT_READABLE     (1 << 0)
-#define IPC_EVENT_WRITABLE     (1 << 1)
-#define IPC_EVENT_CLOSED       (1 << 2)
-#define IPC_EVENT_NOTIFICATION (1 << 3)
+#define IPC_CAP_OP_COPY 0
+#define IPC_CAP_OP_MOVE 1
 
-struct ipc_msg_info {
-    void* data_buffer;
-    size_t data_size_max;
-    size_t data_size_actual;
+#define IPC_FLAG_PEEK  (1 << 0)
+#define IPC_FLAG_IOVEC (1 << 1)
 
-    uint64_t* caps_buffer;
-    size_t caps_max;
-    size_t caps_actual;
-
-    uint64_t reply_cap_id;
-    uint32_t sender_badge;
+struct cap_disp {
+    uint64_t cap_id;
+    uint16_t rights;
+    uint8_t op;
 };
 
-struct ipc_event {
+struct ipc_iovec {
+    void* base;
+    size_t len;
+};
+
+struct ipc_msg {
+    void* data;
+    size_t data_len;
+
+    struct cap_disp* caps;
+    size_t cap_count;
+
+    uint32_t flags;
+};
+
+struct port_event {
     uint64_t key;
-    uint64_t notification_bits;
-    uint32_t events;
+    uint32_t signals;
+    uint32_t reserved;
 };
 
 int ipc_channel_create(uint64_t* cap1_out, uint64_t* cap2_out);
 int ipc_port_create(uint64_t* port_cap_out);
 int ipc_close(uint64_t cap_id);
 
-int ipc_notification_create(uint64_t* cap_id_out);
-int ipc_notify(uint64_t notif_cap_id, uint64_t bits);
-
 int ipc_bind(uint64_t port_cap, uint64_t chan_cap, uint64_t key);
-int ipc_wait(uint64_t port_cap, struct ipc_event* out_event, int timeout_ms);
+int ipc_wait(uint64_t port_cap, struct port_event* out_event, int timeout_ms);
 
 int ipc_send(
     uint64_t chan_cap,
     const void* data,
     size_t len,
     const uint64_t* caps,
-    size_t num_caps,
-    int timeout_ms
+    size_t num_caps
 );
 
 int ipc_recv(
@@ -107,5 +112,15 @@ int ipc_recv_msg(
     size_t* recv_len,
     size_t* recv_caps
 );
+
+int ipc_send_vector(
+    uint64_t chan_cap,
+    struct ipc_iovec* vectors,
+    size_t vec_count,
+    const uint64_t* caps,
+    size_t cap_count
+);
+
+int ipc_peek(uint64_t chan_cap, size_t* required_data_len, size_t* required_cap_count);
 
 #endif

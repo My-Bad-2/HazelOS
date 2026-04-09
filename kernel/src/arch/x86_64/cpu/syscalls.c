@@ -123,41 +123,39 @@ static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* re
     int status = 0;
 
     switch (operation) {
-        case 0x01:  // SYS_IPC_CHANNEL_CREATE
-            status = sys_ipc_create_channel((uint64_t*)regs->rdi);
+        case 0x01:  // SYS_IPC_ENDPOINT_CREATE
+            status = sys_endpoint_create((uint64_t*)regs->rdi, (uint64_t*)regs->rsi);
             break;
         case 0x02:  // SYS_IPC_PORT_CREATE
-            status = sys_ipc_port_create((uint64_t*)regs->rdi);
+            status = sys_port_create((uint64_t*)regs->rdi);
             break;
-        case 0x03:  // SYS_IPC_BIND
-            status = sys_ipc_bind(regs->rdi, regs->rsi, regs->rdx);
+        case 0x03:  // SYS_IPC_PORT_BIND
+            status = sys_port_bind(regs->rdi, regs->rsi, regs->rdx);
             break;
-        case 0x04:  // SYS_IPC_CALL
-            status = sys_ipc_call(
+        case 0x04:  // SYS_IPC_PORT_WAIT
+            status = sys_port_wait(regs->rdi, (struct port_event*)regs->rsi, (int)regs->rdx);
+            break;
+        case 0x05:  // SYS_IPC_CHANNEL_WRITE
+            status = sys_channel_write(regs->rdi, (struct ipc_msg*)regs->rsi);
+            break;
+        case 0x06:  // SYS_IPC_CHANNEL_READ
+            status = sys_channel_read(
                 regs->rdi,
-                (struct ipc_msg_info*)regs->rsi,
-                (struct ipc_msg_info*)regs->rdx,
-                (int)regs->rdx,
-                regs
+                (struct ipc_msg*)regs->rsi,
+                (uint32_t*)regs->rdx,
+                (int)regs->r10
             );
             break;
-        case 0x05:  // SYS_IPC_WAIT
-            status = sys_ipc_wait(regs->rdi, (struct ipc_event*)regs->rsi, (int)regs->rdx);
-            break;
-        case 0x06:  // SYS_IPC_SEND
-            status = sys_ipc_send(regs->rdi, (struct ipc_msg_info*)regs->rsi, (int)regs->rdx, regs);
-            break;
-        case 0x07:  // SYS_IPC_RECV
-            status = sys_ipc_recv(regs->rdi, (struct ipc_msg_info*)regs->rsi, (int)regs->rdx, regs);
-            break;
-        case 0x08:  // SYS_IPC_NOTIFICATION_CREATE
-            status = sys_ipc_notification_create((uint64_t*)regs->rdi);
-            break;
-        case 0x09:  // SYS_IPC_NOTIFY
-            status = sys_ipc_notify(regs->rdi, regs->rsi);
+        case 0x07:  // SYS_IPC_CHANNEL_CALL
+            status = sys_channel_call(
+                regs->rdi,
+                (struct ipc_msg*)regs->rsi,
+                (struct ipc_msg*)regs->rdx,
+                (int)regs->r10
+            );
             break;
         default:
-            status = ERR_DENIED;
+            status = ERR_BAD_SYSCALL;
             break;
     }
 

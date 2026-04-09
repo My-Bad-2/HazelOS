@@ -24,15 +24,13 @@ extern "C" {
 #define SYS_CAP_ALIAS    (SYS_CATEGORY_CAP | 0x05)
 
 // IPC syscalls
-#define SYS_IPC_CHANNEL_CREATE      (SYS_CATEGORY_IPC | 0x01)
-#define SYS_IPC_PORT_CREATE         (SYS_CATEGORY_IPC | 0x02)
-#define SYS_IPC_BIND                (SYS_CATEGORY_IPC | 0x03)
-#define SYS_IPC_CALL                (SYS_CATEGORY_IPC | 0x04)
-#define SYS_IPC_WAIT                (SYS_CATEGORY_IPC | 0x05)
-#define SYS_IPC_SEND                (SYS_CATEGORY_IPC | 0x06)
-#define SYS_IPC_RECV                (SYS_CATEGORY_IPC | 0x07)
-#define SYS_IPC_NOTIFICATION_CREATE (SYS_CATEGORY_IPC | 0x08)
-#define SYS_IPC_NOTIFY              (SYS_CATEGORY_IPC | 0x09)
+#define SYS_IPC_ENDPOINT_CREATE (SYS_CATEGORY_IPC | 0x01)
+#define SYS_IPC_PORT_CREATE     (SYS_CATEGORY_IPC | 0x02)
+#define SYS_IPC_PORT_BIND       (SYS_CATEGORY_IPC | 0x03)
+#define SYS_IPC_PORT_WAIT       (SYS_CATEGORY_IPC | 0x04)
+#define SYS_IPC_CHANNEL_WRITE   (SYS_CATEGORY_IPC | 0x05)
+#define SYS_IPC_CHANNEL_READ    (SYS_CATEGORY_IPC | 0x06)
+#define SYS_IPC_CHANNEL_CALL    (SYS_CATEGORY_IPC | 0x07)
 
 // Scheduling/Thread/Process syscalls
 #define SYS_SCHED_SPAWN_PROCESS (SYS_CATEGORY_SCHED | 0x01)

@@ -7,16 +7,16 @@
 #include "libs/slist.h"
 #include "libs/spinlock.h"
 
-#define CAP_TYPE_NONE         0
-#define CAP_TYPE_THREAD       1
-#define CAP_TYPE_PROCESS      2
-#define CAP_TYPE_CHANNEL      3
-#define CAP_TYPE_PORT_SET     4
-#define CAP_TYPE_NOTIFICATION 5
-#define CAP_TYPE_REPLY        6
-#define CAP_TYPE_CNODE        7
-#define CAP_TYPE_VSPACE       8
-#define CAP_TYPE_WEAK         15
+#define CAP_TYPE_NONE     0
+#define CAP_TYPE_THREAD   1
+#define CAP_TYPE_PROCESS  2
+#define CAP_TYPE_CHANNEL  3
+#define CAP_TYPE_PORT     4
+#define CAP_TYPE_ENDPOINT 5
+#define CAP_TYPE_REPLY    6
+#define CAP_TYPE_CNODE    7
+#define CAP_TYPE_VSPACE   8
+#define CAP_TYPE_WEAK     15
 
 #define RIGHT_READ         (1 << 0)
 #define RIGHT_WRITE        (1 << 1)
@@ -159,6 +159,8 @@ int cap_move(
     uint64_t* new_cap_id
 );
 int cspace_find_by_koid(struct cnode* root, uint64_t target_koid, uint64_t* out_cap_id);
+void cap_object_ref(uint8_t type, void* obj);
+void cap_object_unref(uint8_t type, void* obj);
 
 int sys_cap_delegate(
     struct cnode* root_cnode,

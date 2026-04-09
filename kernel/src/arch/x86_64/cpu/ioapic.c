@@ -102,7 +102,7 @@ static ioapic_t* require_ioapic(uint32_t gsi) {
 
 static void map_ioapic_mmio(ioapic_t* ioapic, size_t index) {
     uintptr_t phys_base = align_down((uintptr_t)ioapic->desc.address, PAGE_SIZE_SMALL);
-    void* virt          = NULL;
+    void* virt          = nullptr;
 
     // Check if another IOAPIC shares the same page block to avoid duplicate mappings
     for (size_t i = 0; i < index; ++i) {
@@ -115,7 +115,7 @@ static void map_ioapic_mmio(ioapic_t* ioapic, size_t index) {
     if (!virt) {
         virt = vmalloc(
             kernel_space,
-            NULL,
+            nullptr,
             PAGE_SIZE_SMALL,
             VMM_FLAG_MMIO | VMM_FLAG_DEMAND,
             CACHE_MMIO,
@@ -214,11 +214,11 @@ void ioapic_init(void) {
 }
 
 bool ioapic_is_initialized(void) {
-    return ioapics != NULL;
+    return ioapics != nullptr;
 }
 
 bool ioapic_is_valid_irq(uint32_t gsi) {
-    return find_ioapic_for_gsi(gsi) != NULL;
+    return find_ioapic_for_gsi(gsi) != nullptr;
 }
 
 uint32_t ioapic_get_gsi(uint8_t irq) {

@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "core/errors.h"
 #include "cpu/cpu.h"
 #include "memory/memory.h"
 
@@ -43,7 +44,7 @@ size_t copy_from_user(void* dest, const void* src, size_t len) {
     memcpy(dest, src, len);
     clac();
 
-    return 0;
+    return ERR_OK;
 }
 
 size_t copy_to_user(void* dest, const void* src, size_t len) {
@@ -55,5 +56,5 @@ size_t copy_to_user(void* dest, const void* src, size_t len) {
     memcpy(dest, src, len);
     clac();
 
-    return 0;
+    return ERR_OK;
 }
