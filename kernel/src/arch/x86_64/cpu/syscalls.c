@@ -187,7 +187,7 @@ dispatch_sched_syscall(uint64_t operation, struct syscall_regs* regs, struct pro
                 (uint64_t*)regs->r9
             );
             break;
-        case 0x03:
+        case 0x03:  // SYS_SCHED_CLONE
             struct clone_args args;
             copy_from_user(&args, (struct clone_args*)regs->r10, sizeof(struct clone_args));
             res = (uint64_t)sys_clone(
@@ -200,6 +200,12 @@ dispatch_sched_syscall(uint64_t operation, struct syscall_regs* regs, struct pro
                 args.out_cnode_cap,
                 args.out_vspace_cap
             );
+            break;
+        case 0x04:  // SYS_SCHED_YIELD
+            sys_sched_yield();
+            break;
+        case 0x05:  // SYS_SCHED_SLEEP
+            res = (uint64_t)sys_thread_sleep(regs->rdi);
             break;
         default:
             res = (uint64_t)ERR_DENIED;

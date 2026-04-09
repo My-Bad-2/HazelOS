@@ -38,6 +38,8 @@ extern "C" {
 #define SYS_SCHED_SPAWN_PROCESS (SYS_CATEGORY_SCHED | 0x01)
 #define SYS_SCHED_SPAWN_THREAD  (SYS_CATEGORY_SCHED | 0x02)
 #define SYS_SCHED_CLONE         (SYS_CATEGORY_SCHED | 0x03)
+#define SYS_SCHED_YIELD         (SYS_CATEGORY_SCHED | 0x04)
+#define SYS_SCHED_SLEEP         (SYS_CATEGORY_SCHED | 0x05)
 
 // VSpace Syscalls
 #define SYS_MEM_MMAP            (SYS_CATEGORY_MEM | 0x01)
@@ -102,6 +104,7 @@ int64_t sys_clone(
 );
 
 void sys_sched_yield(void);
+int64_t sys_thread_sleep(uint64_t ns);
 
 [[noreturn]] void thread_exit(int exit_code);
 [[noreturn]] void thread_exit(int exit_code);

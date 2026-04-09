@@ -8,6 +8,7 @@
 #include "core/syscalls.h"
 #include "cpu/smp.h"
 #include "libs/kobject.h"
+#include "libs/log.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
@@ -299,4 +300,16 @@ int64_t sys_clone(
     if (!(flags & CLONE_INTO_CURRENT_PROCESS)) kref_put(&target_proc->kobj, process_release);
 
     return ERR_OK;
+}
+
+void sys_sched_yield(void) {
+    scheduler_yield();
+}
+
+#define NS_PER_MS 1000000ul
+
+int64_t sys_thread_sleep(uint64_t ns) {
+    uint64_t ms = ns / NS_PER_MS;
+    if (ms == 0) ms = 1;
+    return scheduler_sleep((int64_t)ms);
 }

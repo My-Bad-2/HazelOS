@@ -13,6 +13,8 @@ extern "C" {
 #define SYS_SCHED_SPAWN_PROCESS (SYS_CATEGORY_SCHED | 0x01)
 #define SYS_SCHED_SPAWN_THREAD  (SYS_CATEGORY_SCHED | 0x02)
 #define SYS_SCHED_CLONE         (SYS_CATEGORY_SCHED | 0x03)
+#define SYS_SCHED_YIELD         (SYS_CATEGORY_SCHED | 0x04)
+#define SYS_SCHED_SLEEP         (SYS_CATEGORY_SCHED | 0x05)
 
 #define SYS_WRITE    0x01
 #define SYS_MMAP     0x09
@@ -60,6 +62,9 @@ int64_t clone(
     uint64_t* out_cnode_cap,
     uint64_t* out_vspace_cap
 );
+
+void yield(void);
+int64_t thread_sleep(uint64_t ns);
 
 #ifdef __cplusplus
 }

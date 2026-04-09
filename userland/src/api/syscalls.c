@@ -76,3 +76,11 @@ int64_t clone(
         (long)&args
     );
 }
+
+void yield(void) {
+    syscall(SYS_SCHED_YIELD, 0);
+}
+
+int64_t thread_sleep(uint64_t ns) {
+    return syscall(SYS_SCHED_SLEEP, (long)ns);
+}
