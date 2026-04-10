@@ -133,7 +133,13 @@ static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* re
             status = sys_port_bind(regs->rdi, regs->rsi, regs->rdx);
             break;
         case 0x04:  // SYS_IPC_PORT_WAIT
-            status = sys_port_wait(regs->rdi, (struct port_event*)regs->rsi, (int)regs->rdx);
+            status = sys_port_wait(
+                regs->rdi,
+                (struct port_event*)regs->rsi,
+                (size_t)regs->rdx,
+                (size_t*)regs->r10,
+                (int)regs->r8
+            );
             break;
         case 0x05:  // SYS_IPC_CHANNEL_WRITE
             status = sys_channel_write(regs->rdi, (struct ipc_msg*)regs->rsi);

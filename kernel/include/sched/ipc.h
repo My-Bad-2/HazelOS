@@ -64,7 +64,13 @@ void ipc_init(void);
 int sys_endpoint_create(uint64_t* cap0_out, uint64_t* cap1_out);
 int sys_port_create(uint64_t* cap_out);
 int sys_port_bind(uint64_t port_cap, uint64_t ep_cap, uint64_t key);
-int sys_port_wait(uint64_t port_cap, struct port_event* out_event, int timeout_ms);
+int sys_port_wait(
+    uint64_t port_cap,
+    struct port_event* out_events,
+    size_t max_events,
+    size_t* events_returned,
+    int timeout_ms
+);
 
 int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* msg);
 int sys_channel_read(uint64_t ep_cap_id, struct ipc_msg* msg, uint32_t* badge_out, int timeout_ms);

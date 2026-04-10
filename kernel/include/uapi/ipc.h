@@ -11,8 +11,9 @@
 #define IPC_CAP_OP_COPY 0
 #define IPC_CAP_OP_MOVE 1
 
-#define IPC_FLAG_PEEK  (1 << 0)
-#define IPC_FLAG_IOVEC (1 << 1)
+#define IPC_FLAG_PEEK   (1 << 0)
+#define IPC_FLAG_IOVEC  (1 << 1)
+#define IPC_FLAG_URGENT (1 << 2)
 
 struct cap_disp {
     uint64_t cap_id;

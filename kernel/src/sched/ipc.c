@@ -408,7 +408,11 @@ int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {
 
     acquire_qspinlock(&peer->lock);
 
-    dlist_add_tail(&kmsg->node, &peer->msg_queue);
+    if (msg.flags & IPC_FLAG_URGENT)
+        dlist_add(&kmsg->node, &peer->msg_queue);
+    else
+        dlist_add_tail(&kmsg->node, &peer->msg_queue);
+
     port_notify(peer->bound_port, &peer->port_state, IPC_SIGNAL_READABLE);
 
     if (!dlist_empty(&peer->blocked_receivers)) {
@@ -572,7 +576,13 @@ int sys_channel_call(uint64_t ep_cap_id, struct ipc_msg* tx, struct ipc_msg* rx,
     return ERR_OK;
 }
 
-int sys_port_wait(uint64_t port_cap, struct port_event* out_event, int timeout_ms) {
+int sys_port_wait(
+    uint64_t port_cap,
+    struct port_event* out_events,
+    size_t max_events,
+    size_t* events_returned,
+    int timeout_ms
+) {
     thread_t* me    = smp_current_core()->curr_thread;
     process_t* proc = me->owner;
 
@@ -581,7 +591,8 @@ int sys_port_wait(uint64_t port_cap, struct port_event* out_event, int timeout_m
 
     struct ipc_port* set =
         (struct ipc_port*)atomic_load_explicit(&p_cap->object_ptr, memory_order_acquire);
-    int ret = ERR_OK;
+    int ret      = ERR_OK;
+    size_t count = 0;
 
     acquire_qspinlock(&set->lock);
 
@@ -610,28 +621,31 @@ int sys_port_wait(uint64_t port_cap, struct port_event* out_event, int timeout_m
         }
     }
 
-    struct port_event evt;
-    bool has_evt = false;
+    if (ret == ERR_OK) {
+        struct dlist_head *curr, *next;
+        dlist_for_each_safe(curr, next, &set->event_queue) {
+            if (count >= max_events) break;  // Array is full!
 
-    if (ret == ERR_OK && !dlist_empty(&set->event_queue)) {
-        struct dlist_head* first    = set->event_queue.next;
-        struct ipc_port_object* obj = dlist_entry(first, struct ipc_port_object, port_node);
+            struct ipc_port_object* obj = dlist_entry(curr, struct ipc_port_object, port_node);
+            dlist_del_init(curr);
+            obj->in_port = false;
 
-        dlist_del_init(first);
-        obj->in_port = false;
+            if (out_events) {
+                struct port_event evt = {
+                    .key     = obj->user_key,
+                    .signals = obj->pending_signals,
+                };
 
-        if (out_event) {
-            evt.key     = obj->user_key;
-            evt.signals = obj->pending_signals;
-            has_evt     = true;
+                copy_to_user(&out_events[count], &evt, sizeof(struct port_event));
+            }
+
+            count++;
         }
     }
 
     release_qspinlock(&set->lock);
 
-    if (has_evt) {
-        copy_to_user(out_event, &evt, sizeof(struct port_event));
-    }
+    if (events_returned) copy_to_user(events_returned, &count, sizeof(size_t));
 
     return ret;
 }

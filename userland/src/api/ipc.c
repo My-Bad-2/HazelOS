@@ -32,16 +32,47 @@ int ipc_bind(uint64_t port_cap, uint64_t chan_cap, uint64_t key) {
     return (int)syscall(SYS_IPC_PORT_BIND, (long)port_cap, (long)chan_cap, (long)key);
 }
 
+int ipc_wait_many(
+    uint64_t port_cap,
+    struct port_event* events,
+    size_t max_events,
+    size_t* out_count,
+    int timeout_ms
+) {
+    return (int)syscall(
+        SYS_IPC_PORT_WAIT,
+        (long)port_cap,
+        (long)events,
+        (long)max_events,
+        (long)out_count,
+        timeout_ms
+    );
+}
+
 int ipc_wait(uint64_t port_cap, struct port_event* out_event, int timeout_ms) {
     struct port_event zx_event;
-    int ret = (int)syscall(SYS_IPC_PORT_WAIT, (long)port_cap, (long)&zx_event, (long)timeout_ms);
+    size_t returned = 0;
 
-    if (ret == 0 && out_event) {
+    int ret = ipc_wait_many(port_cap, &zx_event, 1, &returned, timeout_ms);
+
+    if (ret == 0 && returned > 0 && out_event) {
         out_event->key     = zx_event.key;
         out_event->signals = zx_event.signals;
     }
 
     return ret;
+}
+
+int ipc_send_urgent(uint64_t chan_cap, const void* data, size_t len) {
+    struct ipc_msg msg = {
+        .data      = (void*)data,
+        .data_len  = len,
+        .caps      = nullptr,
+        .cap_count = 0,
+        .flags     = IPC_FLAG_URGENT
+    };
+
+    return (int)syscall(SYS_IPC_CHANNEL_WRITE, (long)chan_cap, (long)&msg);
 }
 
 int ipc_send(

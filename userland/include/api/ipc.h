@@ -21,8 +21,9 @@
 #define IPC_CAP_OP_COPY 0
 #define IPC_CAP_OP_MOVE 1
 
-#define IPC_FLAG_PEEK  (1 << 0)
-#define IPC_FLAG_IOVEC (1 << 1)
+#define IPC_FLAG_PEEK   (1 << 0)
+#define IPC_FLAG_IOVEC  (1 << 1)
+#define IPC_FLAG_URGENT (1 << 2)
 
 struct cap_disp {
     uint64_t cap_id;
@@ -56,7 +57,16 @@ int ipc_port_create(uint64_t* port_cap_out);
 int ipc_close(uint64_t cap_id);
 
 int ipc_bind(uint64_t port_cap, uint64_t chan_cap, uint64_t key);
+
 int ipc_wait(uint64_t port_cap, struct port_event* out_event, int timeout_ms);
+int ipc_wait_many(
+    uint64_t port_cap,
+    struct port_event* events,
+    size_t max_events,
+    size_t* out_count,
+    int timeout_ms
+);
+int ipc_send_urgent(uint64_t chan_cap, const void* data, size_t len);
 
 int ipc_send(
     uint64_t chan_cap,
