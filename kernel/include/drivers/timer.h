@@ -5,8 +5,6 @@
 #include <stdint.h>
 
 #include "drivers/arch_timer.h"
-#include "libs/hashtable.h"
-#include "libs/spinlock.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,46 +14,15 @@ extern "C" {
 #define US_PER_SEC 1000000ul
 #define MS_PER_SEC 1000ul
 
-// Level 0 wheel with 256 buckets
-#define TVR_BITS 8
-#define TVR_SIZE (1ul << TVR_BITS)
-#define TVR_MASK (TVR_SIZE - 1)
+void timer_ndelay(size_t ns);
 
-// Level 1-4 wheels with 64 buckets each
-#define TVN_BITS 6
-#define TVN_SIZE (1ul << TVN_BITS)
-#define TVN_MASK (TVN_SIZE - 1)
+static inline void timer_udelay(size_t us) {
+    timer_ndelay(us * (NS_PER_SEC / US_PER_SEC));
+}
 
-typedef void (*timer_callback_t)(void*);
-
-typedef struct {
-    struct hlist_head tv1[TVR_SIZE];
-    struct hlist_head tv2[TVN_SIZE];
-    struct hlist_head tv3[TVN_SIZE];
-    struct hlist_head tv4[TVN_SIZE];
-    struct hlist_head tv5[TVN_SIZE];
-
-    size_t curr_ticks;
-    volatile size_t active_timers;
-
-    qspinlock_t lock;
-    volatile uint32_t next_expires_at;
-} timer_manager_t;
-
-typedef struct {
-    struct hlist_node node;
-
-    uint64_t expires_at;
-    int64_t interval;
-
-    timer_callback_t callback;
-    void* ctx;
-
-    timer_manager_t* owner;
-} timer_event_t;
-
-void timer_mdelay(size_t ms);
-void timer_udelay(size_t us);
+static inline void timer_mdelay(size_t ms) {
+    timer_ndelay(ms * (NS_PER_SEC / MS_PER_SEC));
+}
 
 void timer_configure(timer_mode_t mode, uint8_t vector);
 void timer_start_ms(uint64_t ms);
@@ -63,29 +30,16 @@ void timer_start_us(uint64_t us);
 void timer_start_ns(uint64_t ns);
 
 size_t timer_get_time(void);
-size_t timer_get_time_ms(void);
-size_t timer_get_hz(void);
+
+static inline uint64_t timer_get_time_us(void) {
+    return timer_get_time() / (NS_PER_SEC / US_PER_SEC);
+}
+
+static inline uint64_t timer_get_time_ms(void) {
+    return timer_get_time() / (NS_PER_SEC / MS_PER_SEC);
+}
 
 void timer_init(void);
-
-void timer_manager_init(timer_manager_t* manager);
-void timer_arm_oneshot(
-    timer_manager_t* manager,
-    timer_event_t* timer,
-    int64_t delay_ms,
-    timer_callback_t callback,
-    void* ctx
-);
-void timer_arm_periodic(
-    timer_manager_t* manager,
-    timer_event_t* timer,
-    int64_t interval_ms,
-    timer_callback_t callback,
-    void* ctx
-);
-
-bool timer_cancel(timer_event_t* timer);
-void timer_manager_tick(timer_manager_t* manager);
 
 #ifdef __cplusplus
 }

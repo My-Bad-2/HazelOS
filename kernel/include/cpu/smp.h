@@ -4,7 +4,6 @@
 #include <stdatomic.h>
 #include <stddef.h>
 
-#include "drivers/timer.h"
 #include "libs/kobject.h"
 #include "libs/rb_tree.h"
 #include "libs/spinlock.h"

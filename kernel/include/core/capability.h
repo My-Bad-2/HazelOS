@@ -16,6 +16,7 @@
 #define CAP_TYPE_REPLY    6
 #define CAP_TYPE_CNODE    7
 #define CAP_TYPE_VSPACE   8
+#define CAP_TYPE_TIMER    9
 #define CAP_TYPE_WEAK     15
 
 #define RIGHT_READ         (1 << 0)
@@ -25,6 +26,8 @@
 #define RIGHT_RECEIVE      (1 << 4)
 #define RIGHT_WAIT         (1 << 5)
 #define RIGHT_GRANT        (1 << 6)
+#define RIGHT_TIMER_ARM    (1 << 7)
+#define RIGHT_TIMER_CANCEL (1 << 8)
 #define RIGHT_SIGNAL       (1 << 11)
 #define RIGHT_CLOEXEC      (1 << 13)
 #define RIGHT_CNODE_MUTATE (1 << 14)

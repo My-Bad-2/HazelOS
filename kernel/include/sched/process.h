@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "cpu/syscalls.h"
-#include "drivers/timer.h"
+#include "drivers/ktimer.h"
 #include "libs/dlist.h"
 #include "libs/handles.h"
 #include "libs/kobject.h"
