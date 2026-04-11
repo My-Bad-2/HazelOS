@@ -6,12 +6,6 @@ extern "C" {
 #endif
 
 typedef enum {
-    CLOCK_PIT,
-    CLOCK_HPET,
-    CLOCK_TSC,
-} clock_source_t;
-
-typedef enum {
     TIMER_ONESHOT,
     TIMER_PERIODIC,
     TIMER_TSC_DEADLINE,

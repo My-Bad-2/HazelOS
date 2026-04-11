@@ -15,10 +15,10 @@ SECTIONS
 {
     . = 0xffffffff80000000;
 
-    .requests : {
-        KEEP(*(.requests_start))
-        KEEP(*(.requests))
-        KEEP(*(.requests_end))
+    .limine_requests : {
+        KEEP(*(.limine_requests_start))
+        KEEP(*(.limine_requests))
+        KEEP(*(.limine_requests_end))
     } :requests
 
     /* Align to page boundar */

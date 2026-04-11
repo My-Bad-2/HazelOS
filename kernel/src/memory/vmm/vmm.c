@@ -41,7 +41,6 @@ static void vmm_map_memory(pagemap_t* map) {
                 break;
             case LIMINE_MEMMAP_ACPI_RECLAIMABLE:
             case LIMINE_MEMMAP_ACPI_NVS:
-            case LIMINE_MEMMAP_ACPI_TABLES:
                 should_map = true;
                 cache      = CACHE_ROM;
                 break;

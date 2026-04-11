@@ -482,7 +482,8 @@ void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
     cpu->curr_thread  = idle;
     cpu->thread_count = 0;
 
-    timer_configure(TIMER_PERIODIC, IRQ_TIMER, 1);
+    timer_configure(TIMER_PERIODIC, IRQ_TIMER);
+    timer_start_ms(1);
     KLOG_DEBUG("SCHED: initialzied scheduler on CPU %u\n", cpu->cpu_idx);
 }
 

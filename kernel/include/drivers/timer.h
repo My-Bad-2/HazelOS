@@ -12,6 +12,10 @@
 extern "C" {
 #endif
 
+#define NS_PER_SEC 1000000000ul
+#define US_PER_SEC 1000000ul
+#define MS_PER_SEC 1000ul
+
 // Level 0 wheel with 256 buckets
 #define TVR_BITS 8
 #define TVR_SIZE (1ul << TVR_BITS)
@@ -50,16 +54,18 @@ typedef struct {
     timer_manager_t* owner;
 } timer_event_t;
 
-void timer_set_clock_source(clock_source_t source);
 void timer_mdelay(size_t ms);
 void timer_udelay(size_t us);
-void timer_configure(timer_mode_t mode, uint8_t vector, size_t count);
+
+void timer_configure(timer_mode_t mode, uint8_t vector);
+void timer_start_ms(uint64_t ms);
+void timer_start_us(uint64_t us);
+void timer_start_ns(uint64_t ns);
 
 size_t timer_get_time(void);
 size_t timer_get_time_ms(void);
 size_t timer_get_hz(void);
 
-void timer_tick(void);
 void timer_init(void);
 
 void timer_manager_init(timer_manager_t* manager);

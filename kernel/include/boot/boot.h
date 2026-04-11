@@ -16,6 +16,7 @@ extern volatile struct limine_paging_mode_request paging_mode_request;
 extern volatile struct limine_rsdp_request rsdp_request;
 extern volatile struct limine_framebuffer_request framebuffer_request;
 extern volatile struct limine_module_request module_request;
+extern volatile struct limine_tsc_frequency_request tsc_frequency_request;
 
 #ifdef __cplusplus
 }

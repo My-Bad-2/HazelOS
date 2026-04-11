@@ -5,12 +5,15 @@
 #include <stdio.h>
 
 #include "arch.h"
+#include "boot/boot.h"
 #include "cpu/cpu.h"
 #include "cpu/exception.h"
 #include "cpu/registers.h"
 #include "drivers/arch_timer.h"
 #include "drivers/timer.h"
+#include "drivers/tsc.h"
 #include "libs/log.h"
+#include "libs/math.h"
 #include "libs/mmio.h"
 #include "libs/spinlock.h"
 #include "memory/memory.h"
@@ -21,9 +24,9 @@
 
 #include "internal/lapic.h"
 
-static void* virt_base       = nullptr;
-static uint32_t freq_hz      = 0;
-static uint32_t ticks_per_us = 0;
+static void* virt_base           = nullptr;
+static uint64_t tsc_freq_hz      = 0;
+static uint64_t apic_bus_freq_hz = 0;
 
 static bool x2apic_enabled         = false;
 static bool tsc_deadline_supported = false;
@@ -32,6 +35,15 @@ static bool warned_deadline_mode   = false;
 
 static qspinlock_t lock;
 static timer_mode_t curr_mode;
+
+static uint32_t ns_to_apic_ticks(uint64_t ns) {
+    uint64_t freq_div_16 = apic_bus_freq_hz / 16;
+    return muldiv64(ns, freq_div_16, NS_PER_SEC);
+}
+
+static uint32_t ns_to_tsc_ticks(uint64_t ns) {
+    return muldiv64(ns, tsc_freq_hz, NS_PER_SEC);
+}
 
 static uint32_t lapic_read(size_t offset) {
     if (x2apic_enabled) {
@@ -59,9 +71,7 @@ static irq_return_t apic_error_handler(interrupt_trapframe_t*, void*) {
     lapic_write(LAPIC_REG_ERROR_STATUS, 0);
     uint32_t error_flags = lapic_read(LAPIC_REG_ERROR_STATUS);
 
-    if (!error_flags) {
-        return IRQ_NONE;
-    }
+    if (!error_flags) return IRQ_NONE;
 
     const size_t buf_size = 512;
     char buf[512];
@@ -79,38 +89,14 @@ static irq_return_t apic_error_handler(interrupt_trapframe_t*, void*) {
     } while (0)
 
     APPEND_ERR("\n[APIC ERROR] CPU %d ESR: 0x%08x | Flags: ", arch_get_core_idx(), error_flags);
-
-    if (error_flags & LAPIC_ERR_SEND_CS_ERROR) {
-        APPEND_ERR("[Send Checksum] ");
-    }
-
-    if (error_flags & LAPIC_ERR_RECV_CS_ERROR) {
-        APPEND_ERR("[Recv Checksum] ");
-    }
-
-    if (error_flags & LAPIC_ERR_SEND_ACCEPT_ERROR) {
-        APPEND_ERR("[Send Accept] ");
-    }
-
-    if (error_flags & LAPIC_ERR_RECV_ACCEPT_ERROR) {
-        APPEND_ERR("[Recv Accept] ");
-    }
-
-    if (error_flags & LAPIC_ERR_REDIRECTABLE_IPI) {
-        APPEND_ERR("[Redirectable IPI] ");
-    }
-
-    if (error_flags & LAPIC_ERR_SEND_ILLEGAL_VECTOR) {
-        APPEND_ERR("[Send Illegal Vec] ");
-    }
-
-    if (error_flags & LAPIC_ERR_RECV_ILLEGAL_VECTOR) {
-        APPEND_ERR("[Recv Illegal Vec] ");
-    }
-
-    if (error_flags & LAPIC_ERR_ILLEGAL_REGISTER) {
-        APPEND_ERR("[Illegal Reg Access] ");
-    }
+    if (error_flags & LAPIC_ERR_SEND_CS_ERROR) APPEND_ERR("[Send Checksum] ");
+    if (error_flags & LAPIC_ERR_RECV_CS_ERROR) APPEND_ERR("[Recv Checksum] ");
+    if (error_flags & LAPIC_ERR_SEND_ACCEPT_ERROR) APPEND_ERR("[Send Accept] ");
+    if (error_flags & LAPIC_ERR_RECV_ACCEPT_ERROR) APPEND_ERR("[Recv Accept] ");
+    if (error_flags & LAPIC_ERR_REDIRECTABLE_IPI) APPEND_ERR("[Redirectable IPI] ");
+    if (error_flags & LAPIC_ERR_SEND_ILLEGAL_VECTOR) APPEND_ERR("[Send Illegal Vec] ");
+    if (error_flags & LAPIC_ERR_RECV_ILLEGAL_VECTOR) APPEND_ERR("[Recv Illegal Vec] ");
+    if (error_flags & LAPIC_ERR_ILLEGAL_REGISTER) APPEND_ERR("[Illegal Reg Access] ");
 
     APPEND_ERR("\n");
     KLOG_ERROR("%s", buf);
@@ -120,7 +106,6 @@ static irq_return_t apic_error_handler(interrupt_trapframe_t*, void*) {
 }
 
 static irq_return_t apic_timer_handler(interrupt_trapframe_t*, void*) {
-    timer_tick();
     return IRQ_HANDLED;
 }
 
@@ -292,17 +277,7 @@ void lapic_send_nmi(uint32_t dest_lapic_id) {
     lapic_send_ipi(0, dest_lapic_id, 4);
 }
 
-static uint32_t try_cpuid_frequency(void) {
-    cpuid_registers_t regs = cpu_read_value(CPUID_TIME_INFO);
-
-    if (regs.ecx == 0 || regs.eax == 0 || regs.ebx == 0) {
-        return 0;
-    }
-
-    return regs.ecx;
-}
-
-static uint32_t calibrate_manually(void) {
+static uint64_t calibrate_apic_bus_manually(void) {
     const size_t calibration_ms = 50;
 
     lapic_write(LAPIC_REG_DIVIDE_CONF, TIMER_DIV_16);
@@ -311,37 +286,25 @@ static uint32_t calibrate_manually(void) {
 
     timer_mdelay(calibration_ms);
 
-    uint32_t curr = lapic_read(LAPIC_REG_CURRENT_COUNT);
+    const uint32_t curr = lapic_read(LAPIC_REG_CURRENT_COUNT);
     lapic_write(LAPIC_REG_INIT_COUNT, 0);
 
-    uint32_t ticks         = UINT32_MAX - curr;
-    uint64_t ticks_per_sec = (uint64_t)ticks * (1000 / calibration_ms) * 16;
-
-    return (uint32_t)ticks_per_sec;
+    const uint32_t ticks = UINT32_MAX - curr;
+    return (uint64_t)ticks * (MS_PER_SEC / calibration_ms) * 16;
 }
 
 void lapic_timer_calibrate(void) {
-    freq_hz = try_cpuid_frequency();
+    if (tsc_deadline_supported) tsc_freq_hz = tsc_frequency_request.response->frequency;
 
-    if (freq_hz == 0) {
-        freq_hz = calibrate_manually();
-    }
+    tsc_freq_hz = calibrate_apic_bus_manually();
 
-    if (freq_hz == 0) {
-        if (!warned_no_freq) {
-            warned_no_freq = true;
-            KLOG_WARN("LAPIC: timer calibration failed (freq_hz=0)\n");
-        }
+    if (apic_bus_freq_hz == 0) return;
 
-        return;
-    }
-
-    ticks_per_us = (freq_hz / 16) / 1000000;
-    if (ticks_per_us == 0) {
-        ticks_per_us = 1;
-    }
-
-    KLOG_INFO("LAPIC: timer calibrated freq=%u Hz ticks_per_us=%u\n", freq_hz, ticks_per_us);
+    KLOG_INFO(
+        "LAPIC: Calibrated! APIC Bus = %lu Hz, TSC = %lu Hz\n",
+        apic_bus_freq_hz,
+        tsc_freq_hz
+    );
 }
 
 void lapic_timer_mask(void) {
@@ -352,47 +315,59 @@ void lapic_timer_unmask(void) {
     lapic_write(LAPIC_REG_LVT_TIMER, lapic_read(LAPIC_REG_LVT_TIMER) & ~LVT_MASKED);
 }
 
-void lapic_timer_stop(void) {
+static void lapic_timer_stop(void) {
     lapic_write(LAPIC_REG_INIT_COUNT, 0);
-
-    if (tsc_deadline_supported) {
-        write_msr(X86_MSR_IA32_TSC_DEADLINE, 0);
-    }
+    if (tsc_deadline_supported) write_msr(X86_MSR_IA32_TSC_DEADLINE, 0);
 }
 
-void lapic_timer_start(size_t ticks) {
-    if (tsc_deadline_supported && (lapic_read(LAPIC_REG_LVT_TIMER) & LVT_TIMER_MODE_TSC_DEADLINE)) {
-        write_msr(X86_MSR_IA32_TSC_DEADLINE, ticks);
+static void lapic_timer_start_ns(uint64_t ns) {
+    if (curr_mode == TIMER_TSC_DEADLINE && tsc_deadline_supported) {
+        uint64_t absolute_deadline = tsc_read() + ns_to_tsc_ticks(ns);
+        write_msr(X86_MSR_IA32_TSC_DEADLINE, absolute_deadline);
     } else {
-        lapic_write(LAPIC_REG_INIT_COUNT, (uint32_t)(ticks * ticks_per_us));
+        uint32_t ticks = ns_to_apic_ticks(ns);
+        lapic_write(LAPIC_REG_INIT_COUNT, ticks ? ticks : 1);
     }
 }
 
-void lapic_configure_timer(timer_mode_t mode, uint8_t vector, uint64_t count) {
-    if (mode != TIMER_TSC_DEADLINE && ticks_per_us == 0) {
-        return;
-    }
-
+static void lapic_configure_timer(timer_mode_t mode, uint8_t vector) {
     lapic_timer_stop();
+    curr_mode = mode;
 
     uint32_t lvt = vector;
-    if (mode == TIMER_PERIODIC) {
+    if (mode == TIMER_PERIODIC)
         lvt |= LVT_TIMER_MODE_PERIODIC;
-    } else if (mode == TIMER_TSC_DEADLINE && tsc_deadline_supported) {
+    else if (mode == TIMER_TSC_DEADLINE && tsc_deadline_supported)
         lvt |= LVT_TIMER_MODE_TSC_DEADLINE;
-    } else {
+    else
         lvt |= LVT_TIMER_MODE_ONESHOT;
-    }
 
     lapic_write(LAPIC_REG_LVT_TIMER, lvt);
     lapic_write(LAPIC_REG_DIVIDE_CONF, TIMER_DIV_16);
-    curr_mode = mode;
+}
 
-    if (mode == TIMER_TSC_DEADLINE && tsc_deadline_supported) {
-        asm volatile("mfence" ::: "memory");
-        write_msr(X86_MSR_IA32_TSC_DEADLINE, count);
-    } else {
-        uint32_t ticks = (uint32_t)(count * ticks_per_us);
-        lapic_write(LAPIC_REG_INIT_COUNT, ticks ? ticks : 1);
-    }
+static void lapic_timer_start_us(uint64_t us) {
+    // us * 1000 = ns
+    lapic_timer_start_ns(us * (US_PER_SEC / MS_PER_SEC));
+}
+
+static void lapic_timer_start_ms(uint64_t ms) {
+    // ms * 1000000 = ns
+    lapic_timer_start_ns(ms * (NS_PER_SEC / MS_PER_SEC));
+}
+
+void timer_configure(timer_mode_t mode, uint8_t vector) {
+    lapic_configure_timer(mode, vector);
+}
+
+void timer_start_ms(uint64_t ms) {
+    lapic_timer_start_ms(ms);
+}
+
+void timer_start_us(uint64_t us) {
+    lapic_timer_start_us(us);
+}
+
+void timer_start_ns(uint64_t ns) {
+    lapic_timer_start_ns(ns);
 }

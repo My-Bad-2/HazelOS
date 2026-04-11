@@ -21,7 +21,7 @@
                 "PARAM_PROJECT_VERSION_PATCH": "1",
                 "PARAM_PROJECT_C_STANDARD_VERSION": "2Y",
                 "PARAM_PROJECT_CXX_STANDARD_VERSION": "26",
-                "PARAM_PROJECT_LIMINE_API_REV": "4",
+                "PARAM_PROJECT_LIMINE_API_REV": "6",
                 "PARAM_PROJECT_ISO_DIR": "${sourceDir}/build/${presetName}/iso",
                 "PARAM_PROJECT_USE_LLVM_LIBC": true
             }

@@ -7,30 +7,30 @@
 [[gnu::used]]
 uint8_t bootstrap_stack[KSTACK_SIZE];
 
-[[gnu::section(".requests"), gnu::used]]
+[[gnu::section(".limine_requests"), gnu::used]]
 volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(LIMINE_API_REVISION);
 
-[[gnu::section(".requests_start"), gnu::used]]
+[[gnu::section(".limine_requests_start"), gnu::used]]
 volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
 
-[[gnu::section(".requests_end"), gnu::used]]
+[[gnu::section(".limine_requests_end"), gnu::used]]
 volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
 
-[[gnu::section(".requests"), gnu::used]]
+[[gnu::section(".limine_requests"), gnu::used]]
 volatile struct limine_memmap_request memmap_request = {
     .id       = LIMINE_MEMMAP_REQUEST_ID,
     .revision = 0,
     .response = nullptr,
 };
 
-[[gnu::section(".requests"), gnu::used]]
+[[gnu::section(".limine_requests"), gnu::used]]
 volatile struct limine_hhdm_request hhdm_request = {
     .id       = LIMINE_HHDM_REQUEST_ID,
     .revision = 0,
     .response = nullptr,
 };
 
-[[gnu::section(".requests"), gnu::used]]
+[[gnu::section(".limine_requests"), gnu::used]]
 volatile struct limine_mp_request mp_request = {
     .id       = LIMINE_MP_REQUEST_ID,
     .revision = 0,
@@ -42,21 +42,21 @@ volatile struct limine_mp_request mp_request = {
 #endif
 };
 
-[[gnu::section(".requests")]]
+[[gnu::section(".limine_requests")]]
 volatile struct limine_executable_address_request kernel_address_request = {
     .id       = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID,
     .revision = 0,
     .response = nullptr,
 };
 
-[[gnu::section(".requests")]]
+[[gnu::section(".limine_requests")]]
 volatile struct limine_executable_file_request kernel_file_request = {
     .id       = LIMINE_EXECUTABLE_FILE_REQUEST_ID,
     .revision = 0,
     .response = nullptr,
 };
 
-[[gnu::section(".requests")]]
+[[gnu::section(".limine_requests")]]
 volatile struct limine_paging_mode_request paging_mode_request = {
     .id       = LIMINE_PAGING_MODE_REQUEST_ID,
     .revision = 0,
@@ -68,25 +68,32 @@ volatile struct limine_paging_mode_request paging_mode_request = {
 #endif
 };
 
-[[gnu::section(".requests")]]
+[[gnu::section(".limine_requests")]]
 volatile struct limine_rsdp_request rsdp_request = {
     .id       = LIMINE_RSDP_REQUEST_ID,
     .revision = 0,
     .response = nullptr,
 };
 
-[[gnu::section(".requests")]]
+[[gnu::section(".limine_requests")]]
 volatile struct limine_framebuffer_request framebuffer_request = {
     .id       = LIMINE_FRAMEBUFFER_REQUEST_ID,
     .revision = 1,
     .response = nullptr,
 };
 
-[[gnu::section(".requests")]]
+[[gnu::section(".limine_requests")]]
 volatile struct limine_module_request module_request = {
     .id                    = LIMINE_MODULE_REQUEST_ID,
     .revision              = 1,
     .response              = nullptr,
     .internal_module_count = 0,
     .internal_modules      = nullptr,
+};
+
+[[gnu::section(".limine_requests")]]
+volatile struct limine_tsc_frequency_request tsc_frequency_request = {
+    .id       = LIMINE_TSC_FREQUENCY_REQUEST_ID,
+    .revision = 1,
+    .response = nullptr,
 };
