@@ -15,6 +15,7 @@ extern "C" {
 #define SYS_CATEGORY_IPC   0x0200
 #define SYS_CATEGORY_SCHED 0x0300
 #define SYS_CATEGORY_MEM   0x0400
+#define SYS_CATEGORY_TIMER 0x0500
 
 // Capability syscalls
 #define SYS_CAP_DELEGATE (SYS_CATEGORY_CAP | 0x01)  // Grant a capability to another CNode
@@ -48,6 +49,11 @@ extern "C" {
 #define SYS_MEM_VSPACE_MUNMAP   (SYS_CATEGORY_MEM | 0x06)
 #define SYS_MEM_VSPACE_MREMAP   (SYS_CATEGORY_MEM | 0x07)
 #define SYS_MEM_VSPACE_MPROTECT (SYS_CATEGORY_MEM | 0x08)
+
+// Timer Syscalls
+#define SYS_TIMER_CREATE (SYS_CATEGORY_TIMER | 0x01)
+#define SYS_TIMER_CANCEL (SYS_CATEGORY_TIMER | 0x02)
+#define SYS_TIMER_SET    (SYS_CATEGORY_TIMER | 0x03)
 
 #define SYS_WRITE 0x01
 #define SYS_CLONE 0x38

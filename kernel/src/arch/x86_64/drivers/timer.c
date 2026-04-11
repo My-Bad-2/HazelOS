@@ -1,5 +1,6 @@
 #include "drivers/timer.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 
 #include "arch.h"
@@ -11,12 +12,43 @@
 #include "drivers/tsc.h"
 #include "libs/log.h"
 #include "libs/math.h"
+#include "sched/scheduler.h"
+
+#include "drivers/internal/hr_timer.h"
+#include "drivers/internal/lr_timer.h"
+
+#define JIFFY_NS (NS_PER_SEC / MS_PER_SEC)
 
 static uint64_t tsc_freq_hz   = 0;
 static uint64_t tsc_boot_time = 0;
 
 static irq_return_t timer_handler(interrupt_trapframe_t*, void*) {
-    timer_manager_tick(smp_current_core()->timer_manager);
+    per_cpu_data_t* cpu    = smp_current_core();
+    bool trigger_scheduler = false;
+
+    uint64_t now_ns = timer_get_time();
+    if (now_ns >= cpu->next_jiffy_tick_ns) {
+        lrtimer_tick(cpu->lrtimer_manager);
+
+        uint64_t missed_ticks = (now_ns - cpu->next_jiffy_tick_ns) / JIFFY_NS;
+        cpu->next_jiffy_tick_ns += (missed_ticks + 1) * JIFFY_NS;
+
+        trigger_scheduler = true;
+    }
+
+    hrtimer_interrupt_tick(cpu->hrtimer_manager);
+    uint64_t next_hr_ns =
+        atomic_load_explicit(&cpu->hrtimer_manager->next_expires_ns, memory_order_acquire);
+    uint64_t next_event_ns =
+        (next_hr_ns < cpu->next_jiffy_tick_ns) ? next_hr_ns : cpu->next_jiffy_tick_ns;
+
+    now_ns = timer_get_time();
+    if (next_event_ns > now_ns)
+        timer_start_ns(next_event_ns - now_ns);
+    else
+        timer_start_ns(1);
+
+    if (trigger_scheduler) scheduler_tick();
     return IRQ_HANDLED;
 }
 

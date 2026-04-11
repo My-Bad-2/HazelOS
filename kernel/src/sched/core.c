@@ -218,14 +218,20 @@ static int internal_sleep_timeout(int64_t timeout_ms, thread_state_t sleep_state
     curr->state            = sleep_state;
     cpu->reschedule_needed = true;
 
-    timer_arm_oneshot(cpu->timer_manager, &curr->sleep_timer, timeout_ms, sleep_callback, curr);
+    lrtimer_arm_oneshot(
+        cpu->lrtimer_manager,
+        &curr->sleep_timer,
+        (uint64_t)timeout_ms,
+        sleep_callback,
+        curr
+    );
     release_qspinlock(&cpu->lock);
 
     schedule();
 
     arch_disable_interrupts();
     cpu                = smp_current_core();
-    bool woke_up_early = timer_cancel(&curr->sleep_timer);
+    bool woke_up_early = lrtimer_cancel(&curr->sleep_timer);
     arch_enable_interrupts();
 
     if (woke_up_early) {
@@ -444,6 +450,11 @@ void scheduler_init_kernel_process(void) {
     if (!kernel_proc) PANIC("SCHED: failed to create kernel process\n");
 }
 
+void scheduler_tick(void) {
+    rcu_check_callbacks();
+    schedule();
+}
+
 void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
     cpu->cfs_tree = RB_ROOT_CACHED;
     cpu->dl_tree  = RB_ROOT_CACHED;
@@ -455,9 +466,10 @@ void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
     cpu->rt_bitmap[1]    = 0;
     cpu->rt_thread_count = 0;
 
-    cpu->min_vruntime      = 0;
-    cpu->balance_counter   = 0;
-    cpu->reschedule_needed = false;
+    cpu->min_vruntime       = 0;
+    cpu->balance_counter    = 0;
+    cpu->reschedule_needed  = false;
+    cpu->next_jiffy_tick_ns = timer_get_time();
     atomic_store_explicit(&cpu->cpu_load, 0, memory_order_relaxed);
 
     thread_t* idle = thread_create(
@@ -482,7 +494,7 @@ void scheduler_init_per_cpu(per_cpu_data_t* cpu) {
     cpu->curr_thread  = idle;
     cpu->thread_count = 0;
 
-    timer_configure(TIMER_PERIODIC, IRQ_TIMER);
+    timer_configure(TIMER_TSC_DEADLINE, IRQ_TIMER);
     timer_start_ms(1);
     KLOG_DEBUG("SCHED: initialzied scheduler on CPU %u\n", cpu->cpu_idx);
 }

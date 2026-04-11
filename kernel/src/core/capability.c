@@ -5,6 +5,7 @@
 
 #include "compiler.h"
 #include "core/errors.h"
+#include "drivers/ktimer.h"
 #include "libs/kobject.h"
 #include "libs/slist.h"
 #include "libs/spinlock.h"
@@ -60,6 +61,7 @@ static const kobj_release_fn destructor_table[] = {
     [CAP_TYPE_THREAD]   = thread_release,
     [CAP_TYPE_PROCESS]  = process_release,
     [CAP_TYPE_VSPACE]   = vmm_space_release,
+    [CAP_TYPE_TIMER]    = ktimer_release,
 };
 
 void cap_object_unref(uint8_t type, void* obj) {

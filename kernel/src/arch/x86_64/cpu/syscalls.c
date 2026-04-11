@@ -10,6 +10,7 @@
 #include "cpu/registers.h"
 #include "cpu/smp.h"
 #include "cpu/syscalls.h"
+#include "drivers/ktimer.h"
 #include "libs/log.h"
 #include "memory/vma.h"
 #include "sched/ipc.h"
@@ -259,6 +260,27 @@ dispatch_mem_syscall(uint64_t operation, struct syscall_regs* regs, struct proce
     return res;
 }
 
+static uint64_t dispatch_timer_syscall(uint64_t operation, struct syscall_regs* regs) {
+    uint64_t res = 0;
+
+    switch (operation) {
+        case 0x01:  // SYS_TIMER_CREATE
+            res = (uint64_t)sys_timer_create((uint64_t*)regs->rdi);
+            break;
+        case 0x02:  // SYS_TIMER_CANCEL
+            res = (uint64_t)sys_timer_cancel(regs->rdi);
+            break;
+        case 0x03:  // SYS_TIMER_SET
+            res = (uint64_t)sys_timer_set(regs->rdi, regs->rsi, regs->rdx);
+            break;
+        default:
+            res = (uint64_t)ERR_DENIED;
+            break;
+    }
+
+    return res;
+}
+
 static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process*) {
     uint64_t res = 0;
     switch (regs->rax) {
@@ -297,6 +319,9 @@ uint64_t syscall_dispatcher(struct syscall_regs* regs) {
             break;
         case SYS_CATEGORY_MEM:
             res = dispatch_mem_syscall(operation, regs, proc);
+            break;
+        case SYS_CATEGORY_TIMER:
+            res = dispatch_timer_syscall(operation, regs);
             break;
         default:
             res = dispatch_misc_syscall(regs, proc);

@@ -116,7 +116,7 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] thread {
     struct dlist_head process_node;
     struct dlist_head wait_node;
 
-    timer_event_t sleep_timer;
+    struct lrtimer_event sleep_timer;
     struct thread_ipc_state ipc_state;
     struct wait_queue join_queue;
     qspinlock_t lock;

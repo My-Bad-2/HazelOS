@@ -56,12 +56,14 @@ typedef struct [[gnu::aligned(CACHE_LINE_SIZE)]] per_cpu_data {
 
     struct rcu_data* rcu;
 
-    timer_manager_t* timer_manager;
+    struct lrtimer_manager* lrtimer_manager;
+    struct hrtimer_manager* hrtimer_manager;
 
     atomic_size_t cpu_load;
     size_t last_load_update;  // Timestamp of last update
     size_t runnable_sum;      // Accumulated runnable time in current window
     size_t period_contrib;    // Partial time in current 1ms window
+    size_t next_jiffy_tick_ns;
 
     uint32_t thread_count;
     uint32_t balance_counter;

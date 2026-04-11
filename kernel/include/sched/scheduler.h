@@ -18,6 +18,7 @@ void scheduler_arch_init(void);
 void scheduler_init_kernel_process(void);
 void scheduler_init_per_cpu(struct per_cpu_data* cpu);
 bool scheduler_is_initialized(void);
+void scheduler_tick(void);
 
 void scheduler_add_thread(thread_t* t);
 void scheduler_remove_thread(thread_t* t);

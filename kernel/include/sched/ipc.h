@@ -60,6 +60,7 @@ struct thread_ipc_state {
 };
 
 void ipc_init(void);
+void port_notify(struct ipc_port* port, struct ipc_port_object* obj, uint32_t signals);
 
 int sys_endpoint_create(uint64_t* cap0_out, uint64_t* cap1_out);
 int sys_port_create(uint64_t* cap_out);

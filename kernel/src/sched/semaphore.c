@@ -94,8 +94,8 @@ int sema_down_timeout(struct semaphore* sem, int64_t timeout_ms) {
     cpu->reschedule_needed = true;
 
     if (timeout_ms > 0)
-        timer_arm_oneshot(
-            cpu->timer_manager,
+        lrtimer_arm_oneshot(
+            cpu->lrtimer_manager,
             &curr->sleep_timer,
             timeout_ms,
             sema_sleep_callback,
@@ -109,7 +109,7 @@ int sema_down_timeout(struct semaphore* sem, int64_t timeout_ms) {
     if (timeout_ms > 0) {
         arch_disable_interrupts();
         cpu              = smp_current_core();
-        bool timer_fired = timer_cancel(&curr->sleep_timer);
+        bool timer_fired = lrtimer_cancel(&curr->sleep_timer);
         arch_enable_interrupts();
 
         if (timer_fired) {

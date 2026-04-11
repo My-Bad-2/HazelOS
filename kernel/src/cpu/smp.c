@@ -16,6 +16,8 @@
 #include "sched/rcu.h"
 #include "sched/scheduler.h"
 
+#include "drivers/internal/hr_timer.h"
+
 extern uint8_t bootstrap_stack[];
 
 static per_cpu_data_t* cpu_datas = nullptr;
@@ -43,9 +45,11 @@ static void init_cpu_state(per_cpu_data_t* cpu) {
 
     create_qspinlock(&cpu->lock);
 
-    cpu->timer_manager = kmalloc(sizeof(timer_manager_t));
+    cpu->lrtimer_manager = kmalloc(sizeof(struct lrtimer_manager));
+    cpu->hrtimer_manager = kmalloc(sizeof(struct hrtimer_manager));
 
-    timer_manager_init(cpu->timer_manager);
+    lrtimer_manager_init(cpu->lrtimer_manager);
+    hrtimer_manager_init(cpu->hrtimer_manager);
     arch_init_cpu_state(cpu);
 }
 

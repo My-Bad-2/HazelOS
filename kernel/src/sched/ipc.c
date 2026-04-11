@@ -10,6 +10,7 @@
 #include "core/errors.h"
 #include "core/syscalls.h"
 #include "cpu/smp.h"
+#include "drivers/ktimer.h"
 #include "libs/spinlock.h"
 #include "sched/scheduler.h"
 #include "uapi/ipc.h"
@@ -42,9 +43,11 @@ void ipc_init(void) {
         0,
         nullptr
     );
+
+    ktimer_init();
 }
 
-static void port_notify(struct ipc_port* port, struct ipc_port_object* obj, uint32_t signals) {
+void port_notify(struct ipc_port* port, struct ipc_port_object* obj, uint32_t signals) {
     if (!port) return;
 
     acquire_qspinlock(&port->lock);
@@ -273,36 +276,50 @@ int sys_port_create(uint64_t* cap_out) {
     return ERR_OK;
 }
 
-int sys_port_bind(uint64_t port_cap, uint64_t ep_cap, uint64_t key) {
+int sys_port_bind(uint64_t port_cap, uint64_t target_cap, uint64_t key) {
     process_t* proc = smp_current_core()->curr_thread->owner;
 
     struct capability* p_cap = cap_lookup(proc->root_cnode, port_cap, RIGHT_WRITE);
-    struct capability* e_cap = cap_lookup(proc->root_cnode, ep_cap, RIGHT_WRITE);
+    struct capability* t_cap = cap_lookup(proc->root_cnode, target_cap, RIGHT_WRITE);
 
-    if (!p_cap || !e_cap || p_cap->type != CAP_TYPE_PORT || e_cap->type != CAP_TYPE_ENDPOINT)
-        return ERR_INVALID_CAP;
+    if (!p_cap || !t_cap || p_cap->type != CAP_TYPE_PORT) return ERR_INVALID_CAP;
 
     struct ipc_port* port =
         (struct ipc_port*)atomic_load_explicit(&p_cap->object_ptr, memory_order_acquire);
-    struct ipc_endpoint* ep =
-        (struct ipc_endpoint*)atomic_load_explicit(&e_cap->object_ptr, memory_order_acquire);
 
-    acquire_qspinlock(&ep->lock);
+    if (t_cap->type == CAP_TYPE_ENDPOINT) {
+        struct ipc_endpoint* ep =
+            (struct ipc_endpoint*)atomic_load_explicit(&t_cap->object_ptr, memory_order_acquire);
 
-    if (ep->bound_port) kref_put(&ep->bound_port->refcount, ipc_port_release);
+        acquire_qspinlock(&ep->lock);
 
-    kref_get(&port->refcount);
-    ep->bound_port          = port;
-    ep->port_state.user_key = key;
+        if (ep->bound_port) kref_put(&ep->bound_port->refcount, ipc_port_release);
+        kref_get(&port->refcount);
+        ep->bound_port          = port;
+        ep->port_state.user_key = key;
+        uint32_t signals        = 0;
+        if (!dlist_empty(&ep->msg_queue)) signals |= IPC_SIGNAL_READABLE;
+        if (ep->peer_closed) signals |= IPC_SIGNAL_PEER_CLOSED;
 
-    uint32_t signals = 0;
-    if (!dlist_empty(&ep->msg_queue)) signals |= IPC_SIGNAL_READABLE;
-    if (ep->peer_closed) signals |= IPC_SIGNAL_PEER_CLOSED;
+        if (signals) port_notify(port, &ep->port_state, signals);
 
-    if (signals) port_notify(port, &ep->port_state, signals);
+        release_qspinlock(&ep->lock);
+        return ERR_OK;
+    } else if (t_cap->type == CAP_TYPE_TIMER) {
+        struct kernel_timer* timer =
+            (struct kernel_timer*)atomic_load_explicit(&t_cap->object_ptr, memory_order_acquire);
 
-    release_qspinlock(&ep->lock);
-    return ERR_OK;
+        acquire_qspinlock(&timer->lock);
+        if (timer->bound_port) kref_put(&timer->bound_port->refcount, ipc_port_release);
+        kref_get(&port->refcount);
+
+        timer->bound_port          = port;
+        timer->port_state.user_key = key;
+        release_qspinlock(&timer->lock);
+        return ERR_OK;
+    }
+
+    return ERR_INVALID_CAP;
 }
 
 int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {

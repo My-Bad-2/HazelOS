@@ -1,68 +1,41 @@
 #ifndef KERNEL_DRIVERS_KTIMER_H
 #define KERNEL_DRIVERS_KTIMER_H 1
 
-#include <stddef.h>
 #include <stdint.h>
 
-#include "libs/hashtable.h"
-#include "libs/spinlock.h"
+#include "drivers/timer.h"
+#include "sched/ipc.h"
 
-// Level 0 wheel with 256 buckets
-#define TVR_BITS 8
-#define TVR_SIZE (1ul << TVR_BITS)
-#define TVR_MASK (TVR_SIZE - 1)
+#include "internal/hr_timer.h"
+#include "internal/lr_timer.h"
 
-// Level 1-4 wheels with 64 buckets each
-#define TVN_BITS 6
-#define TVN_SIZE (1ul << TVN_BITS)
-#define TVN_MASK (TVN_SIZE - 1)
+#define HRTIMER_THRESHOLD_NS (NS_PER_SEC / MS_PER_SEC)
 
-typedef void (*timer_callback_t)(void*);
+typedef enum {
+    KTIMER_STATE_UNARMED = 0,
+    KTIMER_STATE_LR,
+    KTIMER_STATE_HR,
+} ktimer_state_t;
 
-typedef struct {
-    struct hlist_head tv1[TVR_SIZE];
-    struct hlist_head tv2[TVN_SIZE];
-    struct hlist_head tv3[TVN_SIZE];
-    struct hlist_head tv4[TVN_SIZE];
-    struct hlist_head tv5[TVN_SIZE];
-
-    uint64_t curr_time_ms;
-
-    volatile uint64_t next_expires_at;
-    volatile size_t active_timers;
-
+struct kernel_timer {
+    struct kobject refcount;
     qspinlock_t lock;
-} timer_manager_t;
 
-typedef struct {
-    struct hlist_node node;
+    struct ipc_port* bound_port;
+    struct ipc_port_object port_state;
 
-    uint64_t expires_at;
-    uint64_t interval;
+    ktimer_state_t state;
+    union {
+        struct lrtimer_event lr;
+        struct hrtimer_event hr;
+    } event;
+};
 
-    timer_callback_t callback;
-    void* ctx;
+void ktimer_init(void);
+void ktimer_release(struct kobject* ref);
 
-    timer_manager_t* owner;
-} timer_event_t;
-
-void timer_manager_init(timer_manager_t* manager);
-void timer_arm_oneshot(
-    timer_manager_t* manager,
-    timer_event_t* timer,
-    uint64_t delay_ms,
-    timer_callback_t callback,
-    void* ctx
-);
-void timer_arm_periodic(
-    timer_manager_t* manager,
-    timer_event_t* timer,
-    uint64_t interval_ms,
-    timer_callback_t callback,
-    void* ctx
-);
-
-bool timer_cancel(timer_event_t* timer);
-void timer_manager_tick(timer_manager_t* manager);
+int sys_timer_create(uint64_t* cap_out);
+int sys_timer_set(uint64_t timer_cap, uint64_t delay_ns, uint64_t interval_ns);
+int sys_timer_cancel(uint64_t timer_cap);
 
 #endif
