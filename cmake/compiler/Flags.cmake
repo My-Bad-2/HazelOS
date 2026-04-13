@@ -66,6 +66,9 @@ set(
     -mno-red-zone
 	-static
 	-std=gnu2y
+	-mpopcnt
+	-mlzcnt
+	-mbmi
 )
 
 set(

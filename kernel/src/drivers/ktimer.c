@@ -33,9 +33,9 @@ void ktimer_init(void) {
 static void timer_fired_callback(void* ctx) {
     struct kernel_timer* timer = (struct kernel_timer*)ctx;
 
-    acquire_qspinlock(&timer->lock);
+    size_t flags = acquire_qinterrupt_lock(&timer->lock);
     if (timer->bound_port) port_notify(timer->bound_port, &timer->port_state, IPC_SIGNAL_READABLE);
-    release_qspinlock(&timer->lock);
+    release_qinterrupt_lock(&timer->lock, flags);
 }
 
 void ktimer_release(struct kobject* ref) {
@@ -62,6 +62,7 @@ int sys_timer_create(uint64_t* cap_out) {
     if (!timer) return ERR_NO_MEM;
 
     memset(timer, 0, sizeof(struct kernel_timer));
+    timer->port_state.auto_clear = IPC_EVENT_EDGE_TRIGGERED;
     kref_init(&timer->refcount, CAP_TYPE_TIMER);
     create_qspinlock(&timer->lock);
 
@@ -94,9 +95,9 @@ int sys_timer_set(uint64_t timer_cap, uint64_t delay_ns, uint64_t interval_ns) {
     struct kernel_timer* timer =
         (struct kernel_timer*)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
 
-    acquire_qspinlock(&timer->lock);
+    size_t flags = acquire_qinterrupt_lock(&timer->lock);
 
-    // Cancel any existing armed timer before modifying the union state
+    // Canacquire_qspinlockcel any existing armed timer before modifying the union state
     if (timer->state == KTIMER_STATE_LR)
         lrtimer_cancel(&timer->event.lr);
     else if (timer->state == KTIMER_STATE_HR)
@@ -148,7 +149,7 @@ int sys_timer_set(uint64_t timer_cap, uint64_t delay_ns, uint64_t interval_ns) {
             );
     }
 
-    release_qspinlock(&timer->lock);
+    release_qinterrupt_lock(&timer->lock, flags);
     return ERR_OK;
 }
 

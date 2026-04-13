@@ -52,6 +52,7 @@ void port_notify(struct ipc_port* port, struct ipc_port_object* obj, uint32_t si
 
     acquire_qspinlock(&port->lock);
     obj->pending_signals |= signals;
+    obj->signal_count++;  // Tracks the overrun/message count
 
     if (!obj->in_port) {
         obj->in_port = true;
@@ -218,6 +219,9 @@ int sys_endpoint_create(uint64_t* cap0_out, uint64_t* cap1_out) {
     create_qspinlock(&ep1->lock);
     dlist_init(&ep1->msg_queue);
     dlist_init(&ep1->blocked_receivers);
+
+    ep0->port_state.auto_clear = IPC_EVENT_LEVEL_TRIGGERED;
+    ep1->port_state.auto_clear = IPC_EVENT_LEVEL_TRIGGERED;
 
     ep0->peer = ep1;
     ep1->peer = ep0;
@@ -522,7 +526,10 @@ int sys_channel_read(
     }
 
     dlist_del_init(&kmsg->node);
-    if (dlist_empty(&ep->msg_queue)) ep->port_state.pending_signals &= ~IPC_SIGNAL_READABLE;
+    if (dlist_empty(&ep->msg_queue)) {
+        ep->port_state.pending_signals &= ~IPC_SIGNAL_READABLE;
+        ep->port_state.signal_count = 0;
+    }
 
     release_qspinlock(&ep->lock);
 
@@ -641,7 +648,7 @@ int sys_port_wait(
     if (ret == ERR_OK) {
         struct dlist_head *curr, *next;
         dlist_for_each_safe(curr, next, &set->event_queue) {
-            if (count >= max_events) break;  // Array is full!
+            if (count >= max_events) break;
 
             struct ipc_port_object* obj = dlist_entry(curr, struct ipc_port_object, port_node);
             dlist_del_init(curr);
@@ -651,9 +658,15 @@ int sys_port_wait(
                 struct port_event evt = {
                     .key     = obj->user_key,
                     .signals = obj->pending_signals,
+                    .count   = obj->signal_count,
                 };
 
                 copy_to_user(&out_events[count], &evt, sizeof(struct port_event));
+            }
+
+            if (obj->auto_clear) {
+                obj->pending_signals = 0;
+                obj->signal_count    = 0;
             }
 
             count++;
@@ -665,4 +678,60 @@ int sys_port_wait(
     if (events_returned) copy_to_user(events_returned, &count, sizeof(size_t));
 
     return ret;
+}
+
+int sys_channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap) {
+    process_t* proc = smp_current_core()->curr_thread->owner;
+
+    struct capability* cap_src = cap_lookup(proc->root_cnode, src_ep_cap, RIGHT_READ);
+    struct capability* cap_dst = cap_lookup(proc->root_cnode, dest_ep_cap, RIGHT_WRITE);
+
+    if (!cap_src || !cap_dst) return ERR_INVALID_CAP;
+    if (cap_src->type != CAP_TYPE_ENDPOINT || cap_dst->type != CAP_TYPE_ENDPOINT)
+        return ERR_INVALID_CAP;
+
+    struct ipc_endpoint* ep_src =
+        (struct ipc_endpoint*)atomic_load_explicit(&cap_src->object_ptr, memory_order_acquire);
+    struct ipc_endpoint* ep_dst =
+        (struct ipc_endpoint*)atomic_load_explicit(&cap_dst->object_ptr, memory_order_acquire);
+
+    acquire_qspinlock(&ep_src->lock);
+    if (dlist_empty(&ep_src->msg_queue)) {
+        release_qspinlock(&ep_src->lock);
+        return ERR_AGAIN;
+    }
+
+    struct ipc_msg_internal* kmsg =
+        dlist_entry(ep_src->msg_queue.next, struct ipc_msg_internal, node);
+    dlist_del_init(&kmsg->node);
+
+    if (dlist_empty(&ep_src->msg_queue)) ep_src->port_state.pending_signals &= ~IPC_SIGNAL_READABLE;
+
+    release_qspinlock(&ep_src->lock);
+
+    acquire_qspinlock(&ep_dst->lock);
+    struct ipc_endpoint* peer = ep_dst->peer;
+
+    if (unlikely(!peer || ep_dst->peer_closed)) {
+        release_qspinlock(&ep_dst->lock);
+        kfree(kmsg);
+        return ERR_IPC_DISCONNECT;
+    }
+
+    acquire_qspinlock(&peer->lock);
+
+    dlist_add_tail(&kmsg->node, &peer->msg_queue);
+    port_notify(peer->bound_port, &peer->port_state, IPC_SIGNAL_READABLE);
+
+    if (!dlist_empty(&peer->blocked_receivers)) {
+        thread_t* t = dlist_entry(peer->blocked_receivers.next, thread_t, wait_node);
+        dlist_del(&t->wait_node);
+        t->ipc_state.status = ERR_OK;
+        scheduler_unblock(t);
+    }
+
+    release_qspinlock(&peer->lock);
+    release_qspinlock(&ep_dst->lock);
+
+    return ERR_OK;
 }

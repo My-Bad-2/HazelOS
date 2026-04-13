@@ -15,6 +15,9 @@
 #define IPC_FLAG_IOVEC  (1 << 1)
 #define IPC_FLAG_URGENT (1 << 2)
 
+#define IPC_EVENT_LEVEL_TRIGGERED false
+#define IPC_EVENT_EDGE_TRIGGERED  true
+
 struct cap_disp {
     uint64_t cap_id;
     uint16_t rights;
@@ -39,7 +42,7 @@ struct ipc_msg {
 struct port_event {
     uint64_t key;
     uint32_t signals;
-    uint32_t reserved;
+    uint32_t count;
 };
 
 #endif

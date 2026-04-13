@@ -264,3 +264,7 @@ int ipc_peek(uint64_t chan_cap, size_t* required_data_len, size_t* required_cap_
 
     return ret;
 }
+
+int channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap) {
+    return syscall(SYS_IPC_CHANNEL_FORWARD, (long)src_ep_cap, (long)dest_ep_cap);
+}

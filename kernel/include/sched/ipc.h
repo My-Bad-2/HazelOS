@@ -30,7 +30,14 @@ struct ipc_port_object {
     struct dlist_head port_node;
     uint64_t user_key;
     uint32_t pending_signals;
+    uint32_t signal_count;
+
     bool in_port;
+
+    // Level-triggerred events remain READABLE as long as there is a message in the queue.
+    // Edge-triggered events should be cleared the moment the userspace thread acknowledges it, and
+    // we need to count how many times the edge was hit before it was acknowledged
+    bool auto_clear;
 };
 
 struct ipc_port {
@@ -76,6 +83,7 @@ int sys_port_wait(
 int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* msg);
 int sys_channel_read(uint64_t ep_cap_id, struct ipc_msg* msg, uint32_t* badge_out, int timeout_ms);
 int sys_channel_call(uint64_t ep_cap_id, struct ipc_msg* tx, struct ipc_msg* rx, int timeout_ms);
+int sys_channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap);
 
 void ipc_endpoint_release(struct kobject* ref);
 void ipc_port_release(struct kobject* ref);

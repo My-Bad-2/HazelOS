@@ -161,6 +161,9 @@ static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* re
                 (int)regs->r10
             );
             break;
+        case 0x08:  // SYS_IPC_CHANNEL_FORWARD
+            status = sys_channel_forward(regs->rdi, regs->rdx);
+            break;
         default:
             status = ERR_BAD_SYSCALL;
             break;

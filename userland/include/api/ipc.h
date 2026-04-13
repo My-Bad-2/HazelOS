@@ -13,6 +13,7 @@
 #define SYS_IPC_CHANNEL_WRITE   (SYS_CATEGORY_IPC | 0x05)
 #define SYS_IPC_CHANNEL_READ    (SYS_CATEGORY_IPC | 0x06)
 #define SYS_IPC_CHANNEL_CALL    (SYS_CATEGORY_IPC | 0x07)
+#define SYS_IPC_CHANNEL_FORWARD (SYS_CATEGORY_IPC | 0x08)
 
 #define IPC_SIGNAL_READABLE    (1ul << 0)
 #define IPC_SIGNAL_WRITABLE    (1ul << 1)
@@ -24,6 +25,9 @@
 #define IPC_FLAG_PEEK   (1 << 0)
 #define IPC_FLAG_IOVEC  (1 << 1)
 #define IPC_FLAG_URGENT (1 << 2)
+
+#define IPC_EVENT_LEVEL_TRIGGERED false
+#define IPC_EVENT_EDGE_TRIGGERED  true
 
 struct cap_disp {
     uint64_t cap_id;
@@ -49,7 +53,7 @@ struct ipc_msg {
 struct port_event {
     uint64_t key;
     uint32_t signals;
-    uint32_t reserved;
+    uint32_t count;
 };
 
 int ipc_channel_create(uint64_t* cap1_out, uint64_t* cap2_out);
@@ -132,5 +136,6 @@ int ipc_send_vector(
 );
 
 int ipc_peek(uint64_t chan_cap, size_t* required_data_len, size_t* required_cap_count);
+int channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap);
 
 #endif
