@@ -13,6 +13,7 @@
 #include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
+#include "memory/vm_object.h"
 #include "memory/vma.h"
 #include "memory/vmm.h"
 
@@ -113,14 +114,24 @@ static void map_ioapic_mmio(ioapic_t* ioapic, size_t index) {
     }
 
     if (!virt) {
+        vm_object_t* vmo = vm_object_create(VM_OBJ_PHYSICAL, PAGE_SIZE_SMALL);
+        if (!vmo) {
+            KLOG_INIT_FAIL();
+            PANIC("Failed to allocate vmo!\n");
+        }
+
         virt = vmalloc(
             kernel_space,
             nullptr,
             PAGE_SIZE_SMALL,
             VMM_FLAG_MMIO | VMM_FLAG_DEMAND,
             CACHE_MMIO,
-            PAGE_SIZE_SMALL
+            PAGE_SIZE_SMALL,
+            vmo,
+            0
         );
+
+        vm_object_deref(vmo);
 
         if (!virt) {
             KLOG_INIT_FAIL();

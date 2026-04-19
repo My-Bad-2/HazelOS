@@ -6,6 +6,7 @@
 
 #include "compiler.h"
 #include "core/capability.h"
+#include "core/errors.h"
 #include "libs/kobject.h"
 #include "libs/log.h"
 #include "libs/math.h"
@@ -25,6 +26,42 @@ static struct vm_space kspace;
 struct vm_space* kernel_space      = &kspace;
 kmem_cache_t* vma_cache            = nullptr;
 static kmem_cache_t* vmspace_cache = nullptr;
+
+static void vmm_free_pending_vmas(struct vm_area* allocated_vma, struct vm_area* allocated_guard) {
+    if (allocated_vma) kmem_cache_free(vma_cache, allocated_vma);
+    if (allocated_guard) kmem_cache_free(vma_cache, allocated_guard);
+}
+
+static struct vm_area* vmm_find_next_vma_after_unsafe(struct vm_space* space, uintptr_t addr) {
+    struct rb_node* node = space->rb_root.rb_node;
+    struct vm_area* next = nullptr;
+
+    while (node) {
+        struct vm_area* curr = rb_entry(node, struct vm_area, rb_node);
+
+        if (curr->start > addr) {
+            next = curr;
+            node = node->rb_left;
+        } else {
+            node = node->rb_right;
+        }
+    }
+
+    return next;
+}
+
+static void vmm_remove_stack_guard_if_present(struct vm_space* space, struct vm_area* vma) {
+    if (!(vma->flags & VMM_FLAG_STACK)) return;
+
+    struct rb_node* prev = rb_prev(&vma->rb_node);
+    if (!prev) return;
+
+    struct vm_area* guard = rb_entry(prev, struct vm_area, rb_node);
+    if (guard->flags != VMM_FLAG_GUARD || guard->end != vma->start) return;
+
+    rb_erase_augmented(&guard->rb_node, &space->rb_root, vma_compute_subtree_gap);
+    kmem_cache_free(vma_cache, guard);
+}
 
 void vma_cache_init(void) {
     vma_cache = kmem_cache_create(
@@ -131,9 +168,13 @@ bool vmm_populate_vma_range(
     cache_type_t cache = (vma->flags & VMM_FLAG_MMIO) ? CACHE_UNCACHEABLE : vma->cache;
     while (addr < end) {
         size_t object_offset = vma->object_offset + (addr - vma->start);
-        uintptr_t phys       = vm_object_get_page(vma->object, object_offset, true, false);
 
-        if (!phys) {
+        uintptr_t phys = 0;
+        int status =
+            vm_object_get_page(vma->object, object_offset, vma->page_shift, true, true, &phys);
+
+        if (unlikely(status != ERR_OK)) {
+            if (status == ERR_AGAIN) return true;
             if (addr > start) vmm_unmap_hardware_range(space, start, addr - start, vma->page_shift);
             return false;
         }
@@ -164,46 +205,45 @@ void* vmalloc(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t alignment
+    size_t alignment,
+    struct vm_object* vmo,
+    size_t vmo_offset
 ) {
     if (unlikely(size == 0)) return nullptr;
+
+    const bool is_stack = (flags & VMM_FLAG_STACK) != 0;
+    if (unlikely(!vmo && !is_stack && !(flags & VMM_FLAG_GUARD))) {
+        KLOG_ERROR("VMM: Attempted to map memory without a backing VMO.");
+        return nullptr;
+    }
 
     alignment = max(alignment, PAGE_SIZE_SMALL);
     size      = align_up(size, PAGE_SIZE_SMALL);
 
-    bool is_fixed = (flags & VMM_FLAG_FIXED) || (flags & VMM_FLAG_FIXED_NOREPLACE);
-    if (unlikely(is_fixed && !hint_addr)) {
-        KLOG_WARN("VMM: VMM_FLAG_FIXED requested but no hint_addr provided");
-        return nullptr;
-    }
+    const bool is_fixed = (flags & VMM_FLAG_FIXED) || (flags & VMM_FLAG_FIXED_NOREPLACE);
+    if (unlikely(is_fixed && !hint_addr)) return nullptr;
 
-    bool is_stack      = (flags & VMM_FLAG_STACK);
-    size_t actual_size = size + (is_stack ? PAGE_SIZE_SMALL : 0);
-
+    size_t actual_size  = size + (is_stack ? PAGE_SIZE_SMALL : 0);
     uintptr_t addr      = (uintptr_t)hint_addr;
     uint8_t final_shift = select_page_shift(size, addr);
     size_t align        = max(1ul << final_shift, alignment);
 
     const bool is_kernel = (space->map == vmm_get_kernel_pagemap());
-
     uintptr_t safe_start = is_kernel ? get_kernel_space_start_limit() : USER_SPACE_START;
     uintptr_t safe_end   = is_kernel ? KERNEL_SPACE_END : get_user_space_end_limit();
 
     if (unlikely(
             is_fixed &&
             (!is_aligned(addr, alignment) || addr < safe_start || addr + actual_size > safe_end)
-        )) {
+        ))
         return nullptr;
-    }
 
     acquire_write(&space->lock);
 
     struct vm_area* allocated_vma   = kmem_cache_alloc(vma_cache);
     struct vm_area* allocated_guard = is_stack ? kmem_cache_alloc(vma_cache) : nullptr;
-
     if (unlikely(!allocated_vma || (is_stack && !allocated_guard))) {
-        if (allocated_vma) kmem_cache_free(vma_cache, allocated_vma);
-        if (allocated_guard) kmem_cache_free(vma_cache, allocated_guard);
+        vmm_free_pending_vmas(allocated_vma, allocated_guard);
         release_write(&space->lock);
         return nullptr;
     }
@@ -228,6 +268,7 @@ void* vmalloc(
 
         if (collision) {
             if (is_fixed) {
+                vmm_free_pending_vmas(allocated_vma, allocated_guard);
                 release_write(&space->lock);
                 return nullptr;
             }
@@ -254,14 +295,13 @@ void* vmalloc(
 
     if (unlikely(!found)) {
         KLOG_WARN("VMM: Out of virtual memory for space");
-        kmem_cache_free(vma_cache, allocated_vma);
-        if (allocated_guard) kmem_cache_free(vma_cache, allocated_guard);
+        vmm_free_pending_vmas(allocated_vma, allocated_guard);
         release_write(&space->lock);
         return nullptr;
     }
 
     uintptr_t map_start        = is_stack ? addr + PAGE_SIZE_SMALL : addr;
-    uint32_t map_flags         = is_stack ? (flags & ~VMM_FLAG_STACK) : flags;
+    uint32_t map_flags         = is_stack ? (flags & ~VMM_FLAG_GUARD) : flags;
     struct vm_area* target_vma = is_stack ? allocated_guard : allocated_vma;
 
     target_vma->start      = map_start;
@@ -270,21 +310,13 @@ void* vmalloc(
     target_vma->flags      = map_flags;
     target_vma->cache      = cache;
 
-    target_vma->object        = vm_object_create(VM_OBJ_ANONYMOUS, size);
-    target_vma->object_offset = 0;
-
-    if (unlikely(!target_vma->object)) {
-        kmem_cache_free(vma_cache, allocated_vma);
-        if (allocated_guard) kmem_cache_free(vma_cache, allocated_guard);
-        release_write(&space->lock);
-        return nullptr;
-    }
+    target_vma->object        = vmo;
+    target_vma->object_offset = vmo_offset;
+    if (likely(vmo)) vm_object_ref(vmo);
 
     if (unlikely(!vmm_populate_vma_range(space, target_vma, map_start, size))) {
-        KLOG_ERROR("VMM: Failed to map memory at %p\n", map_start);
-        vm_object_deref(target_vma->object);
-        kmem_cache_free(vma_cache, allocated_vma);
-        if (allocated_guard) kmem_cache_free(vma_cache, allocated_guard);
+        if (vmo) vm_object_deref(vmo);
+        vmm_free_pending_vmas(allocated_vma, allocated_guard);
         release_write(&space->lock);
         return nullptr;
     }
@@ -295,10 +327,11 @@ void* vmalloc(
                          actual_size,
                          flags,
                          cache,
-                         (1UL << final_shift),
+                         final_shift,
                          target_vma->object,
-                         0
+                         target_vma->object_offset
                      )) {
+        if (vmo) vm_object_deref(vmo);
         kmem_cache_free(vma_cache, allocated_vma);
         release_write(&space->lock);
         return (void*)addr;
@@ -307,7 +340,7 @@ void* vmalloc(
     if (is_stack) {
         allocated_vma->start      = addr;
         allocated_vma->end        = addr + PAGE_SIZE_SMALL;
-        allocated_vma->page_shift = 12;  // 4K
+        allocated_vma->page_shift = PAGE_SHIFT_SMALL;
         allocated_vma->flags      = VMM_FLAG_GUARD;
         allocated_vma->cache      = CACHE_WRITE_BACK;
         allocated_vma->object     = nullptr;
@@ -339,18 +372,7 @@ void vmfree(struct vm_space* space, void* ptr, size_t size) {
     while (start < end) {
         struct vm_area* vma = vmm_find_vma_unsafe(space, start);
         if (!vma) {
-            struct rb_node* node = space->rb_root.rb_node;
-            struct vm_area* next = nullptr;
-
-            while (node) {
-                struct vm_area* curr = rb_entry(node, struct vm_area, rb_node);
-                if (curr->start > start) {
-                    next = curr;
-                    node = node->rb_left;
-                } else {
-                    node = node->rb_right;
-                }
-            }
+            struct vm_area* next = vmm_find_next_vma_after_unsafe(space, start);
 
             if (!next || next->start >= end) break;
             vma = next;
@@ -363,20 +385,7 @@ void vmfree(struct vm_space* space, void* ptr, size_t size) {
         vmm_unmap_hardware_range(space, unmap_start, unmap_size, vma->page_shift);
         if (unmap_start == vma->start && unmap_end == vma->end) {
             // Case 1: Full VMA Removal
-            if (unlikely(vma->flags & VMM_FLAG_STACK)) {
-                struct rb_node* prev = rb_prev(&vma->rb_node);
-                if (prev) {
-                    struct vm_area* guard = rb_entry(prev, struct vm_area, rb_node);
-                    if (guard->flags == VMM_FLAG_GUARD && guard->end == vma->start) {
-                        rb_erase_augmented(
-                            &guard->rb_node,
-                            &space->rb_root,
-                            vma_compute_subtree_gap
-                        );
-                        kmem_cache_free(vma_cache, guard);
-                    }
-                }
-            }
+            vmm_remove_stack_guard_if_present(space, vma);
 
             rb_erase_augmented(&vma->rb_node, &space->rb_root, vma_compute_subtree_gap);
             if (vma->object) vm_object_deref(vma->object);
@@ -448,7 +457,7 @@ bool vmm_clone_space(struct vm_space* parent, struct vm_space* child) {
     acquire_read(&parent->lock);
     acquire_write(&child->lock);
 
-    pagemap_clone(child->map, parent->map);
+    if (unlikely(!pagemap_clone(child->map, parent->map))) goto clone_fail;
 
     struct rb_node* node = rb_first(&parent->rb_root);
     while (node) {
@@ -467,7 +476,8 @@ bool vmm_clone_space(struct vm_space* parent, struct vm_space* child) {
             parent_vma->flags |= VMM_FLAG_COW;
             child_vma->flags |= VMM_FLAG_COW;
 
-            child_vma->object        = vm_object_create_shadow(parent_vma->object);
+            child_vma->object =
+                vm_object_create_shadow(parent_vma->object, 0, parent_vma->object->size);
             child_vma->object_offset = parent_vma->object_offset;
 
             if (unlikely(!child_vma->object)) goto clone_fail;
@@ -502,4 +512,90 @@ clone_fail:
     KLOG_ERROR("VMM: Clone failed. Tearing down partial address space.");
     vmm_destroy_space(child);
     return false;
+}
+
+int vmprotect(struct vm_space* space, uintptr_t ptr_addr, size_t size, uint32_t new_prots) {
+    uintptr_t start = ptr_addr;
+    uintptr_t end   = start + align_up(size, PAGE_SIZE_SMALL);
+
+    acquire_write(&space->lock);
+    while (start < end) {
+        struct vm_area* vma = vmm_find_vma_unsafe(space, start);
+
+        // Skip unmapped gaps
+        if (!vma) {
+            struct vm_area* next = vmm_find_next_vma_after_unsafe(space, start);
+
+            if (!next || next->start >= end) break;
+            vma = next;
+        }
+
+        uintptr_t prot_start = max(start, vma->start);
+        uintptr_t prot_end   = min(end, vma->end);
+
+        // Keep structural flags intact.
+        const uint32_t structural_mask = ~(VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXECUTE);
+        uint32_t updated_flags         = (vma->flags & structural_mask) | new_prots;
+
+        // If the flags aren't changing, skip this VMA
+        if (vma->flags == updated_flags) {
+            start = prot_end;
+            continue;
+        }
+
+        struct vm_area* target_vma = vma;
+
+        if (prot_start > vma->start && prot_end < vma->end) {
+            // Case 1: Middle Punch (Creates 3 VMAs)
+
+            // Splits Left/Right
+            target_vma = vmm_split_vma(space, vma, prot_start);
+            if (!target_vma) goto fail;
+
+            // Splits Right into Middle/Tail
+            if (!vmm_split_vma(space, target_vma, prot_end)) goto fail;
+        } else if (prot_start > vma->start) {
+            // Case 2: Head Cut (Creates 2 VMAs, target is the right one)
+            target_vma = vmm_split_vma(space, vma, prot_start);
+            if (!target_vma) goto fail;
+        } else if (prot_end < vma->end) {
+            // Case 3: Tail Cut (Creates 2 VMAs, target is the left one)
+            if (!vmm_split_vma(space, vma, prot_end)) goto fail;
+            target_vma = vma;
+        }
+
+        target_vma->flags = updated_flags;
+
+        pagemap_protect_args_t prot_args = {.flags = updated_flags, .cache = target_vma->cache};
+
+        size_t page_size = 1ul << target_vma->page_shift;
+        for (uintptr_t addr = prot_start; addr < prot_end; addr += page_size) {
+            if (pagemap_translate(space->map, addr)) {
+                prot_args.virt_addr = (void*)addr;
+                pagemap_protect(space->map, &prot_args);
+            }
+        }
+
+        // Attempt to merge the VMA with neighbors if protections now match
+        vmm_try_merge(
+            space,
+            target_vma->start,
+            vma_size(target_vma),
+            target_vma->flags,
+            target_vma->cache,
+            target_vma->page_shift,
+            target_vma->object,
+            target_vma->object_offset
+        );
+
+        start = prot_end;
+    }
+
+    release_write(&space->lock);
+    return ERR_OK;
+
+fail:
+    release_write(&space->lock);
+    KLOG_ERROR("VMM: Out of memory while splitting VMAs for protection change.");
+    return ERR_NO_MEM;
 }

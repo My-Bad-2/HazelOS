@@ -4,12 +4,9 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "core/errors.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
 #include "memory/heap.h"
-#include "memory/memory.h"
-#include "memory/vmm.h"
 
 static kmem_cache_t* pagemap_cache = nullptr;
 

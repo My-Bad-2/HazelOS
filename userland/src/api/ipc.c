@@ -56,8 +56,8 @@ int ipc_wait(uint64_t port_cap, struct port_event* out_event, int timeout_ms) {
     int ret = ipc_wait_many(port_cap, &zx_event, 1, &returned, timeout_ms);
 
     if (ret == 0 && returned > 0 && out_event) {
-        out_event->key     = zx_event.key;
-        out_event->signals = zx_event.signals;
+        out_event->key                 = zx_event.key;
+        out_event->data.signal.signals = zx_event.data.signal.signals;
     }
 
     return ret;

@@ -16,6 +16,7 @@
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
+#include "memory/vm_object.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/sched_class.h"
@@ -187,14 +188,20 @@ thread_t* thread_clone(
     wait_queue_init(&child->join_queue);
     memcpy(&child->sched, &parent->sched, sizeof(sched_entity_t));
 
+    vm_object_t* vmo = vm_object_create(VM_OBJ_ANONYMOUS, KSTACK_SIZE);
+
     child->kernel_stack = vmalloc(
         kernel_space,
         nullptr,
         KSTACK_SIZE,
         VMM_FLAG_STACK | VMM_FLAG_WRITE | VMM_FLAG_READ,
         CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
+        PAGE_SIZE_SMALL,
+        vmo,
+        0
     );
+
+    vm_object_deref(vmo);
 
     if (unlikely(!child->kernel_stack)) {
         kmem_cache_free(thread_cache, child);

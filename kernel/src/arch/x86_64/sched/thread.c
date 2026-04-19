@@ -15,6 +15,7 @@
 #include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
+#include "memory/pmm.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 
@@ -64,14 +65,7 @@ int arch_thread_init(thread_t* t, uintptr_t entry_rip, uint64_t arg1, uintptr_t 
     t->fpu_buffer = kmem_cache_alloc(fpu_cache);
     if (unlikely(!t->fpu_buffer)) return ERR_NO_MEM;
 
-    t->kernel_stack = vmalloc(
-        kernel_space,
-        nullptr,
-        KSTACK_SIZE,
-        VMM_FLAG_STACK | VMM_FLAG_WRITE | VMM_FLAG_READ,
-        CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
-    );
+    t->kernel_stack = (void*)to_higher_half((uintptr_t)pmm_alloc(KSTACK_SIZE / PAGE_SIZE_SMALL));
 
     if (unlikely(!t->kernel_stack)) {
         kmem_cache_free(fpu_cache, t->fpu_buffer);

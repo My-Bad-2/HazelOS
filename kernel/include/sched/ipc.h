@@ -38,6 +38,7 @@ struct ipc_port_object {
     // Edge-triggered events should be cleared the moment the userspace thread acknowledges it, and
     // we need to count how many times the edge was hit before it was acknowledged
     bool auto_clear;
+    uint32_t type;
 };
 
 struct ipc_port {
@@ -66,6 +67,13 @@ struct thread_ipc_state {
     struct ipc_msg_internal* rpc_reply_msg;
 };
 
+struct kernel_page_request {
+    struct ipc_port_object port_obj;
+    size_t offset;
+    size_t cluster_size;
+    struct thread* faulting_thread;
+};
+
 void ipc_init(void);
 void port_notify(struct ipc_port* port, struct ipc_port_object* obj, uint32_t signals);
 
@@ -87,5 +95,11 @@ int sys_channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap);
 
 void ipc_endpoint_release(struct kobject* ref);
 void ipc_port_release(struct kobject* ref);
+void ipc_send_page_request(
+    struct ipc_port* port,
+    uint64_t pager_key,
+    size_t offset,
+    size_t cluster_size
+);
 
 #endif

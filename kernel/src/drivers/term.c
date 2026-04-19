@@ -8,6 +8,7 @@
 #include "boot/limine.h"
 #include "libs/math.h"
 #include "libs/mmio.h"
+#include "memory/heap.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
 #include "memory/vma.h"
@@ -185,15 +186,7 @@ void term_init(term_font_t* font) {
     style.reverse   = false;
 
 #if TERM_USE_SHADOW_BUFFER
-    shadow_buffer = (void*)vmalloc(
-        kernel_space,
-        nullptr,
-        fb_size,
-        VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_GLOBAL,
-        CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
-    );
-
+    shadow_buffer = kmalloc(fb_size);
     memset(shadow_buffer, 0, fb_size);
 #endif
     memset(fb_address, 0, fb_size);

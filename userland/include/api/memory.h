@@ -2,45 +2,50 @@
 #define USERLAND_API_MEMORY_H 1
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define SYS_CATEGORY_MEM 0x0400
 
-#define SYS_MEM_MMAP     (SYS_CATEGORY_MEM | 0x01)
-#define SYS_MEM_MUNMAP   (SYS_CATEGORY_MEM | 0x02)
-#define SYS_MEM_MREMAP   (SYS_CATEGORY_MEM | 0x03)
-#define SYS_MEM_MPROTECT (SYS_CATEGORY_MEM | 0x04)
+#define SYS_MEM_MAP     (SYS_CATEGORY_MEM | 0x01)
+#define SYS_MEM_UNMAP   (SYS_CATEGORY_MEM | 0x02)
+#define SYS_MEM_PROTECT (SYS_CATEGORY_MEM | 0x03)
+#define SYS_VMO_CREATE  (SYS_CATEGORY_MEM | 0x04)
+#define SYS_VMO_RESIZE  (SYS_CATEGORY_MEM | 0x05)
+#define SYS_VMO_READ    (SYS_CATEGORY_MEM | 0x06)
+#define SYS_VMO_WRITE   (SYS_CATEGORY_MEM | 0x07)
 
-#define MAP_HUGE_SHIFT 26
-#define MAP_HUGE_MASK  0x3f
+#define VMO_CREATE_RAM       0x0001u  // Standard Zeroed RAM
+#define VMO_CREATE_PHYSICAL  0x0002u  // Direct physical memory (MMIO)
+#define VMO_CREATE_RESIZABLE 0x0004u
 
-#define PROT_NONE  0
-#define PROT_EXEC  0x01
-#define PROT_READ  0x02
-#define PROT_WRITE 0x04
+#define VSPACE_PROT_READ  0x0001u
+#define VSPACE_PROT_WRITE 0x0002u
+#define VSPACE_PROT_EXEC  0x0004u
 
-#define MAP_SHARED          0x001
-#define MAP_PRIVATE         0x002
-#define MAP_ANONYMOUS       0x004
-#define MAP_FIXED_NOREPLACE 0x008
-#define MAP_FIXED           0x010
-#define MAP_GROWSDOWN       0x020
-#define MAP_HUGETLB         0x040
-#define MAP_POPULATE        0x080
-#define MAP_STACK           0x100
-#define MAP_LOCKED          0x200
+#define VSPACE_MAP_EXACT     0x0100u   // Must map exactly at hint_addr or fail
+#define VSPACE_MAP_OVERWRITE 0x0200u   // Map at hint_addr, destroying existing mappings
+#define VSPACE_MAP_SHADOW    0x0400u   // Create a Copy-On-Write private clone of the VMO
+#define VSPACE_MAP_STACK     0x0800u   // Allocates a guard page automatically at the bottom
+#define VSPACE_MAP_LAZY      0x1000u   // Demand paging (allocate physical frames on fault)
+#define VSPACE_MAP_WIRE      0x2000u   // Populate immediately AND lock into RAM (No eviction)
+#define VSPACE_MAP_POPULATE  0x4000u   // Populate immediately, but allow future eviction
+#define VSPACE_MAP_PAGE_2M   0x8000u   // Force 2MB Superpages
+#define VSPACE_MAP_PAGE_1G   0x10000u  // Force 1GB Hugepages
 
-#define MAP_HUGE_2MB (21 << MAP_HUGE_SHIFT)
-#define MAP_HUGE_1GB (30 << MAP_HUGE_SHIFT)
+int vmo_create(size_t size, uint32_t vmo_flags, uint64_t* out_vmo_cap);
+int vmo_resize(uint64_t vmo_cap, size_t new_size);
+int vmo_read(uint64_t vmo_cap, void* buffer, size_t offset, size_t size);
+int vmo_write(uint64_t vmo_cap, const void* buffer, size_t offset, size_t size);
 
-#define MREMAP_MAYMOVE   0x01
-#define MREMAP_FIXED     0x02
-#define MREMAP_DONTUNMAP 0x04
-
-typedef long off_t;
-
-void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset);
-int munmmap(void* addr, size_t length);
-int mprotect(void* addr, size_t length, int prot);
-void* mremap(void* old_address, size_t old_size, size_t new_size, int flags, void* new_address);
+uintptr_t vspace_map(
+    uint64_t vspace_cap,
+    uint64_t vmo_cap,
+    size_t vmo_offset,
+    uintptr_t hint_addr,
+    size_t size,
+    uint32_t map_flags
+);
+int vspace_unmap(uint64_t vspace_cap, uintptr_t addr, size_t size);
+int vspace_protect(uint64_t vspace_cap, uintptr_t addr, size_t size, uint32_t new_prots);
 
 #endif

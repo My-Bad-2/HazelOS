@@ -11,12 +11,16 @@
 #include "core/syscalls.h"
 #include "cpu/smp.h"
 #include "drivers/ktimer.h"
+#include "libs/dlist.h"
 #include "libs/spinlock.h"
+#include "memory/heap.h"
+#include "sched/process.h"
 #include "sched/scheduler.h"
 #include "uapi/ipc.h"
 
-static kmem_cache_t* endpoint_cache = nullptr;
-static kmem_cache_t* port_cache     = nullptr;
+static kmem_cache_t* endpoint_cache  = nullptr;
+static kmem_cache_t* port_cache      = nullptr;
+static kmem_cache_t* pager_req_cache = nullptr;
 
 static inline bool write_cap_out(uint64_t* ptr, uint64_t val) {
     if (!ptr) return true;
@@ -40,6 +44,14 @@ void ipc_init(void) {
         "ipc_port",
         sizeof(struct ipc_port),
         _Alignof(struct ipc_port),
+        0,
+        nullptr
+    );
+
+    pager_req_cache = kmem_cache_create(
+        "pager_req",
+        sizeof(struct kernel_page_request),
+        _Alignof(struct kernel_page_request),
         0,
         nullptr
     );
@@ -655,18 +667,28 @@ int sys_port_wait(
             obj->in_port = false;
 
             if (out_events) {
-                struct port_event evt = {
-                    .key     = obj->user_key,
-                    .signals = obj->pending_signals,
-                    .count   = obj->signal_count,
-                };
+                struct port_event evt;
+                evt.key  = obj->user_key;
+                evt.type = obj->type;
+
+                if (obj->type == IPC_PORT_TYPE_SIGNAL) {
+                    evt.data.signal.signals = obj->pending_signals;
+                    evt.data.signal.count   = obj->signal_count;
+
+                    if (obj->auto_clear) {
+                        obj->pending_signals = 0;
+                        obj->signal_count    = 0;
+                    }
+                } else if (obj->type == IPC_PORT_TYPE_PAGER) {
+                    struct kernel_page_request* req = (struct kernel_page_request*)obj;
+
+                    evt.data.pager.offset = req->offset;
+                    evt.data.pager.length = req->cluster_size;
+
+                    kmem_cache_free(pager_req_cache, req);
+                }
 
                 copy_to_user(&out_events[count], &evt, sizeof(struct port_event));
-            }
-
-            if (obj->auto_clear) {
-                obj->pending_signals = 0;
-                obj->signal_count    = 0;
             }
 
             count++;
@@ -676,7 +698,6 @@ int sys_port_wait(
     release_qspinlock(&set->lock);
 
     if (events_returned) copy_to_user(events_returned, &count, sizeof(size_t));
-
     return ret;
 }
 
@@ -734,4 +755,43 @@ int sys_channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap) {
     release_qspinlock(&ep_dst->lock);
 
     return ERR_OK;
+}
+
+void ipc_send_page_request(
+    struct ipc_port* port,
+    uint64_t pager_key,
+    size_t offset,
+    size_t cluster_size
+) {
+    if (unlikely(!port)) return;
+
+    struct thread* me = smp_current_core()->curr_thread;
+
+    struct kernel_page_request* req = kmem_cache_alloc(pager_req_cache);
+    if (unlikely(!req)) thread_exit(ERR_NO_MEM);
+
+    memset(req, 0, sizeof(struct kernel_page_request));
+    dlist_init(&req->port_obj.port_node);
+
+    req->port_obj.type     = IPC_PORT_TYPE_PAGER;
+    req->port_obj.user_key = pager_key;
+
+    req->offset          = offset;
+    req->cluster_size    = cluster_size;
+    req->faulting_thread = me;
+
+    size_t flags = acquire_qinterrupt_lock(&port->lock);
+
+    dlist_add_tail(&req->port_obj.port_node, &port->event_queue);
+    req->port_obj.in_port = true;
+
+    if (!dlist_empty(&port->waiters)) {
+        struct thread* t = dlist_entry(port->waiters.next, struct thread, wait_node);
+        dlist_del(&t->wait_node);
+        scheduler_unblock(t);
+    }
+
+    release_qinterrupt_lock(&port->lock, flags);
+
+    scheduler_block();
 }

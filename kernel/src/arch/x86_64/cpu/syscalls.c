@@ -12,7 +12,6 @@
 #include "cpu/syscalls.h"
 #include "drivers/ktimer.h"
 #include "libs/log.h"
-#include "memory/vma.h"
 #include "sched/ipc.h"
 #include "sched/process.h"
 #include "uapi/ipc.h"
@@ -228,32 +227,27 @@ dispatch_mem_syscall(uint64_t operation, struct syscall_regs* regs, struct proce
     uint64_t res = 0;
 
     switch (operation) {
-        case 0x01:  // SYS_MEM_MMAP
-            res = (uintptr_t)sys_mmap(
-                proc,
-                (void*)regs->rdi,
-                regs->rsi,
-                (int)regs->rdx,
-                (int)regs->r10,
-                (int)regs->r8,
-                (int)regs->r9
-            );
+        case 0x01:  // SYS_MEM_MAP
+            res = (uintptr_t)
+                sys_vspace_map(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
             break;
-        case 0x02:  // SYS_MEM_MUNMAP
-            res = (uint64_t)sys_munmap(proc, (void*)regs->rdi, regs->rsi);
+        case 0x02:  // SYS_MEM_UNMAP
+            res = (uint64_t)sys_vspace_unmap(regs->rdi, regs->rsi, regs->rdx);
             break;
-        case 0x03:  // SYS_MEM_MREMAP
-            res = (uint64_t)sys_mremap(
-                proc,
-                (void*)regs->rdi,
-                regs->rsi,
-                regs->rdx,
-                (int)regs->r10,
-                (void*)regs->r8
-            );
+        case 0x03:
+            res = (uint64_t)sys_vspace_protect(regs->rdi, regs->rsi, regs->rdx, regs->r10);
             break;
-        case 0x04:  // SYS_MEM_MPROTECT
-            res = (uint64_t)sys_mprotect(proc, (void*)regs->rdi, regs->rsi, (int)regs->rdx);
+        case 0x04:  // SYS_VMO_CREATE
+            res = (uint64_t)sys_vmo_create(regs->rdi, regs->rsi, (uint64_t*)regs->rdx);
+            break;
+        case 0x05:  // SYS_VMO_RESIZE
+            res = (uint64_t)sys_vmo_resize(regs->rdi, regs->rsi);
+            break;
+        case 0x06:  // SYS_VMO_READ
+            res = (uint64_t)sys_vmo_read(regs->rdi, (void*)regs->rsi, regs->rdx, regs->r10);
+            break;
+        case 0x07:  // SYS_VMO_WRITE
+            res = (uint64_t)sys_vmo_write(regs->rdi, (void*)regs->rsi, regs->rdx, regs->r10);
             break;
         default:
             res = (uint64_t)ERR_DENIED;

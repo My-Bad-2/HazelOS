@@ -11,6 +11,7 @@
 #include "libs/math.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
+#include "memory/vm_object.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
@@ -77,14 +78,19 @@ static bool load_segment(process_t* proc, Elf64_Phdr* phdr, void* base) {
     }
 
     for (uintptr_t curr_v = page_start; curr_v < page_end; curr_v += PAGE_SIZE_SMALL) {
+        vm_object_t* vmo = vm_object_create(VM_OBJ_ANONYMOUS, PAGE_SIZE_SMALL);
         vmalloc(
             proc->vspace,
             (void*)curr_v,
             PAGE_SIZE_SMALL,
             vmm_flags | VMM_FLAG_FIXED,
             CACHE_WRITE_BACK,
-            PAGE_SIZE_SMALL
+            PAGE_SIZE_SMALL,
+            vmo,
+            0
         );
+
+        vm_object_deref(vmo);
 
         // Technically any user page is accessible to the kernel via HHDM
         uintptr_t phys_addr = pagemap_translate(proc->vspace->map, curr_v);
@@ -145,13 +151,19 @@ thread_t* load_elf(void* address) {
         }
     }
 
+    vm_object_t* vmo = vm_object_create(VM_OBJ_ANONYMOUS, USTACK_SIZE);
+
+    if (!vmo) PANIC("Failed to create vmo for userland stack!\n");
+
     void* stack = vmalloc(
         init_process->vspace,
         nullptr,
         USTACK_SIZE,
         VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK | VMM_FLAG_COW | VMM_FLAG_USER,
         CACHE_WRITE_BACK,
-        PAGE_SIZE_SMALL
+        PAGE_SIZE_SMALL,
+        vmo,
+        0
     );
 
     uintptr_t stack_top = (uintptr_t)stack + USTACK_SIZE;

@@ -122,6 +122,12 @@ void lapic_init(void) {
     }
 
     if (!x2apic_enabled && !virt_base) {
+        vm_object_t* vmo = vm_object_create(VM_OBJ_PHYSICAL, PAGE_SIZE_SMALL);
+        if (!vmo) {
+            KLOG_INIT_FAIL();
+            PANIC("Failed to allocate vmo!\n");
+        }
+
         uintptr_t phys_base = apic_base_msr & X86_PAGE_ADDRESS_MASK;
         virt_base           = vmalloc(
             kernel_space,
@@ -129,13 +135,17 @@ void lapic_init(void) {
             PAGE_SIZE_SMALL,
             VMM_FLAG_MMIO,
             CACHE_MMIO,
-            PAGE_SIZE_SMALL
+            PAGE_SIZE_SMALL,
+            vmo,
+            0
         );
 
         if (!virt_base) {
             KLOG_INIT_FAIL();
             PANIC("LAPIC: Out of memory for MMIO mapping.");
         }
+
+        vm_object_deref(vmo);
 
         pagemap_map_args_t args = {
             .virt_addr = virt_base,

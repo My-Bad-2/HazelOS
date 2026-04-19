@@ -4,6 +4,7 @@
 
 #include "arch.h"
 #include "boot/boot.h"
+#include "core/errors.h"
 #include "cpu/cpu.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
@@ -307,7 +308,7 @@ int arch_mmu_map(
 
     release_spinlock(&map->lock);
 
-    if (status == 0) arch_mmu_flush_tlb(map, virt, length);
+    if (status == ERR_OK) arch_mmu_flush_tlb(map, virt, length);
     return status;
 }
 

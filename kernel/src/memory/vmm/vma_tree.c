@@ -12,10 +12,58 @@
 
 #define max(a, b) ((a) > (b) ? (a) : (b))
 
-#define IS_KERNEL_MAP(map) ((map) == vmm_get_kernel_pagemap())
+static inline bool is_kernel_space(struct vm_space* space) {
+    return space->map == vmm_get_kernel_pagemap();
+}
 
-#define SAFE_START(s) (IS_KERNEL_MAP((s)->map) ? get_kernel_space_start_limit() : USER_SPACE_START)
-#define SAFE_END(s)   (IS_KERNEL_MAP((s)->map) ? KERNEL_SPACE_END : get_user_space_end_limit())
+static inline uintptr_t get_safe_start(struct vm_space* space) {
+    return is_kernel_space(space) ? get_kernel_space_start_limit() : USER_SPACE_START;
+}
+
+static inline uintptr_t get_safe_end(struct vm_space* space) {
+    return is_kernel_space(space) ? KERNEL_SPACE_END : get_user_space_end_limit();
+}
+
+static inline bool vma_subtree_can_fit(struct rb_node* node, size_t size) {
+    return node && rb_entry(node, struct vm_area, rb_node)->subtree_max_gap >= size;
+}
+
+static bool vma_can_merge_prev(
+    struct vm_area* prev,
+    uintptr_t addr,
+    uint32_t flags,
+    cache_type_t cache,
+    uint8_t page_shift,
+    struct vm_object* object,
+    size_t object_offset
+) {
+    if (!prev) return false;
+
+    if (prev->end != addr || prev->flags != flags || prev->cache != cache ||
+        prev->page_shift != page_shift || prev->object != object)
+        return false;
+
+    return !object || (prev->object_offset + vma_size(prev)) == object_offset;
+}
+
+static bool vma_can_merge_next(
+    struct vm_area* next,
+    uintptr_t addr,
+    size_t size,
+    uint32_t flags,
+    cache_type_t cache,
+    uint8_t page_shift,
+    struct vm_object* object,
+    size_t object_offset
+) {
+    if (!next) return false;
+
+    if (next->start != addr + size || next->flags != flags || next->cache != cache ||
+        next->page_shift != page_shift || next->object != object)
+        return false;
+
+    return !object || (object_offset + size) == next->object_offset;
+}
 
 bool vma_compute_subtree_gap(struct rb_node* node) {
     struct vm_area* vma = rb_entry(node, struct vm_area, rb_node);
@@ -44,6 +92,8 @@ void vma_propagate_gap_up(struct rb_node* node) {
 }
 
 void vmm_insert_vma(struct vm_space* space, struct vm_area* new_vma) {
+    if (unlikely(!space || !new_vma)) return;
+
     struct rb_node** link  = &space->rb_root.rb_node;
     struct rb_node* parent = nullptr;
 
@@ -60,8 +110,9 @@ void vmm_insert_vma(struct vm_space* space, struct vm_area* new_vma) {
     rb_link_node(&new_vma->rb_node, parent, link);
 
     struct rb_node* prev = rb_prev(&new_vma->rb_node);
-    uintptr_t prev_end   = prev ? rb_entry(prev, struct vm_area, rb_node)->end : SAFE_START(space);
-    new_vma->own_gap     = new_vma->start - prev_end;
+    uintptr_t prev_end =
+        prev ? rb_entry(prev, struct vm_area, rb_node)->end : get_safe_start(space);
+    new_vma->own_gap = new_vma->start - prev_end;
 
     struct rb_node* next = rb_next(&new_vma->rb_node);
     if (next) {
@@ -91,9 +142,11 @@ struct vm_area* vmm_find_vma_unsafe(struct vm_space* space, uintptr_t addr) {
 }
 
 bool vmm_find_gap_bottom_up(struct vm_space* space, size_t size, size_t align, uintptr_t* addr) {
+    if (unlikely(!space || !addr || size == 0)) return false;
+
     struct rb_node* node = space->rb_root.rb_node;
-    uintptr_t safe_start = SAFE_START(space);
-    uintptr_t safe_end   = SAFE_END(space);
+    uintptr_t safe_start = get_safe_start(space);
+    uintptr_t safe_end   = get_safe_end(space);
 
     struct rb_node* first = rb_first(&space->rb_root);
     uintptr_t first_start = first ? rb_entry(first, struct vm_area, rb_node)->start : safe_end;
@@ -108,8 +161,7 @@ bool vmm_find_gap_bottom_up(struct vm_space* space, size_t size, size_t align, u
     while (node) {
         struct vm_area* vma = rb_entry(node, struct vm_area, rb_node);
 
-        if (node->rb_left &&
-            rb_entry(node->rb_left, struct vm_area, rb_node)->subtree_max_gap >= size) {
+        if (vma_subtree_can_fit(node->rb_left, size)) {
             node = node->rb_left;
             continue;
         }
@@ -117,13 +169,13 @@ bool vmm_find_gap_bottom_up(struct vm_space* space, size_t size, size_t align, u
         struct rb_node* prev = rb_prev(node);
         uintptr_t prev_end   = prev ? rb_entry(prev, struct vm_area, rb_node)->end : safe_start;
         candidate            = align_up(prev_end, align);
+
         if (candidate >= prev_end && candidate + size <= vma->start) {
             *addr = candidate;
             return true;
         }
 
-        if (node->rb_right &&
-            rb_entry(node->rb_right, struct vm_area, rb_node)->subtree_max_gap >= size) {
+        if (vma_subtree_can_fit(node->rb_right, size)) {
             node = node->rb_right;
             continue;
         }
@@ -152,8 +204,10 @@ bool vmm_find_gap_bottom_up(struct vm_space* space, size_t size, size_t align, u
 }
 
 bool vmm_find_gap_top_down(struct vm_space* space, size_t size, size_t align, uintptr_t* addr) {
-    uintptr_t safe_start = SAFE_START(space);
-    uintptr_t safe_end   = SAFE_END(space);
+    if (unlikely(!space || !addr || size == 0)) return false;
+
+    uintptr_t safe_start = get_safe_start(space);
+    uintptr_t safe_end   = get_safe_end(space);
 
     if (unlikely(!space->rb_root.rb_node)) {
         if (safe_end >= size && (safe_end - size) >= safe_start) {
@@ -181,8 +235,7 @@ bool vmm_find_gap_top_down(struct vm_space* space, size_t size, size_t align, ui
     while (node) {
         struct vm_area* vma = rb_entry(node, struct vm_area, rb_node);
 
-        if (node->rb_right &&
-            rb_entry(node->rb_right, struct vm_area, rb_node)->subtree_max_gap >= size) {
+        if (vma_subtree_can_fit(node->rb_right, size)) {
             node = node->rb_right;
             continue;
         }
@@ -199,8 +252,7 @@ bool vmm_find_gap_top_down(struct vm_space* space, size_t size, size_t align, ui
             }
         }
 
-        if (node->rb_left &&
-            rb_entry(node->rb_left, struct vm_area, rb_node)->subtree_max_gap >= size) {
+        if (vma_subtree_can_fit(node->rb_left, size)) {
             node = node->rb_left;
             continue;
         }
@@ -227,32 +279,20 @@ bool vmm_try_merge(
     struct vm_object* object,
     size_t object_offset
 ) {
-    uintptr_t safe_start = SAFE_START(space);
-    uintptr_t safe_end   = SAFE_END(space);
+    uintptr_t safe_start = get_safe_start(space);
+    uintptr_t safe_end   = get_safe_end(space);
 
     struct vm_area* prev = (addr > safe_start) ? vmm_find_vma_unsafe(space, addr - 1) : nullptr;
     struct vm_area* next =
         ((addr + size) < safe_end) ? vmm_find_vma_unsafe(space, addr + size) : nullptr;
 
-    if (prev) {
-        if (prev->end != addr || prev->flags != flags || prev->cache != cache ||
-            prev->page_shift != page_shift || prev->object != object ||
-            (object && (prev->object_offset + vma_size(prev)) != object_offset)) {
-            prev = nullptr;
-        }
-    }
+    if (!vma_can_merge_prev(prev, addr, flags, cache, page_shift, object, object_offset))
+        prev = nullptr;
 
-    if (next) {
-        if (next->start != addr + size || next->flags != flags || next->cache != cache ||
-            next->page_shift != page_shift || next->object != object ||
-            (object && (object_offset + size) != next->object_offset)) {
-            next = nullptr;
-        }
-    }
+    if (!vma_can_merge_next(next, addr, size, flags, cache, page_shift, object, object_offset))
+        next = nullptr;
 
-    if (unlikely(!prev && !next)) {
-        return false;
-    }
+    if (unlikely(!prev && !next)) return false;
 
     // CASE A: Coalesce (Prev + Current + Next)
     if (prev && next) {

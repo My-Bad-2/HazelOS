@@ -62,6 +62,7 @@ static const kobj_release_fn destructor_table[] = {
     [CAP_TYPE_PROCESS]  = process_release,
     [CAP_TYPE_VSPACE]   = vmm_space_release,
     [CAP_TYPE_TIMER]    = ktimer_release,
+    [CAP_TYPE_VMO]      = vmo_release,
 };
 
 void cap_object_unref(uint8_t type, void* obj) {

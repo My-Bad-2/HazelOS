@@ -29,6 +29,9 @@
 #define IPC_EVENT_LEVEL_TRIGGERED false
 #define IPC_EVENT_EDGE_TRIGGERED  true
 
+#define IPC_PORT_TYPE_SIGNAL 0
+#define IPC_PORT_TYPE_PAGER  1
+
 struct cap_disp {
     uint64_t cap_id;
     uint16_t rights;
@@ -50,10 +53,23 @@ struct ipc_msg {
     uint32_t flags;
 };
 
+struct pager_packet {
+    uint64_t offset;
+    uint64_t length;
+};
+
 struct port_event {
     uint64_t key;
-    uint32_t signals;
-    uint32_t count;
+    uint32_t type;
+
+    union {
+        struct {
+            uint32_t signals;
+            uint32_t count;
+        } signal;
+
+        struct pager_packet pager;
+    } data;
 };
 
 int ipc_channel_create(uint64_t* cap1_out, uint64_t* cap2_out);

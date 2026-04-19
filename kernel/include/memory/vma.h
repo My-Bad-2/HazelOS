@@ -95,10 +95,13 @@ void* vmalloc(
     size_t size,
     uint32_t flags,
     cache_type_t cache,
-    size_t alignment
+    size_t alignment,
+    struct vm_object* vmo,
+    size_t vmo_offset
 );
 
 void vmfree(struct vm_space* space, void* ptr, size_t size);
+int vmprotect(struct vm_space* space, uintptr_t ptr_addr, size_t size, uint32_t new_prots);
 
 struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code);
 bool vmm_handle_fault(struct vm_space* space, uintptr_t fault_addr, uint32_t error_code);
@@ -111,55 +114,6 @@ bool vmm_populate_vma_range(
     struct vm_area* vma,
     uintptr_t start,
     size_t size
-);
-
-struct process;
-void* sys_mmap(
-    struct process* proc,
-    void* addr,
-    size_t length,
-    int prot,
-    int flags,
-    int fd,
-    long offset
-);
-int sys_munmap(struct process* proc, void* addr, size_t length);
-int sys_mprotect(struct process* proc, void* addr, size_t length, int prot);
-void* sys_mremap(
-    struct process* proc,
-    void* old_address,
-    size_t old_size,
-    size_t new_size,
-    int flags,
-    void* new_address
-);
-
-void* sys_vspace_map(
-    struct process* proc,
-    uint64_t vspace_cap,
-    void* addr,
-    size_t length,
-    int prot,
-    int flags,
-    int fd,
-    long offset
-);
-int sys_vspace_unmap(struct process* proc, uint64_t vspace_cap, void* addr, size_t length);
-int sys_vspace_protect(
-    struct process* proc,
-    uint64_t vspace_cap,
-    void* addr,
-    size_t length,
-    int prot
-);
-void* sys_vspace_remap(
-    struct process* proc,
-    uint64_t vspace_cap,
-    void* old_address,
-    size_t old_size,
-    size_t new_size,
-    int flags,
-    void* new_address
 );
 
 extern struct vm_space* kernel_space;

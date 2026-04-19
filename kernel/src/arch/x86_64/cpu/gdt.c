@@ -7,6 +7,7 @@
 #include "libs/log.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
+#include "memory/pmm.h"
 #include "memory/vma.h"
 
 #define GDT_ACCESS_TSS 0x09
@@ -128,42 +129,21 @@ void tss_init(tss_t* tss, uintptr_t rsp) {
     KLOG_INIT_START("TSS");
     memset(tss, 0, sizeof(tss_t));
 
+    void* phys     = pmm_alloc(4);
+    uintptr_t virt = to_higher_half((uintptr_t)phys);
+
     if (!nmi_stack && !double_fault_stack) {
-        nmi_stack = vmalloc(
-            kernel_space,
-            nullptr,
-            PAGE_SIZE_SMALL,
-            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
-            CACHE_WRITE_BACK,
-            PAGE_SIZE_SMALL
-        );
+        virt += PAGE_SIZE_SMALL;
+        nmi_stack = (void*)virt;
 
-        double_fault_stack = vmalloc(
-            kernel_space,
-            nullptr,
-            PAGE_SIZE_SMALL,
-            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
-            CACHE_WRITE_BACK,
-            PAGE_SIZE_SMALL
-        );
+        virt += PAGE_SIZE_SMALL;
+        double_fault_stack = (void*)virt;
 
-        machine_check_stack = vmalloc(
-            kernel_space,
-            nullptr,
-            PAGE_SIZE_SMALL,
-            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
-            CACHE_WRITE_BACK,
-            PAGE_SIZE_SMALL
-        );
+        virt += PAGE_SIZE_SMALL;
+        machine_check_stack = (void*)virt;
 
-        debug_exception_stack = vmalloc(
-            kernel_space,
-            nullptr,
-            PAGE_SIZE_SMALL,
-            VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_STACK,
-            CACHE_WRITE_BACK,
-            PAGE_SIZE_SMALL
-        );
+        virt += PAGE_SIZE_SMALL;
+        debug_exception_stack = (void*)virt;
     }
 
     if (!nmi_stack || !double_fault_stack || !machine_check_stack || !debug_exception_stack) {

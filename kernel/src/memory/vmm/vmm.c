@@ -7,6 +7,7 @@
 #include "memory/arch_mmu.h"
 #include "memory/memory.h"
 #include "memory/pagemap.h"
+#include "sched/wait.h"
 
 extern void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_delta);
 
@@ -124,6 +125,7 @@ void vmm_init(void) {
     arch_mmu_init();
     vmm_map_memory(kernel_pagemap);
     vmm_map_kernel(kernel_pagemap, kernel_base, phys_delta);
+    vmm_wait_table_init();
     pagemap_load(kernel_pagemap);
     KLOG_INIT_OK();
 }
