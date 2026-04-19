@@ -1,4 +1,3 @@
-#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -8,6 +7,7 @@
 #include "cpu/cpu.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
+#include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
@@ -26,15 +26,144 @@ static bool pku_supported     = false;
 static bool pcid_supported    = false;
 static bool invpcid_supported = false;
 
+typedef struct {
+    spinlock_t pcid_lock;
+    uint64_t pcid_bitmap[64];  // 64 * 64 = 4096 entries
+} cpu_local_mmu_t;
+
+struct arch_pagemap {
+    uintptr_t phys_root;
+    uint16_t* pcids;
+    uint32_t pcids_capacity;
+    uint16_t active_pkeys;
+    uint32_t pkru_state;
+    spinlock_t lock;
+};
+
+#define X86_PKEY_COUNT      (X86_MAX_PKEYS + 1)
+#define X86_PKEY_ALLOC_MASK ((uint16_t)(~(uint16_t)1u))
+
 static kmem_cache_t* pcid_cache = nullptr;
 
 static cpu_local_mmu_t* cpu_mmu_states = nullptr;
-static uint32_t total_cpu              = 0;
+
+static inline bool arch_is_canonical(uintptr_t addr, int max_levels) {
+    if (max_levels == 5) {
+        uintptr_t top = addr >> 56;
+        return (top == 0 || top == 0xff);
+    }
+
+    uintptr_t top = addr >> 47;
+    return (top == 0 || top == 0x1ffff);
+}
 
 static cpu_local_mmu_t* get_cpu_local_mmu_by_id(uint32_t cpu_id) {
     if (!cpu_mmu_states || cpu_id >= mp_request.response->cpu_count) return nullptr;
-
     return &cpu_mmu_states[cpu_id];
+}
+
+static inline int validate_virt_range(uintptr_t virt, size_t length) {
+    if (length == 0) return ERR_INVALID;
+    if (!arch_is_canonical(virt, paging_max_levels)) return ERR_INVALID;
+
+    uintptr_t end = virt + length - 1;
+    if (end < virt) return ERR_INVALID;
+    if (!arch_is_canonical(end, paging_max_levels)) return ERR_INVALID;
+
+    return ERR_OK;
+}
+
+static inline size_t tlb_pages_for_range(uintptr_t virt, size_t length) {
+    uintptr_t offset = virt & (PAGE_SIZE_SMALL - 1);
+    size_t span      = length + offset;
+
+    if (span < length) return SIZE_MAX / PAGE_SIZE_SMALL;
+    return div_roundup(span, PAGE_SIZE_SMALL);
+}
+
+static inline int level_shift(int level) {
+    return 12 + ((level - 1) * 9);
+}
+
+static inline size_t level_step_size(int level) {
+    return 1ul << level_shift(level);
+}
+
+static inline size_t level_page_size(int level) {
+    if (level == 3) return PAGE_SIZE_LARGE;
+    if (level == 2) return PAGE_SIZE_MEDIUM;
+    return PAGE_SIZE_SMALL;
+}
+
+static inline bool pte_is_mapped(uint64_t entry) {
+    return (entry & (X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND)) != 0;
+}
+
+static inline bool pte_is_present(uint64_t entry) {
+    return (entry & X86_PAGE_FLAG_PRESENT) != 0;
+}
+
+static inline uint16_t pkey_bit(uint8_t pkey) {
+    return (uint16_t)(1u << pkey);
+}
+
+static inline uint32_t pkru_pair_mask(uint8_t pkey) {
+    return (uint32_t)(0x3u << (pkey * 2));
+}
+
+static inline bool pkey_index_valid(uint8_t pkey) {
+    return pkey < X86_PKEY_COUNT;
+}
+
+static inline bool pkey_is_active(const arch_pagemap_t* map, uint8_t pkey) {
+    return (map->active_pkeys & pkey_bit(pkey)) != 0;
+}
+
+static inline bool pkey_is_usable(const arch_pagemap_t* map, uint8_t pkey) {
+    if (pkey == 0) return true;
+    if (!pku_supported) return false;
+    if (!pkey_index_valid(pkey)) return false;
+    return pkey_is_active(map, pkey);
+}
+
+static inline void pkru_allow_key(uint32_t* pkru, uint8_t pkey) {
+    *pkru &= ~pkru_pair_mask(pkey);
+}
+
+static inline void pkru_deny_key(uint32_t* pkru, uint8_t pkey) {
+    *pkru |= pkru_pair_mask(pkey);
+}
+
+static uint32_t pkru_default_state(void) {
+    uint32_t pkru = 0;
+
+    // Key 0 is always accessible. Deny all other keys until allocated.
+    for (uint8_t key = 1; key < X86_PKEY_COUNT; ++key) pkru_deny_key(&pkru, key);
+    return pkru;
+}
+
+static inline void write_pkru_register(uint32_t pkru_val) {
+    // WRPKRU requires ECX=0 and EDX=0, with PKRU in EAX.
+    asm volatile("wrpkru" : : "a"(pkru_val), "c"(0), "d"(0) : "memory");
+}
+
+static inline uintptr_t pte_decode_phys_base(uint64_t entry, int level) {
+    uintptr_t phys = entry & X86_PAGE_ADDRESS_MASK;
+    if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) phys &= ~X86_PAGE_FLAG_LARGE_PAT;
+    return phys;
+}
+
+static uint64_t build_cr3_value(arch_pagemap_t* map, uint32_t cpu_id, bool no_flush_hint) {
+    uint64_t val = map->phys_root & X86_PAGE_ADDRESS_MASK;
+
+    if (!pcid_supported || !map->pcids || cpu_id >= map->pcids_capacity) return val;
+    if (map->pcids[cpu_id] == 0) arch_mmu_allocate_pcid(map);
+
+    uint16_t pcid = map->pcids[cpu_id];
+    val |= (uint64_t)(pcid & 0xfff);
+
+    if (no_flush_hint && pcid != 0) val |= (1ul << 63);
+    return val;
 }
 
 static size_t get_pat_flags(cache_type_t cache, bool is_huge) {
@@ -93,20 +222,20 @@ static inline uint32_t flags_to_generic(size_t arch_flags) {
 }
 
 static inline size_t resolve_page_size(size_t req_size, uintptr_t virt, uintptr_t phys) {
+    if (req_size != PAGE_SIZE_SMALL && req_size != PAGE_SIZE_MEDIUM && req_size != PAGE_SIZE_LARGE)
+        req_size = PAGE_SIZE_SMALL;
+
     // Downgrade 1GB to 2MB if unsupported or unaligned
-    if (req_size == PAGE_SIZE_LARGE) {
+    if (req_size == PAGE_SIZE_LARGE)
         if (!pml3_translation || !is_aligned(virt, PAGE_SIZE_LARGE) ||
             (phys && !is_aligned(phys, PAGE_SIZE_LARGE))) {
             req_size = PAGE_SIZE_MEDIUM;
         }
-    }
 
     // Downgrade 2MB to 4KB if unaligned
-    if (req_size == PAGE_SIZE_MEDIUM) {
-        if (!is_aligned(virt, PAGE_SIZE_MEDIUM) || (phys && !is_aligned(phys, PAGE_SIZE_MEDIUM))) {
+    if (req_size == PAGE_SIZE_MEDIUM)
+        if (!is_aligned(virt, PAGE_SIZE_MEDIUM) || (phys && !is_aligned(phys, PAGE_SIZE_MEDIUM)))
             req_size = PAGE_SIZE_SMALL;
-        }
-    }
 
     return req_size;
 }
@@ -123,9 +252,8 @@ static uint64_t* get_pte_cursor(
         int shift            = 12 + (target_level - 1) * 9;
         uintptr_t table_mask = ~((1ul << (shift + 9)) - 1);
 
-        if ((virt_addr & table_mask) == (*cached_base & table_mask)) {
+        if ((virt_addr & table_mask) == (*cached_base & table_mask))
             return &(*cached_table)[(virt_addr >> shift) & 0x1ff];
-        }
     }
 
     uintptr_t curr_phys = root_phys;
@@ -135,15 +263,10 @@ static uint64_t* get_pte_cursor(
         uint64_t entry  = table[idx];
 
         if (!(entry & X86_PAGE_FLAG_PRESENT)) {
-            if (!allocate) {
-                return nullptr;
-            }
+            if (!allocate) return nullptr;
 
             void* new_pt = pmm_alloc(1);
-
-            if (!new_pt) {
-                return nullptr;
-            }
+            if (!new_pt) return nullptr;
 
             memset((void*)to_higher_half((uintptr_t)new_pt), 0, PAGE_SIZE_SMALL);
 
@@ -173,28 +296,16 @@ get_existing_pte(uintptr_t root_phys, uintptr_t virt, size_t* out_step_size, int
         int idx         = (int)((virt >> (12 + (level - 1) * 9)) & 0x1ff);
         uint64_t entry  = table[idx];
 
-        if (!(entry & X86_PAGE_FLAG_PRESENT) && !(entry & X86_PAGE_FLAG_DEMAND)) {
-            return nullptr;
-        }
+        if (!(entry & X86_PAGE_FLAG_PRESENT) && !(entry & X86_PAGE_FLAG_DEMAND)) return nullptr;
 
         if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) {
-            if (out_step_size) {
-                *out_step_size = (level == 3) ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM;
-            }
-
-            if (out_level) {
-                *out_level = level;
-            }
+            if (out_step_size) *out_step_size = (level == 3) ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM;
+            if (out_level) *out_level = level;
 
             return &table[idx];
         } else if (level == 1) {
-            if (out_step_size) {
-                *out_step_size = PAGE_SIZE_SMALL;
-            }
-
-            if (out_level) {
-                *out_level = 1;
-            }
+            if (out_step_size) *out_step_size = PAGE_SIZE_SMALL;
+            if (out_level) *out_level = 1;
 
             return &table[idx];
         }
@@ -205,51 +316,168 @@ get_existing_pte(uintptr_t root_phys, uintptr_t virt, size_t* out_step_size, int
     return nullptr;
 }
 
-int arch_mmu_map(
+static void rollback_mapped_pages_locked(
     arch_pagemap_t* map,
     uintptr_t virt,
-    uintptr_t phys,
-    size_t length,
-    uint32_t flags,
-    uint32_t cache,
-    uint8_t pkey,
-    size_t req_page_size
+    size_t page_size,
+    int target_level,
+    size_t pages_mapped,
+    bool release_phys
 ) {
-    if (!map || length == 0 || !arch_is_canonical(virt, paging_max_levels)) {
-        return -EINVAL;
+    uintptr_t curr_virt    = virt;
+    uint64_t* cached_table = nullptr;
+    uintptr_t cached_base  = 0;
+
+    for (size_t i = 0; i < pages_mapped; ++i) {
+        uint64_t* pte = get_pte_cursor(
+            map->phys_root,
+            curr_virt,
+            target_level,
+            false,
+            &cached_table,
+            &cached_base
+        );
+
+        if (pte && *pte != 0) {
+            if (release_phys && pte_is_present(*pte)) {
+                uintptr_t phys_addr = pte_decode_phys_base(*pte, target_level);
+                pmm_free((void*)phys_addr);
+            }
+
+            *pte = 0;
+        }
+
+        curr_virt += page_size;
+    }
+}
+
+static int
+arch_mmu_shatter_locked(arch_pagemap_t* map, uintptr_t virt, size_t* out_shattered_span) {
+    void* new_pt = pmm_alloc(1);
+    if (!new_pt) return ERR_NO_MEM;
+
+    uint64_t* new_table = (uint64_t*)to_higher_half((uintptr_t)new_pt);
+    uintptr_t curr_phys = map->phys_root;
+    uint64_t* pte       = nullptr;
+    int hit_level       = 0;
+
+    for (int level = paging_max_levels; level >= 1; level--) {
+        uint64_t* table = (uint64_t*)to_higher_half(curr_phys);
+        int idx         = (int)((virt >> level_shift(level)) & 0x1ff);
+        uint64_t entry  = table[idx];
+
+        if (!pte_is_mapped(entry)) {
+            pmm_free(new_pt);
+            return ERR_NO_ENT;
+        }
+
+        if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) {
+            pte       = &table[idx];
+            hit_level = level;
+            break;
+        }
+
+        if (level == 1) {
+            pmm_free(new_pt);
+            if (out_shattered_span) *out_shattered_span = 0;
+
+            return ERR_OK;
+        }
+
+        curr_phys = entry & X86_PAGE_ADDRESS_MASK;
     }
 
-    size_t actual_page_size = resolve_page_size(req_page_size, virt, phys);
-    size_t arch_flags       = flags_to_arch(flags, cache, actual_page_size > PAGE_SIZE_SMALL, pkey);
-    int target_level        = (actual_page_size == PAGE_SIZE_LARGE)
-                                  ? 3
-                                  : ((actual_page_size == PAGE_SIZE_MEDIUM) ? 2 : 1);
+    if (!pte) {
+        pmm_free(new_pt);
+        return ERR_NO_ENT;
+    }
 
-    size_t num_pages = div_roundup(length, actual_page_size);
-    bool is_demand   = (flags & VMM_FLAG_DEMAND);
+    uint64_t entry      = *pte;
+    uintptr_t base_phys = pte_decode_phys_base(entry, hit_level);
+
+    size_t flags = entry & ~(X86_PAGE_ADDRESS_MASK | X86_PAGE_FLAG_HUGE | X86_PAGE_FLAG_LARGE_PAT);
+    if (entry & X86_PAGE_FLAG_LARGE_PAT) flags |= X86_PAGE_FLAG_PAT;
+
+    size_t child_step_size = (hit_level == 3) ? PAGE_SIZE_MEDIUM : PAGE_SIZE_SMALL;
+    size_t child_flags     = flags | ((hit_level == 3) ? X86_PAGE_FLAG_HUGE : 0);
+
+    for (int i = 0; i < 512; i++) {
+        new_table[i] = base_phys | child_flags;
+        base_phys += child_step_size;
+    }
+
+    size_t dir_flags = X86_PAGE_FLAG_PRESENT;
+    if (entry & X86_PAGE_FLAG_USER) dir_flags |= X86_PAGE_FLAG_USER;
+    if (entry & X86_PAGE_FLAG_WRITE) dir_flags |= X86_PAGE_FLAG_WRITE;
+    *pte = (uintptr_t)new_pt | dir_flags;
+
+    if (out_shattered_span)
+        *out_shattered_span = (hit_level == 3) ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM;
+
+    return ERR_OK;
+}
+
+int arch_mmu_map(arch_pagemap_t* map, const arch_mmu_map_args_t* args) {
+    if (!map || !args || args->length == 0) return ERR_INVALID;
+
+    uintptr_t virt       = args->virt_addr;
+    uintptr_t phys       = args->phys_addr;
+    size_t length        = args->length;
+    uint32_t flags       = args->flags;
+    cache_type_t cache   = args->cache;
+    uint8_t pkey         = args->pkey;
+    size_t req_page_size = args->page_size;
+    bool skip_tlb_flush  = args->skip_tlb_flush;
+
+    if (validate_virt_range(virt, length) != ERR_OK) return ERR_INVALID;
+    if (pkey != 0 && (!pku_supported || !pkey_index_valid(pkey))) return ERR_INVALID;
+
+    size_t actual_page_size = resolve_page_size(req_page_size, virt, phys);
+    if (!is_aligned(phys, PAGE_SIZE_SMALL) && phys != 0) return ERR_INVALID;
+    if (length > UINTPTR_MAX - (actual_page_size - 1)) return ERR_OVERFLOW;
+
+    size_t map_span = align_up(length, actual_page_size);
+    if (phys && (phys > UINTPTR_MAX - (map_span - actual_page_size))) return ERR_OVERFLOW;
+
+    size_t arch_flags = flags_to_arch(flags, cache, actual_page_size > PAGE_SIZE_SMALL, pkey);
+    int target_level  = (actual_page_size == PAGE_SIZE_LARGE)
+                            ? 3
+                            : ((actual_page_size == PAGE_SIZE_MEDIUM) ? 2 : 1);
+
+    size_t num_pages = map_span / actual_page_size;
+    bool is_demand   = (flags & VMM_FLAG_DEMAND) != 0;
+    if (is_demand && phys != 0) return ERR_INVALID;
 
     uint64_t* cached_table = nullptr;
     uintptr_t cached_base  = 0;
     int status             = 0;
     size_t pages_mapped    = 0;
     uintptr_t curr_virt    = virt;
+    uintptr_t curr_phys    = phys;
 
     acquire_spinlock(&map->lock);
 
+    if (!pkey_is_usable(map, pkey)) {
+        release_spinlock(&map->lock);
+        return ERR_INVALID;
+    }
+
     for (size_t i = 0; i < num_pages; ++i) {
-        uintptr_t curr_phys = 0;
+        uintptr_t page_phys = 0;
 
         if (!is_demand) {
-            curr_phys =
-                phys ? (phys + (i * actual_page_size))
+            page_phys =
+                phys ? curr_phys
                      : (
                            uintptr_t
                        )pmm_alloc_aligned(actual_page_size, actual_page_size / PAGE_SIZE_SMALL);
 
-            if (!curr_phys) {
-                status = -ENOMEM;
+            if (!page_phys) {
+                status = ERR_NO_MEM;
                 break;
             }
+
+            if (phys) curr_phys += actual_page_size;
         }
 
         uint64_t* pte = get_pte_cursor(
@@ -261,54 +489,31 @@ int arch_mmu_map(
             &cached_base
         );
 
-        if (!pte || (*pte & (X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND))) {
-            if (!phys && !is_demand) {
-                pmm_free((void*)curr_phys);
-            }
-
-            status = pte ? -EEXIST : -EFAULT;
+        if (!pte || pte_is_mapped(*pte)) {
+            if (!phys && !is_demand) pmm_free((void*)page_phys);
+            status = pte ? ERR_EXIST : ERR_FAULT;
             break;
         }
 
-        *pte = (curr_phys & X86_PAGE_ADDRESS_MASK) | arch_flags;
+        *pte = (page_phys & X86_PAGE_ADDRESS_MASK) | arch_flags;
         curr_virt += actual_page_size;
         pages_mapped++;
     }
 
     if (status != 0 && pages_mapped > 0) {
-        curr_virt    = virt;
-        cached_table = nullptr;
-
-        for (size_t i = 0; i < pages_mapped; ++i) {
-            uint64_t* pte = get_pte_cursor(
-                map->phys_root,
-                curr_virt,
-                target_level,
-                false,
-                &cached_table,
-                &cached_base
-            );
-
-            if (pte && (*pte != 0)) {
-                if (!phys && !is_demand && (*pte & X86_PAGE_FLAG_PRESENT)) {
-                    uintptr_t phys_addr = *pte & X86_PAGE_ADDRESS_MASK;
-                    if ((*pte & X86_PAGE_FLAG_HUGE)) {
-                        phys_addr &= ~X86_PAGE_FLAG_LARGE_PAT;
-                    }
-
-                    pmm_free((void*)phys_addr);
-                }
-
-                *pte = 0;
-            }
-
-            curr_virt += actual_page_size;
-        }
+        rollback_mapped_pages_locked(
+            map,
+            virt,
+            actual_page_size,
+            target_level,
+            pages_mapped,
+            !phys && !is_demand
+        );
     }
 
     release_spinlock(&map->lock);
 
-    if (status == ERR_OK) arch_mmu_flush_tlb(map, virt, length);
+    if (status == ERR_OK && !skip_tlb_flush) arch_mmu_flush_tlb(map, virt, length);
     return status;
 }
 
@@ -320,8 +525,9 @@ static bool unmap_level(
     bool free_phys
 ) {
     uint64_t* table  = (uint64_t*)to_higher_half(table_phys);
-    int shift        = 12 + (level - 1) * 9;
-    size_t step_size = 1ul << shift;
+    int shift        = level_shift(level);
+    size_t step_size = level_step_size(level);
+    bool maybe_empty = true;
 
     uintptr_t curr = virt_start;
     while (curr < virt_end) {
@@ -330,11 +536,10 @@ static bool unmap_level(
         uintptr_t next = align_down(curr, step_size) + step_size;
         if (next == 0 || next > virt_end) next = virt_end;
 
-        if (entry & (X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND)) {
+        if (pte_is_mapped(entry)) {
             if (level == 1 || (entry & X86_PAGE_FLAG_HUGE)) {
-                if (free_phys && (entry & X86_PAGE_FLAG_PRESENT)) {
-                    uintptr_t phys = entry & X86_PAGE_ADDRESS_MASK;
-                    if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) phys &= ~X86_PAGE_FLAG_LARGE_PAT;
+                if (free_phys && pte_is_present(entry)) {
+                    uintptr_t phys = pte_decode_phys_base(entry, level);
 
                     pmm_dec_ref((void*)phys);
                 }
@@ -351,77 +556,64 @@ static bool unmap_level(
             }
         }
 
+        if (table[idx] != 0) maybe_empty = false;
+
         curr = next;
     }
+
+    if (!maybe_empty) return false;
 
     for (int i = 0; i < 512; i++)
         if (table[i] != 0) return false;
     return true;
 }
 
-int arch_mmu_unmap(arch_pagemap_t* map, uintptr_t virt, size_t length, bool free_phys) {
-    if (!map || length == 0) return -EINVAL;
+int arch_mmu_unmap(arch_pagemap_t* map, const arch_mmu_unmap_args_t* args) {
+    if (!map || !args || args->length == 0) return ERR_INVALID;
+
+    uintptr_t virt  = args->virt_addr;
+    size_t length   = args->length;
+    bool free_phys  = args->free_phys;
+    bool skip_flush = args->skip_tlb_flush;
+
+    if (validate_virt_range(virt, length) != ERR_OK) return ERR_INVALID;
 
     uintptr_t end_virt = virt + length;
-    if (end_virt < virt) return -EINVAL;
 
     acquire_spinlock(&map->lock);
     unmap_level(map->phys_root, paging_max_levels, virt, end_virt, free_phys);
     release_spinlock(&map->lock);
 
-    arch_mmu_flush_tlb(map, virt, length);
+    if (!skip_flush) arch_mmu_flush_tlb(map, virt, length);
+
     return 0;
 }
 
 uintptr_t
 arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_flags, size_t* page_size) {
-    if (!map || !arch_is_canonical(virt, paging_max_levels)) {
-        return 0;
-    }
+    if (!map || !arch_is_canonical(virt, paging_max_levels)) return 0;
+
+    if (out_flags) *out_flags = 0;
+    if (page_size) *page_size = 0;
 
     acquire_spinlock(&map->lock);
-    uintptr_t curr_phys   = map->phys_root;
     uintptr_t result_phys = 0;
 
-    for (int level = paging_max_levels; level >= 1; level--) {
-        uint64_t* table = (uint64_t*)to_higher_half(curr_phys);
-        int idx         = (int)((virt >> (12 + (level - 1) * 9)) & 0x1ff);
-        uint64_t entry  = table[idx];
+    size_t step_size = 0;
+    int level        = 0;
+    uint64_t* pte    = get_existing_pte(map->phys_root, virt, &step_size, &level);
 
-        if (!(entry & X86_PAGE_FLAG_PRESENT) && !(entry & X86_PAGE_FLAG_DEMAND)) {
-            break;
+    if (pte) {
+        uint64_t entry = *pte;
+
+        // DEMAND entries reserve virtual address space but do not resolve to a physical address.
+        if (pte_is_present(entry)) {
+            uintptr_t base_phys = pte_decode_phys_base(entry, level);
+            result_phys         = base_phys + (virt & (step_size - 1));
+
+            if (out_flags) *out_flags = flags_to_generic(entry);
+            if (page_size) *page_size = level_page_size(level);
         }
-
-        if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) {
-            size_t page_mask    = (level == 3) ? (PAGE_SIZE_LARGE - 1) : (PAGE_SIZE_MEDIUM - 1);
-            uintptr_t base_phys = entry & X86_PAGE_ADDRESS_MASK;
-            base_phys &= ~X86_PAGE_FLAG_LARGE_PAT;
-            result_phys = base_phys + (virt & page_mask);
-
-            if (out_flags) {
-                *out_flags = flags_to_generic(entry);
-            }
-
-            if (page_size) {
-                *page_size = (level == 3) ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM;
-            }
-
-            break;
-        } else if (level == 1) {
-            result_phys = (entry & X86_PAGE_ADDRESS_MASK) + (virt & (PAGE_SIZE_SMALL - 1));
-
-            if (out_flags) {
-                *out_flags = flags_to_generic(entry);
-            }
-
-            if (page_size) {
-                *page_size = PAGE_SIZE_SMALL;
-            }
-
-            break;
-        }
-
-        curr_phys = entry & X86_PAGE_ADDRESS_MASK;
     }
 
     release_spinlock(&map->lock);
@@ -429,38 +621,52 @@ arch_mmu_translate(arch_pagemap_t* map, uintptr_t virt, uint32_t* out_flags, siz
 }
 
 void arch_mmu_load(arch_pagemap_t* map) {
-    uint64_t val = map->phys_root & X86_PAGE_ADDRESS_MASK;
+    if (!map) return;
 
-    if (pcid_supported) {
-        uint32_t cpu_id = arch_get_core_idx();
-        val |= (map->pcids[cpu_id] & 0xfff) | (1ULL << 63);
-    }
-
-    write_cr3(val);
+    uint32_t cpu_id = arch_get_core_idx();
+    write_cr3(build_cr3_value(map, cpu_id, true));
 }
 
 #define TLB_FLUSH_THRESHOLD 64
 void arch_mmu_flush_local(arch_pagemap_t* map, uintptr_t virt, size_t length, uint32_t cpu_id) {
+    if (!map || length == 0) return;
+
     uint64_t cr3 = read_cr3();
-    size_t pages = div_roundup(length, PAGE_SIZE_SMALL);
+    size_t pages = tlb_pages_for_range(virt, length);
+
+    uintptr_t start = align_down(virt, PAGE_SIZE_SMALL);
+    uintptr_t end   = virt + length;
+    if (end < virt) {
+        end = UINTPTR_MAX;
+    } else {
+        if (end > UINTPTR_MAX - (PAGE_SIZE_SMALL - 1))
+            end = UINTPTR_MAX;
+        else
+            end = align_up(end, PAGE_SIZE_SMALL);
+    }
 
     if ((cr3 & X86_PAGE_ADDRESS_MASK) != (map->phys_root & X86_PAGE_ADDRESS_MASK)) return;
 
-    bool has_pcid = (pcid_supported && invpcid_supported && map->pcids && map->pcids[cpu_id] != 0);
+    bool has_pcid =
+        (pcid_supported && invpcid_supported && map->pcids && cpu_id < map->pcids_capacity &&
+         map->pcids[cpu_id] != 0);
     if (pages > TLB_FLUSH_THRESHOLD) {
         if (has_pcid)
             invpcid(INVPCID_SINGLE_CONTEXT, map->pcids[cpu_id], 0);
         else
-            arch_mmu_load(map);
+            write_cr3(build_cr3_value(map, cpu_id, false));
     } else {
-        uintptr_t end = virt + length;
-
         if (has_pcid) {
             uint64_t pcid = map->pcids[cpu_id];
-            for (uintptr_t addr = virt; addr < end; addr += PAGE_SIZE_SMALL)
+            for (uintptr_t addr = start; addr < end; addr += PAGE_SIZE_SMALL) {
                 invpcid(INVPCID_INDIVIDUAL_ADDR, pcid, addr);
+                if (addr > UINTPTR_MAX - PAGE_SIZE_SMALL) break;
+            }
         } else {
-            for (uintptr_t addr = virt; addr < end; addr += PAGE_SIZE_SMALL) invlpg((void*)addr);
+            for (uintptr_t addr = start; addr < end; addr += PAGE_SIZE_SMALL) {
+                invlpg((void*)addr);
+                if (addr > UINTPTR_MAX - PAGE_SIZE_SMALL) break;
+            }
         }
     }
 }
@@ -471,9 +677,8 @@ void arch_mmu_flush_tlb(arch_pagemap_t* map, uintptr_t virt, size_t length) {
     size_t flags = arch_save_flags();
     arch_disable_interrupts();
 
-    uint64_t cr3    = read_cr3();
     uint32_t cpu_id = arch_get_core_idx();
-    size_t pages    = div_roundup(length, PAGE_SIZE_SMALL);
+    size_t pages    = tlb_pages_for_range(virt, length);
 
     smp_tlb_shootdown(map, virt, pages);
     arch_mmu_flush_local(map, virt, length, cpu_id);
@@ -482,11 +687,11 @@ void arch_mmu_flush_tlb(arch_pagemap_t* map, uintptr_t virt, size_t length) {
 }
 
 int arch_mmu_remap(arch_pagemap_t* map, uintptr_t old_virt, uintptr_t new_virt, size_t length) {
-    if (!map || length == 0) return -EINVAL;
+    if (!map || length == 0) return ERR_INVALID;
 
-    if (!arch_is_canonical(old_virt, paging_max_levels) ||
-        !arch_is_canonical(new_virt, paging_max_levels))
-        return -EINVAL;
+    if (validate_virt_range(old_virt, length) != ERR_OK ||
+        validate_virt_range(new_virt, length) != ERR_OK)
+        return ERR_INVALID;
 
     if (old_virt == new_virt) return 0;
 
@@ -517,7 +722,12 @@ int arch_mmu_remap(arch_pagemap_t* map, uintptr_t old_virt, uintptr_t new_virt, 
         if (backwards && old_pte && level > 1) {
             uintptr_t huge_base = probe_old & ~(step_size - 1);
             if (huge_base < old_virt) {
-                arch_mmu_shatter(map, probe_old);
+                int shatter_status = arch_mmu_shatter_locked(map, probe_old, nullptr);
+                if (shatter_status != ERR_OK) {
+                    status = shatter_status;
+                    break;
+                }
+
                 continue;
             }
 
@@ -531,7 +741,12 @@ int arch_mmu_remap(arch_pagemap_t* map, uintptr_t old_virt, uintptr_t new_virt, 
 
             if (level > 1) {
                 if (remaining < step_size || !is_aligned(target_new, step_size)) {
-                    arch_mmu_shatter(map, probe_old);
+                    int shatter_status = arch_mmu_shatter_locked(map, probe_old, nullptr);
+                    if (shatter_status != ERR_OK) {
+                        status = shatter_status;
+                        break;
+                    }
+
                     continue;
                 }
             }
@@ -546,12 +761,12 @@ int arch_mmu_remap(arch_pagemap_t* map, uintptr_t old_virt, uintptr_t new_virt, 
             );
 
             if (!new_pte) {
-                status = -ENOMEM;
+                status = ERR_NO_MEM;
                 break;
             }
 
             if (*new_pte & (X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND)) {
-                status = -EEXIST;
+                status = ERR_EXIST;
                 break;
             }
 
@@ -579,15 +794,12 @@ int arch_mmu_remap(arch_pagemap_t* map, uintptr_t old_virt, uintptr_t new_virt, 
 }
 
 int arch_mmu_allocate_pcid(arch_pagemap_t* map) {
-    if (!pcid_supported) {
-        return 0;
-    }
+    if (!map) return ERR_INVALID;
+    if (!pcid_supported) return 0;
+    if (!map->pcids) return ERR_INVALID;
 
     uint32_t cpu_id = arch_get_core_idx();
-
-    if (cpu_id >= map->pcids_capacity) {
-        return -ERANGE;
-    }
+    if (cpu_id >= map->pcids_capacity) return ERR_OVERFLOW;
 
     acquire_spinlock(&map->lock);
 
@@ -599,52 +811,51 @@ int arch_mmu_allocate_pcid(arch_pagemap_t* map) {
     release_spinlock(&map->lock);
 
     cpu_local_mmu_t* cpu_mmu = get_cpu_local_mmu_by_id(cpu_id);
-    int allocated_pcid       = -1;
+    if (!cpu_mmu) return ERR_NO_DEV;
+
+    int allocated_pcid = -1;
 
     acquire_spinlock(&cpu_mmu->pcid_lock);
 
     for (int i = 0; i < 64; ++i) {
-        if (cpu_mmu->pcid_bitmap[i] == UINT64_MAX) {
-            continue;
-        }
+        uint64_t used = cpu_mmu->pcid_bitmap[i];
+        if (used == UINT64_MAX) continue;
 
-        for (int bit = 0; bit < 64; ++bit) {
-            int pcid = (i * 64) + bit;
+        uint64_t free_mask = ~used;
 
-            if (pcid == 0) {
-                // Reserved for kernel/idle
-                continue;
-            }
+        // PCID 0 is reserved for the kernel/idle context.
+        if (i == 0) free_mask &= ~1ull;
+        if (free_mask == 0) continue;
 
-            if (!(cpu_mmu->pcid_bitmap[i] & (1ul << bit))) {
-                cpu_mmu->pcid_bitmap[i] |= (1ul << bit);
-                allocated_pcid = pcid;
-                break;
-            }
-        }
+        int bit                 = ctz(free_mask);
+        cpu_mmu->pcid_bitmap[i] = used | (1ull << bit);
+        allocated_pcid          = (i * 64) + bit;
 
-        if (allocated_pcid != -1) {
-            break;
-        }
+        if (allocated_pcid != -1) break;
     }
 
     release_spinlock(&cpu_mmu->pcid_lock);
+    if (allocated_pcid == -1) return ERR_BUSY;
+    acquire_spinlock(&map->lock);
 
-    if (allocated_pcid == -1) {
-        return -EBUSY;
+    // Another thread may have assigned a PCID while we were allocating.
+    if (map->pcids[cpu_id] == 0) {
+        map->pcids[cpu_id] = (uint16_t)allocated_pcid;
+    } else {
+        acquire_spinlock(&cpu_mmu->pcid_lock);
+        int idx = allocated_pcid / 64;
+        int bit = allocated_pcid % 64;
+        cpu_mmu->pcid_bitmap[idx] &= ~(1ul << bit);
+        release_spinlock(&cpu_mmu->pcid_lock);
     }
 
-    acquire_spinlock(&map->lock);
-    map->pcids[cpu_id] = allocated_pcid;
     release_spinlock(&map->lock);
 
     return 0;
 }
 
 void arch_mmu_free_pcid(arch_pagemap_t* map) {
-    if (!pcid_supported || !map->pcids) {
-        return;
-    }
+    if (!map || !pcid_supported || !map->pcids) return;
 
     acquire_spinlock(&map->lock);
 
@@ -674,65 +885,61 @@ void arch_mmu_free_pcid(arch_pagemap_t* map) {
 }
 
 int arch_mmu_allocate_pkey(arch_pagemap_t* map) {
-    if (!pku_supported) {
-        return -EBADF;
-    }
+    if (!map) return ERR_INVALID;
+    if (!pku_supported) return ERR_BAD_F;
 
     acquire_spinlock(&map->lock);
 
-    for (int i = 0; i < X86_MAX_PKEYS; ++i) {
-        if (!(map->active_pkeys & (1 << i))) {
-            map->active_pkeys |= (1 << i);
-            release_spinlock(&map->lock);
-            return i;
-        }
+    uint16_t free_mask = (uint16_t)(~map->active_pkeys) & X86_PKEY_ALLOC_MASK;
+    if (free_mask == 0) {
+        release_spinlock(&map->lock);
+        return ERR_BUSY;
     }
 
+    uint8_t pkey = (uint8_t)ctz((unsigned int)free_mask);
+    map->active_pkeys |= pkey_bit(pkey);
+    pkru_allow_key(&map->pkru_state, pkey);
+
+    uint32_t pkru_val = map->pkru_state;
     release_spinlock(&map->lock);
 
-    return -EBUSY;
+    uint64_t cr3 = read_cr3();
+    if ((cr3 & X86_PAGE_ADDRESS_MASK) == (map->phys_root & X86_PAGE_ADDRESS_MASK))
+        write_pkru_register(pkru_val);
+
+    return pkey;
 }
 
-// TODO: Expose it as a syscall
 void arch_mmu_write_pkru(arch_pagemap_t* map) {
-    if (!pku_supported || !map) {
-        return;
-    }
+    if (!pku_supported || !map) return;
 
-    // 01 (Access disable) for all keys
-    uint32_t pkru_val = 0x55555555;
+    acquire_spinlock(&map->lock);
+    uint32_t pkru_val = map->pkru_state;
+    release_spinlock(&map->lock);
 
-    // Grant full access to key 0
-    pkru_val &= ~(3u);
-
-    for (int i = 0; i < X86_MAX_PKEYS; ++i) {
-        if (map->active_pkeys & (1 << i)) {
-            pkru_val &= ~(3u << (i * 2));
-        }
-    }
-
-    asm volatile("wrpkru" ::"a"(pkru_val), "c"(0), "d"(0));
+    write_pkru_register(pkru_val);
 }
 
-int arch_mmu_create(arch_pagemap_t* map) {
-    if (!map) {
-        return -EINVAL;
-    }
+static void free_table_recursive(uintptr_t phys_addr, int level);
 
+static int arch_mmu_init_pagemap(arch_pagemap_t* map) {
+    if (!map) return ERR_INVALID;
+
+    memset(map, 0, sizeof(*map));
     create_spinlock(&map->lock);
-    map->active_pkeys = 0;
+    map->active_pkeys = pkey_bit(0);
+    map->pkru_state   = pkru_default_state();
 
     void* root_frame = pmm_alloc(1);
-    if (!root_frame) {
-        return -ENOMEM;
-    }
+    if (!root_frame) return ERR_NO_MEM;
 
     map->phys_root  = (uintptr_t)root_frame;
     uint64_t* table = (uint64_t*)to_higher_half(map->phys_root);
 
     memset(table, 0, 256 * sizeof(uint64_t));
 
-    arch_pagemap_t* kernel_map = (arch_pagemap_t*)vmm_get_kernel_pagemap();
+    pagemap_t* kernel_pagemap  = vmm_get_kernel_pagemap();
+    arch_pagemap_t* kernel_map = kernel_pagemap ? kernel_pagemap->arch : nullptr;
     if (kernel_map && kernel_map != map) {
         uint64_t* kernel_table = (uint64_t*)to_higher_half(kernel_map->phys_root);
         memcpy(&table[256], &kernel_table[256], 256 * sizeof(uint64_t));
@@ -747,10 +954,11 @@ int arch_mmu_create(arch_pagemap_t* map) {
         if (!map->pcids) {
             pmm_free(root_frame);
             map->phys_root = 0;
-            return -ENOMEM;
+            return ERR_NO_MEM;
         }
 
         map->pcids_capacity = cpu_count;
+        memset(map->pcids, 0, cpu_count * sizeof(*map->pcids));
     } else {
         map->pcids          = nullptr;
         map->pcids_capacity = 0;
@@ -759,30 +967,47 @@ int arch_mmu_create(arch_pagemap_t* map) {
     return 0;
 }
 
-void arch_mmu_destroy(arch_pagemap_t* map) {
-    if (!map) {
-        return;
+arch_pagemap_t* arch_mmu_new_pagemap(void) {
+    arch_pagemap_t* map = kmalloc(sizeof(*map));
+    if (!map) return nullptr;
+
+    if (arch_mmu_init_pagemap(map) != 0) {
+        kfree(map);
+        return nullptr;
     }
+
+    return map;
+}
+
+void arch_mmu_delete_pagemap(arch_pagemap_t* map) {
+    if (!map) return;
 
     arch_mmu_free_pcid(map);
 
     uint64_t current_cr3 = read_cr3();
 
     if ((current_cr3 & X86_PAGE_ADDRESS_MASK) == (map->phys_root & X86_PAGE_ADDRESS_MASK)) {
-        arch_pagemap_t* kernel_map = (arch_pagemap_t*)vmm_get_kernel_pagemap();
+        pagemap_t* kernel_pagemap  = vmm_get_kernel_pagemap();
+        arch_pagemap_t* kernel_map = kernel_pagemap ? kernel_pagemap->arch : nullptr;
 
-        if (kernel_map) {
+        if (kernel_map && kernel_map != map) {
             arch_mmu_load(kernel_map);
+            arch_mmu_write_pkru(kernel_map);
         }
     }
 
     if (map->phys_root) {
-        pmm_free((void*)map->phys_root);
+        free_table_recursive(map->phys_root, paging_max_levels);
         map->phys_root = 0;
     }
+
+    kfree(map);
 }
 
 void arch_mmu_init(void) {
+    if (!mp_request.response || mp_request.response->cpu_count == 0)
+        PANIC("MMU: SMP topology is missing!");
+
     bool has_pge  = cpu_has_feature(FEATURE_PGE);
     bool has_la57 = cpu_has_feature(FEATURE_LA57);
 
@@ -796,33 +1021,20 @@ void arch_mmu_init(void) {
     nx_supported     = cpu_has_feature(FEATURE_XD);
     pml3_translation = cpu_has_feature(FEATURE_PDPE1GB);
 
-    if (nx_supported) {
-        write_msr(X86_MSR_IA32_EFER, read_msr(X86_MSR_IA32_EFER) | X86_EFER_NXE);
-    }
+    if (nx_supported) write_msr(X86_MSR_IA32_EFER, read_msr(X86_MSR_IA32_EFER) | X86_EFER_NXE);
 
     uint64_t cr4 = read_cr4();
 
-    if (has_pge) {
-        cr4 |= X86_CR4_PGE;
-    }
+    if (has_pge) cr4 |= X86_CR4_PGE;
+    if (has_smep) cr4 |= X86_CR4_SMEP;
+    if (has_smap) cr4 |= X86_CR4_SMAP;
+    if (pku_supported) cr4 |= X86_CR4_PKE;
+    if (pcid_supported) cr4 |= X86_CR4_PCIDE;
 
-    if (has_smep) {
-        cr4 |= X86_CR4_SMEP;
-    }
-
-    if (pku_supported) {
-        cr4 |= X86_CR4_PKE;
-    }
-
-    if (pcid_supported) {
-        cr4 |= X86_CR4_PCIDE;
-    }
-
-    if (has_la57 && (cr4 & X86_CR4_LA57)) {
+    if (has_la57 && (cr4 & X86_CR4_LA57))
         paging_max_levels = 5;
-    } else {
+    else
         paging_max_levels = 4;
-    }
 
     write_cr4(cr4);
 
@@ -864,10 +1076,9 @@ void arch_mmu_init(void) {
     uint32_t cpu_count = mp_request.response->cpu_count;
 
     cpu_mmu_states = kmalloc(cpu_count * sizeof(cpu_local_mmu_t));
+    if (!cpu_mmu_states) PANIC("MMU: Failed to allocate per-cpu MMU state");
 
-    for (uint32_t i = 0; i < cpu_count; ++i) {
-        create_spinlock(&cpu_mmu_states[i].pcid_lock);
-    }
+    memset(cpu_mmu_states, 0, cpu_count * sizeof(cpu_local_mmu_t));
 
     pcid_cache = kmem_cache_create(
         "pcid_cache",
@@ -876,94 +1087,94 @@ void arch_mmu_init(void) {
         0,
         nullptr
     );
+
+    if (!pcid_cache) PANIC("MMU: Failed to create PCID cache");
 }
 
 const uintptr_t get_user_space_end_limit(void) {
     return (paging_max_levels == 5) ? USER_SPACE_END_5L : USER_SPACE_END_4L;
 }
 
+const uintptr_t get_kernel_space_end_limit(void) {
+    return KERNEL_SPACE_END;
+}
+
 void arch_mmu_free_pkey(arch_pagemap_t* map, uint8_t pkey) {
-    if (!pku_supported || !map || pkey == 0 || pkey >= X86_MAX_PKEYS) {
-        return;
-    }
+    if (!pku_supported || !map || pkey == 0 || !pkey_index_valid(pkey)) return;
 
     acquire_spinlock(&map->lock);
 
-    map->active_pkeys &= ~(1 << pkey);
-
-    release_spinlock(&map->lock);
-}
-
-int arch_mmu_protect(
-    arch_pagemap_t* map,
-    uintptr_t virt,
-    size_t length,
-    uint32_t flags,
-    cache_type_t cache,
-    uint8_t pkey
-) {
-    if (!map || length == 0 || !arch_is_canonical(virt, paging_max_levels)) {
-        return -EINVAL;
+    uint16_t bit = pkey_bit(pkey);
+    if (!(map->active_pkeys & bit)) {
+        release_spinlock(&map->lock);
+        return;
     }
 
+    map->active_pkeys &= ~bit;
+    pkru_deny_key(&map->pkru_state, pkey);
+
+    uint32_t pkru_val = map->pkru_state;
+    release_spinlock(&map->lock);
+
+    uint64_t cr3 = read_cr3();
+    if ((cr3 & X86_PAGE_ADDRESS_MASK) == (map->phys_root & X86_PAGE_ADDRESS_MASK)) {
+        write_pkru_register(pkru_val);
+    }
+}
+
+int arch_mmu_protect(arch_pagemap_t* map, const arch_mmu_protect_args_t* args) {
+    if (!map || !args || args->length == 0 ||
+        !arch_is_canonical(args->virt_addr, paging_max_levels)) {
+        return ERR_INVALID;
+    }
+
+    uintptr_t virt      = args->virt_addr;
+    size_t length       = args->length;
+    uint32_t flags      = args->flags;
+    cache_type_t cache  = args->cache;
+    uint8_t pkey        = args->pkey;
+    bool skip_tlb_flush = args->skip_tlb_flush;
+
+    if (pkey != 0 && (!pku_supported || !pkey_index_valid(pkey))) return ERR_INVALID;
+
+    uintptr_t end_virt = virt + length;
+    if (end_virt < virt || !arch_is_canonical(end_virt - 1, paging_max_levels)) return ERR_INVALID;
+
     uintptr_t curr_virt = virt;
-    uintptr_t end_virt  = virt + length;
     int status          = 0;
 
     acquire_spinlock(&map->lock);
 
+    if (!pkey_is_usable(map, pkey)) {
+        release_spinlock(&map->lock);
+        return ERR_INVALID;
+    }
+
     while (curr_virt < end_virt) {
-        uintptr_t curr_phys = map->phys_root;
-        uint64_t* pte       = nullptr;
-        size_t step_size    = PAGE_SIZE_SMALL;
-        bool is_huge        = false;
-
-        for (int level = paging_max_levels; level >= 1; level--) {
-            uint64_t* table = (uint64_t*)to_higher_half(curr_phys);
-            int idx         = (int)((curr_virt >> (12 + (level - 1) * 9)) & 0x1ff);
-            uint64_t entry  = table[idx];
-
-            if (!(entry & X86_PAGE_FLAG_PRESENT) && !(entry & X86_PAGE_FLAG_DEMAND)) {
-                break;
-            }
-
-            if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) {
-                pte       = &table[idx];
-                step_size = (level == 3) ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM;
-                is_huge   = true;
-                break;
-            } else if (level == 1) {
-                pte       = &table[idx];
-                step_size = PAGE_SIZE_SMALL;
-                is_huge   = false;
-                break;
-            }
-
-            curr_phys = entry & X86_PAGE_ADDRESS_MASK;
-        }
+        size_t step_size = PAGE_SIZE_SMALL;
+        int level        = 1;
+        uint64_t* pte    = get_existing_pte(map->phys_root, curr_virt, &step_size, &level);
+        bool is_huge     = level > 1;
 
         if (pte) {
             uint64_t preserved_bits =
                 *pte & (X86_PAGE_ADDRESS_MASK | X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND |
                         X86_PAGE_FLAG_HUGE | X86_PAGE_FLAG_ACCESSED | X86_PAGE_FLAG_DIRTY);
 
-            if (is_huge) {
+            if (is_huge)
                 preserved_bits &=
                     ~(X86_PAGE_FLAG_LARGE_PAT | X86_PAGE_FLAG_CACHE_DISABLE |
                       X86_PAGE_FLAG_WRITE_THROUGH);
-            } else {
+            else
                 preserved_bits &=
                     ~(X86_PAGE_FLAG_PAT | X86_PAGE_FLAG_CACHE_DISABLE |
                       X86_PAGE_FLAG_WRITE_THROUGH);
-            }
 
             size_t arch_flags = flags_to_arch(flags, cache, is_huge, pkey);
-
             arch_flags &= ~(X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND | X86_PAGE_FLAG_HUGE);
-
             *pte = preserved_bits | arch_flags;
         } else {
-            status = -ENOENT;
+            status = ERR_NO_ENT;
             break;
         }
 
@@ -972,103 +1183,28 @@ int arch_mmu_protect(
 
     release_spinlock(&map->lock);
 
-    arch_mmu_flush_tlb(map, virt, length);
+    if (!skip_tlb_flush) arch_mmu_flush_tlb(map, virt, length);
 
     return status;
 }
 
-#define PTE_PRESERVED_FLAGS                                                                      \
-    (X86_PAGE_ADDRESS_MASK | X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND | X86_PAGE_FLAG_HUGE | \
-     X86_PAGE_FLAG_DIRTY | X86_PAGE_FLAG_ACCESSED | X86_PAGE_FLAG_LARGE_PAT | X86_PAGE_FLAG_PAT)
-
 int arch_mmu_shatter(arch_pagemap_t* map, uintptr_t virt) {
-    if (!map || !arch_is_canonical(virt, paging_max_levels)) {
-        return -EINVAL;
-    }
+    if (!map || !arch_is_canonical(virt, paging_max_levels)) return ERR_INVALID;
 
-    void* new_pt = pmm_alloc(1);
-    if (!new_pt) {
-        return -ENOMEM;
-    }
-
-    uint64_t* new_table = (uint64_t*)to_higher_half((uintptr_t)new_pt);
+    size_t shattered_span = 0;
 
     acquire_spinlock(&map->lock);
-
-    uintptr_t curr_phys = map->phys_root;
-    uint64_t* pte       = nullptr;
-    int hit_level       = 0;
-
-    for (int level = paging_max_levels; level >= 1; level--) {
-        uint64_t* table = (uint64_t*)to_higher_half(curr_phys);
-        int idx         = (int)((virt >> (12 + (level - 1) * 9)) & 0x1ff);
-        uint64_t entry  = table[idx];
-
-        if (!(entry & X86_PAGE_FLAG_PRESENT) && !(entry & X86_PAGE_FLAG_DEMAND)) {
-            release_spinlock(&map->lock);
-            pmm_free(new_pt);
-            return -ENOENT;
-        }
-
-        if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) {
-            pte       = &table[idx];
-            hit_level = level;
-            break;
-        } else if (level == 1) {
-            release_spinlock(&map->lock);
-            pmm_free(new_pt);
-            return 0;
-        }
-
-        curr_phys = entry & X86_PAGE_ADDRESS_MASK;
-    }
-
-    if (!pte) {
-        release_spinlock(&map->lock);
-        pmm_free(new_pt);
-        return -ENOENT;
-    }
-
-    uint64_t entry      = *pte;
-    uintptr_t base_phys = entry & X86_PAGE_ADDRESS_MASK;
-
-    if (hit_level > 1) {
-        base_phys &= ~X86_PAGE_FLAG_LARGE_PAT;
-    }
-
-    size_t flags = entry & ~(X86_PAGE_ADDRESS_MASK | X86_PAGE_FLAG_HUGE | X86_PAGE_FLAG_LARGE_PAT);
-    if (entry & X86_PAGE_FLAG_LARGE_PAT) {
-        flags |= X86_PAGE_FLAG_PAT;
-    }
-
-    size_t step_size   = (hit_level == 3) ? PAGE_SIZE_MEDIUM : PAGE_SIZE_SMALL;
-    size_t child_flags = flags | ((hit_level == 3) ? X86_PAGE_FLAG_HUGE : 0);
-
-    for (int i = 0; i < 512; i++) {
-        new_table[i] = base_phys | child_flags;
-        base_phys += step_size;
-    }
-
-    size_t dir_flags = X86_PAGE_FLAG_PRESENT;
-    if (entry & X86_PAGE_FLAG_USER) dir_flags |= X86_PAGE_FLAG_USER;
-    if (entry & X86_PAGE_FLAG_WRITE) dir_flags |= X86_PAGE_FLAG_WRITE;
-    *pte = (uintptr_t)new_pt | dir_flags;
-
+    int status = arch_mmu_shatter_locked(map, virt, &shattered_span);
     release_spinlock(&map->lock);
 
-    arch_mmu_flush_tlb(
-        map,
-        virt & ~((hit_level == 3 ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM) - 1),
-        hit_level == 3 ? PAGE_SIZE_LARGE : PAGE_SIZE_MEDIUM
-    );
+    if (status != ERR_OK) return status;
+    if (shattered_span != 0) arch_mmu_flush_tlb(map, virt & ~(shattered_span - 1), shattered_span);
 
-    return 0;
+    return ERR_OK;
 }
 
 int arch_mmu_collapse(arch_pagemap_t* map, uintptr_t virt) {
-    if (!map || !is_aligned(virt, PAGE_SIZE_MEDIUM)) {
-        return -EINVAL;
-    }
+    if (!map || !is_aligned(virt, PAGE_SIZE_MEDIUM)) return ERR_INVALID;
 
     acquire_spinlock(&map->lock);
 
@@ -1079,7 +1215,7 @@ int arch_mmu_collapse(arch_pagemap_t* map, uintptr_t virt) {
 
         if (!(entry & X86_PAGE_FLAG_PRESENT) || (entry & X86_PAGE_FLAG_HUGE)) {
             release_spinlock(&map->lock);
-            return -ENOENT;
+            return ERR_NO_ENT;
         }
 
         curr_phys = entry & X86_PAGE_ADDRESS_MASK;
@@ -1089,8 +1225,9 @@ int arch_mmu_collapse(arch_pagemap_t* map, uintptr_t virt) {
 
     if (!(*pde & X86_PAGE_FLAG_PRESENT)) {
         release_spinlock(&map->lock);
-        return -ENOENT;
+        return ERR_NO_ENT;
     }
+
     if (*pde & X86_PAGE_FLAG_HUGE) {
         release_spinlock(&map->lock);
         return 0;
@@ -1101,13 +1238,13 @@ int arch_mmu_collapse(arch_pagemap_t* map, uintptr_t virt) {
 
     if (!(pt[0] & X86_PAGE_FLAG_PRESENT)) {
         release_spinlock(&map->lock);
-        return -ENOENT;
+        return ERR_NO_ENT;
     }
 
     uintptr_t base_phys = pt[0] & X86_PAGE_ADDRESS_MASK;
     if (!is_aligned(base_phys, PAGE_SIZE_MEDIUM)) {
         release_spinlock(&map->lock);
-        return -EINVAL;
+        return ERR_INVALID;
     }
 
     uint64_t expected_entry = pt[0];
@@ -1117,14 +1254,13 @@ int arch_mmu_collapse(arch_pagemap_t* map, uintptr_t virt) {
 
         if (pt[i] != expected_entry) {
             release_spinlock(&map->lock);
-            return -EINVAL;
+            return ERR_INVALID;
         }
     }
 
     size_t new_flags = (pt[0] & ~X86_PAGE_ADDRESS_MASK) | X86_PAGE_FLAG_HUGE;
-    if (new_flags & X86_PAGE_FLAG_PAT) {
+    if (new_flags & X86_PAGE_FLAG_PAT)
         new_flags = (new_flags & ~X86_PAGE_FLAG_PAT) | X86_PAGE_FLAG_LARGE_PAT;
-    }
 
     *pde = base_phys | new_flags;
 
@@ -1135,86 +1271,34 @@ int arch_mmu_collapse(arch_pagemap_t* map, uintptr_t virt) {
     return 0;
 }
 
-bool arch_mmu_test_and_clear_dirty(arch_pagemap_t* map, uintptr_t virt) {
-    if (!map) {
-        return false;
-    }
+static bool arch_mmu_test_and_clear_flag(arch_pagemap_t* map, uintptr_t virt, uint64_t flag_bit) {
+    if (!map) return false;
 
     acquire_spinlock(&map->lock);
-    uintptr_t curr_phys = map->phys_root;
-    bool dirty          = false;
-    size_t flush_size   = PAGE_SIZE_SMALL;
+    bool was_set      = false;
+    size_t flush_size = PAGE_SIZE_SMALL;
 
-    for (int level = paging_max_levels; level >= 1; level--) {
-        uint64_t* pte =
-            &((uint64_t*)to_higher_half(curr_phys))[(virt >> (12 + (level - 1) * 9)) & 0x1ff];
+    int level     = 0;
+    uint64_t* pte = get_existing_pte(map->phys_root, virt, nullptr, &level);
 
-        if (!(*pte & X86_PAGE_FLAG_PRESENT)) {
-            break;
-        }
-
-        if (level == 1 || (*pte & X86_PAGE_FLAG_HUGE)) {
-            if (*pte & X86_PAGE_FLAG_DIRTY) {
-                dirty = true;
-                *pte &= ~X86_PAGE_FLAG_DIRTY;
-                flush_size = (level == 1) ? PAGE_SIZE_SMALL
-                                          : ((level == 2) ? PAGE_SIZE_MEDIUM : PAGE_SIZE_LARGE);
-            }
-
-            break;
-        }
-
-        curr_phys = *pte & X86_PAGE_ADDRESS_MASK;
+    if (pte && pte_is_present(*pte) && (*pte & flag_bit)) {
+        *pte &= ~flag_bit;
+        flush_size = level_page_size(level);
+        was_set    = true;
     }
 
     release_spinlock(&map->lock);
 
-    if (dirty) {
-        arch_mmu_flush_tlb(map, virt, flush_size);
-    }
+    if (was_set) arch_mmu_flush_tlb(map, virt, flush_size);
+    return was_set;
+}
 
-    return dirty;
+bool arch_mmu_test_and_clear_dirty(arch_pagemap_t* map, uintptr_t virt) {
+    return arch_mmu_test_and_clear_flag(map, virt, X86_PAGE_FLAG_DIRTY);
 }
 
 bool arch_mmu_test_and_clear_accessed(arch_pagemap_t* map, uintptr_t virt) {
-    if (!map) {
-        return false;
-    }
-
-    acquire_spinlock(&map->lock);
-    uintptr_t curr_phys = map->phys_root;
-    bool accessed       = false;
-    size_t flush_size   = PAGE_SIZE_SMALL;
-
-    for (int level = paging_max_levels; level >= 1; level--) {
-        uint64_t* pte =
-            &((uint64_t*)to_higher_half(curr_phys))[(virt >> (12 + (level - 1) * 9)) & 0x1ff];
-
-        if (!(*pte & X86_PAGE_FLAG_PRESENT)) {
-            break;
-        }
-
-        if (level == 1 || (*pte & X86_PAGE_FLAG_HUGE)) {
-            if (*pte & X86_PAGE_FLAG_ACCESSED) {
-                accessed = true;
-                *pte &= ~X86_PAGE_FLAG_ACCESSED;
-                flush_size = (level == 1) ? PAGE_SIZE_SMALL
-                                          : ((level == 2) ? PAGE_SIZE_MEDIUM : PAGE_SIZE_LARGE);
-            }
-
-            break;
-        }
-
-        curr_phys = *pte & X86_PAGE_ADDRESS_MASK;
-    }
-
-    release_spinlock(&map->lock);
-
-    if (accessed) {
-        arch_mmu_flush_tlb(map, virt, flush_size);
-    }
-
-    return accessed;
+    return arch_mmu_test_and_clear_flag(map, virt, X86_PAGE_FLAG_ACCESSED);
 }
 
 static void free_table_recursive(uintptr_t phys_addr, int level) {
@@ -1229,7 +1313,6 @@ static void free_table_recursive(uintptr_t phys_addr, int level) {
             if (entry & X86_PAGE_FLAG_PRESENT) {
                 uintptr_t phys = entry & X86_PAGE_ADDRESS_MASK;
                 if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) phys &= ~X86_PAGE_FLAG_LARGE_PAT;
-
                 pmm_dec_ref((void*)phys);
             }
         } else {
@@ -1249,7 +1332,6 @@ static int clone_table(uintptr_t dest_phys, uintptr_t src_phys, int level) {
 
     for (int i = 0; i < max_idx; i++) {
         uint64_t entry = src[i];
-
         if (!(entry & (X86_PAGE_FLAG_PRESENT | X86_PAGE_FLAG_DEMAND))) continue;
 
         if (level == 1 || (entry & X86_PAGE_FLAG_HUGE)) {
@@ -1260,9 +1342,8 @@ static int clone_table(uintptr_t dest_phys, uintptr_t src_phys, int level) {
 
             if (entry & X86_PAGE_FLAG_PRESENT) {
                 uintptr_t phys_addr = entry & X86_PAGE_ADDRESS_MASK;
-                if (level > 1 && (entry & X86_PAGE_FLAG_HUGE)) {
+                if (level > 1 && (entry & X86_PAGE_FLAG_HUGE))
                     phys_addr &= ~X86_PAGE_FLAG_LARGE_PAT;
-                }
 
                 pmm_inc_ref((void*)phys_addr);
             }
@@ -1271,7 +1352,7 @@ static int clone_table(uintptr_t dest_phys, uintptr_t src_phys, int level) {
         } else {
             void* new_pt = pmm_alloc(1);
             if (!new_pt) {
-                status = -ENOMEM;
+                status = ERR_NO_MEM;
                 goto cleanup_on_error;
             }
 
@@ -1320,7 +1401,7 @@ static int clone_table(uintptr_t dest_phys, uintptr_t src_phys, int level) {
 }
 
 int arch_mmu_clone(arch_pagemap_t* dest, arch_pagemap_t* src) {
-    if (!dest || !src || dest == src) return -EINVAL;
+    if (!dest || !src || dest == src) return ERR_INVALID;
 
     if ((uintptr_t)dest < (uintptr_t)src) {
         acquire_spinlock(&dest->lock);
@@ -1331,12 +1412,20 @@ int arch_mmu_clone(arch_pagemap_t* dest, arch_pagemap_t* src) {
     }
 
     int status = clone_table(dest->phys_root, src->phys_root, paging_max_levels);
+    if (status == ERR_OK) {
+        dest->active_pkeys = src->active_pkeys;
+        dest->pkru_state   = src->pkru_state;
+    }
 
     uint64_t cr3 = read_cr3();
     if ((cr3 & X86_PAGE_ADDRESS_MASK) == (src->phys_root & X86_PAGE_ADDRESS_MASK)) {
-        if (pcid_supported && invpcid_supported) {
+        if (pcid_supported && invpcid_supported && src->pcids) {
             uint32_t cpu_id = arch_get_core_idx();
-            invpcid(INVPCID_SINGLE_CONTEXT, src->pcids[cpu_id], 0);
+
+            if (cpu_id < src->pcids_capacity && src->pcids[cpu_id] != 0)
+                invpcid(INVPCID_SINGLE_CONTEXT, src->pcids[cpu_id], 0);
+            else
+                write_cr3(cr3);
         } else {
             write_cr3(cr3);
         }
@@ -1354,11 +1443,10 @@ int arch_mmu_clone(arch_pagemap_t* dest, arch_pagemap_t* src) {
 }
 
 void arch_mmu_sync_kernel(arch_pagemap_t* target_map) {
-    arch_pagemap_t* kernel_map = (arch_pagemap_t*)vmm_get_kernel_pagemap();
+    pagemap_t* kernel_pagemap  = vmm_get_kernel_pagemap();
+    arch_pagemap_t* kernel_map = kernel_pagemap ? kernel_pagemap->arch : nullptr;
 
-    if (!target_map || !kernel_map || kernel_map == target_map) {
-        return;
-    }
+    if (!target_map || !kernel_map || kernel_map == target_map) return;
 
     acquire_spinlock(&target_map->lock);
 
@@ -1372,5 +1460,10 @@ void arch_mmu_sync_kernel(arch_pagemap_t* target_map) {
 }
 
 bool vmm_is_user_region(uintptr_t addr, size_t size) {
-    return (addr >= USER_SPACE_START) && ((addr + size) <= get_user_space_end_limit());
+    if (addr < USER_SPACE_START) return false;
+
+    uintptr_t end = addr + size;
+    if (end < addr) return false;
+
+    return end <= get_user_space_end_limit();
 }

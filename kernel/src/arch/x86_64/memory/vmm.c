@@ -1,10 +1,10 @@
 #include "memory/vmm.h"
 
-#include <errno.h>
 #include <string.h>
 
 #include "arch.h"
 #include "compiler.h"
+#include "core/errors.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
 #include "libs/elf.h"
@@ -72,7 +72,7 @@ void vmm_map_kernel(pagemap_t* map, uintptr_t kernel_base, uintptr_t phys_base_d
             .cache      = CACHE_WRITE_BACK,
             .page_size  = PAGE_SIZE_MEDIUM,
             .pkey       = 0,
-            .skip_flush = false
+            .skip_flush = true
         };
 
         if (is_aligned(aligned_virt_start, PAGE_SIZE_MEDIUM) &&
@@ -127,8 +127,7 @@ __attribute__((force_align_arg_pointer)) void pf_handler(interrupt_trapframe_t* 
             tf->error_code
         );
 
-        process_exit(-EFAULT);
-
+        process_exit(ERR_FAULT);
         arch_halt(false);
     } else {
         PANIC(

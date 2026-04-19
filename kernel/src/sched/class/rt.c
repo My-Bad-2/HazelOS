@@ -45,7 +45,7 @@ static void rt_enqueue_task(per_cpu_data_t* rq, thread_t* t) {
 
     dlist_add_tail(&t->run_node, &rq->rt_queues[idx]);
 
-    rq->rt_bitmap[idx / 64] |= (1ULL << (idx % 64));
+    rq->rt_bitmap[idx / 64] |= (1ul << (idx % 64));
     rq->rt_thread_count++;
     t->on_rq = true;
 
@@ -57,7 +57,7 @@ static void rt_dequeue_task(per_cpu_data_t* rq, thread_t* t) {
 
     dlist_del_init(&t->run_node);
 
-    if (dlist_empty(&rq->rt_queues[idx])) rq->rt_bitmap[idx / 64] &= ~(1ULL << (idx % 64));
+    if (dlist_empty(&rq->rt_queues[idx])) rq->rt_bitmap[idx / 64] &= ~(1U << (idx % 64));
 
     rq->rt_thread_count--;
     t->on_rq = false;
@@ -112,7 +112,7 @@ static thread_t* rt_steal_task(per_cpu_data_t* busiest_cpu, per_cpu_data_t* this
 
     thread_t* victim = nullptr;
     for (int i = 99; i >= 0; --i) {
-        if ((busiest_cpu->rt_bitmap[i / 64] & (1ULL << (i % 64))) == 0) continue;
+        if ((busiest_cpu->rt_bitmap[i / 64] & (1ul << (i % 64))) == 0) continue;
 
         struct dlist_head* pos;
         dlist_for_each_prev(pos, &busiest_cpu->rt_queues[i]) {

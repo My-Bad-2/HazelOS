@@ -1,7 +1,5 @@
 #include "sched/semaphore.h"
 
-#include <errno.h>
-
 #include "arch.h"
 #include "core/errors.h"
 #include "cpu/smp.h"
@@ -71,7 +69,7 @@ static void sema_sleep_callback(void* ctx) {
 }
 
 int sema_down_timeout(struct semaphore* sem, int64_t timeout_ms) {
-    if (!sem) return -EINVAL;
+    if (!sem) return ERR_INVALID;
 
     size_t flags = acquire_qinterrupt_lock(&sem->wait_queue.lock);
 
@@ -97,7 +95,7 @@ int sema_down_timeout(struct semaphore* sem, int64_t timeout_ms) {
         lrtimer_arm_oneshot(
             cpu->lrtimer_manager,
             &curr->sleep_timer,
-            timeout_ms,
+            (uint64_t)timeout_ms,
             sema_sleep_callback,
             curr
         );

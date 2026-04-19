@@ -1,11 +1,12 @@
 #ifndef KERNEL_MEMORY_PAGEMAP_H
 #define KERNEL_MEMORY_PAGEMAP_H 1
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "libs/spinlock.h"
-#include "memory/arch_mmu.h"
+#include "memory/cache.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,23 +31,50 @@ extern "C" {
 
 #define VMM_FLAG_COW VMM_FLAG_SHARED
 
-typedef enum {
-    CACHE_UNCACHEABLE = 0,
-    CACHE_MMIO,
-    CACHE_WRITE_THROUGH,
-    CACHE_WRITE_PROTECTED,
-    CACHE_WRITE_COMBINING,
-    CACHE_WRITE_BACK,
-    CACHE_DEVICE,
-    CACHE_FRAMEBUFFER,
-    CACHE_ROM,
-} cache_type_t;
+typedef struct arch_pagemap arch_pagemap_t;
 
 // Per Process
 typedef struct {
-    arch_pagemap_t arch;
+    arch_pagemap_t* arch;
     spinlock_t lock;
 } pagemap_t;
+
+typedef struct {
+    uintptr_t virt_addr;
+    uintptr_t phys_addr;
+    size_t length;
+
+    uint32_t flags;
+    cache_type_t cache;
+    size_t page_size;
+
+    uint8_t pkey;
+    bool skip_flush;
+} pagemap_map_op_t;
+
+typedef struct {
+    uintptr_t virt_addr;
+    size_t length;
+    bool free_phys;
+    bool skip_flush;
+} pagemap_unmap_op_t;
+
+typedef struct {
+    uintptr_t virt_addr;
+    uint32_t flags;
+    size_t length;
+    cache_type_t cache;
+    uint8_t pkey;
+    bool skip_flush;
+} pagemap_protect_op_t;
+
+typedef struct {
+    uintptr_t virt_addr;
+    uintptr_t phys_addr;
+    uint32_t flags;
+    size_t page_size;
+    bool present;
+} pagemap_lookup_t;
 
 typedef struct {
     void* virt_addr;
@@ -77,6 +105,11 @@ typedef struct {
 
 int pagemap_allocate_pkey(pagemap_t* map);
 void pagemap_free_pkey(pagemap_t* map, uint8_t pkey);
+
+int pagemap_map_ex(pagemap_t* map, const pagemap_map_op_t* op);
+int pagemap_unmap_ex(pagemap_t* map, const pagemap_unmap_op_t* op);
+int pagemap_protect_ex(pagemap_t* map, const pagemap_protect_op_t* op);
+bool pagemap_lookup(pagemap_t* map, pagemap_lookup_t* query);
 
 bool pagemap_map(pagemap_t* map, pagemap_map_args_t* args);
 void pagemap_unmap(pagemap_t* map, pagemap_unmap_args_t* args);

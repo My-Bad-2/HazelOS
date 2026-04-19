@@ -1,6 +1,5 @@
 #include "cpu/simd.h"
 
-#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 

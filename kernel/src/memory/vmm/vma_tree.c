@@ -5,7 +5,6 @@
 
 #include "compiler.h"
 #include "libs/math.h"
-#include "memory/pagemap.h"
 #include "memory/vm_object.h"
 #include "memory/vma.h"
 #include "memory/vmm.h"
@@ -21,7 +20,7 @@ static inline uintptr_t get_safe_start(struct vm_space* space) {
 }
 
 static inline uintptr_t get_safe_end(struct vm_space* space) {
-    return is_kernel_space(space) ? KERNEL_SPACE_END : get_user_space_end_limit();
+    return is_kernel_space(space) ? get_kernel_space_end_limit() : get_user_space_end_limit();
 }
 
 static inline bool vma_subtree_can_fit(struct rb_node* node, size_t size) {

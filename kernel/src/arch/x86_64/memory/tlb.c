@@ -8,6 +8,7 @@
 #include "cpu/smp.h"
 #include "libs/spinlock.h"
 #include "memory/arch_mmu.h"
+#include "memory/memory.h"
 
 struct tlb_shootdown_data {
     arch_pagemap_t* map;
@@ -41,7 +42,7 @@ irq_return_t ipi_tlb_shootdown_handler(interrupt_trapframe_t*, void*) {
     arch_mmu_flush_local(
         current_shootdown.map,
         current_shootdown.vaddr,
-        current_shootdown.pages,
+        current_shootdown.pages * PAGE_SIZE_SMALL,
         smp_current_core_idx()
     );
 

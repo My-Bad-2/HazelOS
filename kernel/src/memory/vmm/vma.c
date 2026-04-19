@@ -230,7 +230,7 @@ void* vmalloc(
 
     const bool is_kernel = (space->map == vmm_get_kernel_pagemap());
     uintptr_t safe_start = is_kernel ? get_kernel_space_start_limit() : USER_SPACE_START;
-    uintptr_t safe_end   = is_kernel ? KERNEL_SPACE_END : get_user_space_end_limit();
+    uintptr_t safe_end   = is_kernel ? get_kernel_space_end_limit() : get_user_space_end_limit();
 
     if (unlikely(
             is_fixed &&
@@ -483,7 +483,12 @@ bool vmm_clone_space(struct vm_space* parent, struct vm_space* child) {
             if (unlikely(!child_vma->object)) goto clone_fail;
 
             uint32_t pte_flags               = parent_vma->flags & ~VMM_FLAG_WRITE;
-            pagemap_protect_args_t prot_args = {.flags = pte_flags, .cache = parent_vma->cache};
+            pagemap_protect_args_t prot_args = {
+                .flags  = pte_flags,
+                .cache  = parent_vma->cache,
+                .length = vma_page_size(parent_vma),
+                .pkey   = 0,
+            };
 
             for (uintptr_t addr = parent_vma->start; addr < parent_vma->end;
                  addr += vma_page_size(parent_vma)) {
@@ -566,7 +571,12 @@ int vmprotect(struct vm_space* space, uintptr_t ptr_addr, size_t size, uint32_t 
 
         target_vma->flags = updated_flags;
 
-        pagemap_protect_args_t prot_args = {.flags = updated_flags, .cache = target_vma->cache};
+        pagemap_protect_args_t prot_args = {
+            .flags  = updated_flags,
+            .cache  = target_vma->cache,
+            .length = 1ul << target_vma->page_shift,
+            .pkey   = 0,
+        };
 
         size_t page_size = 1ul << target_vma->page_shift;
         for (uintptr_t addr = prot_start; addr < prot_end; addr += page_size) {

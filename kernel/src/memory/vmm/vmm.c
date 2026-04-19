@@ -114,7 +114,13 @@ static void vmm_map_memory(pagemap_t* map) {
 
 void vmm_init(void) {
     KLOG_INIT_START("Virtual Memory Manager");
+    arch_mmu_init();
+
     kernel_pagemap = pagemap_create();
+    if (!kernel_pagemap) {
+        KLOG_INIT_FAIL();
+        PANIC("VMM: Failed to create kernel pagemap");
+    }
 
     uintptr_t kernel_base = (uintptr_t)kernel_file_request.response->executable_file->address;
 
@@ -122,7 +128,6 @@ void vmm_init(void) {
     uintptr_t virt_base  = kernel_address_request.response->virtual_base;
     uintptr_t phys_delta = phys_base - virt_base;
 
-    arch_mmu_init();
     vmm_map_memory(kernel_pagemap);
     vmm_map_kernel(kernel_pagemap, kernel_base, phys_delta);
     vmm_wait_table_init();

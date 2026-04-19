@@ -1,4 +1,3 @@
-#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -29,14 +28,14 @@ int64_t sys_process_create(
 ) {
     char name[32] = {0};
     if (user_name) {
-        if (!vmm_is_user_region((uintptr_t)user_name, 1)) return -EFAULT;
+        if (!vmm_is_user_region((uintptr_t)user_name, 1)) return ERR_FAULT;
         strncpy(name, user_name, sizeof(name) - 1);
     } else {
         strcpy(name, "user_proc");
     }
 
     struct vm_space* new_vspace = vmm_create_space(false);
-    if (!new_vspace) return -ENOMEM;
+    if (!new_vspace) return ERR_NO_MEM;
 
     int error           = ERR_OK;
     process_t* new_proc = process_create(name, false, new_vspace, &error);
@@ -95,7 +94,7 @@ int64_t sys_process_create(
         cap_close(parent_croot, c_cap);
         cap_close(parent_croot, v_cap);
         kref_put(&new_proc->kobj, process_release);
-        return -EFAULT;
+        return ERR_FAULT;
     }
 
     return ERR_OK;

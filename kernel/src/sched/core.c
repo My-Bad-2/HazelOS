@@ -1,4 +1,3 @@
-#include <llvm-libc-macros/generic-error-number-macros.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -193,7 +192,7 @@ static void sleep_callback(void* ctx) {
 
 static int internal_sleep_timeout(int64_t timeout_ms, thread_state_t sleep_state) {
     if (unlikely(timeout_ms < 0)) {
-        return -EINVAL;
+        return ERR_INVALID;
     }
 
     if (unlikely(timeout_ms == 0)) {
@@ -211,7 +210,7 @@ static int internal_sleep_timeout(int64_t timeout_ms, thread_state_t sleep_state
 
     if (unlikely(!curr || curr == cpu->idle_thread)) {
         arch_enable_interrupts();
-        return -EPERM;
+        return ERR_PERM;
     }
 
     acquire_qspinlock(&cpu->lock);
@@ -235,7 +234,7 @@ static int internal_sleep_timeout(int64_t timeout_ms, thread_state_t sleep_state
     arch_enable_interrupts();
 
     if (woke_up_early) {
-        return (sleep_state == THREAD_SLEEPING) ? -EINTR : ERR_TIMEOUT;
+        return (sleep_state == THREAD_SLEEPING) ? ERR_INTR : ERR_TIMEOUT;
     }
 
     return 0;
@@ -656,12 +655,12 @@ void scheduler_remove_thread(thread_t* t) {
 }
 
 int scheduler_renice(thread_t* t, int nice) {
-    if (unlikely(!t)) return -EINVAL;
+    if (unlikely(!t)) return ERR_INVALID;
 
     if (nice < -20) nice = -20;
     if (nice > 19) nice = 19;
 
-    if (unlikely(!t->sched_class || !t->sched_class->renice_task)) return -EINVAL;
+    if (unlikely(!t->sched_class || !t->sched_class->renice_task)) return ERR_INVALID;
 
     size_t flags;
     per_cpu_data_t* cpu = lock_thread_cpu(t, &flags);

@@ -1,6 +1,5 @@
 #include "drivers/acpi.h"
 
-#include <errno.h>
 #include <stdint.h>
 #include <uacpi/context.h>
 
