@@ -2,53 +2,61 @@ include_guard()
 
 # Enable cache if available
 function(project_enable_cache)
-    set(
-        CACHE_OPTION
-        "ccache"
-        CACHE STRING "Compiler cache to be used"
+    set(_hazel_cache_option_values "auto" "ccache" "sccache" "none")
+
+    set(${PROJECT_NAME}_COMPILER_CACHE
+        "auto"
+        CACHE STRING
+        "Compiler cache to use (auto, ccache, sccache, none)"
     )
-    set(CACHE_OPTION_VALUES "ccache" "sccache")
     set_property(
-        CACHE
-        CACHE_OPTION
-        PROPERTY STRINGS
-        ${CACHE_OPTION_VALUES}
+        CACHE ${PROJECT_NAME}_COMPILER_CACHE
+        PROPERTY STRINGS ${_hazel_cache_option_values}
     )
 
-    list(
-        FIND
-        CACHE_OPTION_VALUES
-        ${CACHE_OPTION}
-        CACHE_OPTION_INDEX
-    )
+    set(_hazel_cache_choice "${${PROJECT_NAME}_COMPILER_CACHE}")
 
-    if(${CACHE_OPTION_INDEX} EQUAL -1)
+    list(FIND _hazel_cache_option_values "${_hazel_cache_choice}" _hazel_cache_choice_index)
+    if(_hazel_cache_choice_index EQUAL -1)
         message(
-            STATUS
-            "Using custom compiler cache system: '${CACHE_OPTION}', explicitly supported entries are ${CACHE_OPTION_VALUES}"
+            FATAL_ERROR
+            "Unsupported compiler cache '${_hazel_cache_choice}'. Supported values: ${_hazel_cache_option_values}"
         )
     endif()
 
-    find_program(CACHE_BINARY NAMES ${CACHE_OPTION_VALUES})
+    if(_hazel_cache_choice STREQUAL "none")
+        message(STATUS "Compiler cache disabled.")
+        return()
+    endif()
 
-    if(CACHE_BINARY)
-        message(STATUS "${CACHE_BINARY} found and enabled")
+    if(_hazel_cache_choice STREQUAL "auto")
+        find_program(_hazel_cache_binary NAMES sccache ccache)
+    else()
+        find_program(_hazel_cache_binary NAMES ${_hazel_cache_choice})
+    endif()
 
-        set(
-            CMAKE_CXX_COMPILER_LAUNCHER
-            ${CACHE_BINARY}
-            CACHE FILEPATH "CXX compiler cache used"
+    if(_hazel_cache_binary)
+        message(STATUS "Using compiler cache launcher: ${_hazel_cache_binary}")
+
+        set(CMAKE_C_COMPILER_LAUNCHER
+            ${_hazel_cache_binary}
+            CACHE FILEPATH
+            "C compiler cache launcher"
+            FORCE
         )
 
-        set(
-            CMAKE_C_COMPILER_LAUNCHER
-            ${CACHE_BINARY}
-            CACHE FILEPATH "C compiler cache used"
+        set(CMAKE_CXX_COMPILER_LAUNCHER
+            ${_hazel_cache_binary}
+            CACHE FILEPATH
+            "CXX compiler cache launcher"
+            FORCE
         )
+    elseif(_hazel_cache_choice STREQUAL "auto")
+        message(STATUS "No compiler cache launcher detected. Building without ccache/sccache.")
     else()
         message(
             WARNING
-            "${CACHE_OPTION} is enabled but was not found."
+            "Requested compiler cache '${_hazel_cache_choice}' was not found. Building without compiler launcher."
         )
     endif()
 endfunction()

@@ -1,75 +1,77 @@
-# Define where to save the file (Cache directory is safer than build dir for persistence)
+include_guard()
+
 set(OVMF_INSTALL_DIR "${CMAKE_SOURCE_DIR}/cache/ovmf" CACHE PATH "Directory to store OVMF binaries")
+set(HAZEL_OVMF_BASE_URL
+    "https://raw.githubusercontent.com/retrage/edk2-nightly/fe4d3c4885d31acbaeb874ee5d153256aeafb393/bin"
+    CACHE STRING
+    "Base URL for downloading OVMF binaries"
+)
 
-# Map Architecture to filename
-set(EDK2_NIGHTLY_URL "https://raw.githubusercontent.com/retrage/edk2-nightly/fe4d3c4885d31acbaeb874ee5d153256aeafb393/bin/")
+function(_hazel_download_file_if_missing remote_url local_path label)
+    if(EXISTS "${local_path}")
+        message(STATUS "${label} already exists at: ${local_path}")
+        return()
+    endif()
 
-# Select filename based on the repository's naming convention
-if(${${PROJECT_NAME}_ARCHITECTURE} STREQUAL "x86_64")
-    set(OVMF_FILENAME_CODE "RELEASEX64_OVMF_CODE.fd")
-    set(OVMF_FILENAME_VARS "RELEASEX64_OVMF_VARS.fd")
-else()
-    message(FATAL_ERROR "No OVMF mapping for ${${PROJECT_NAME}_ARCHITECTURE}")
-endif()
-
-# Full local path where the file will be saved
-set(OVMF_LOCAL_PATH_CODE "${OVMF_INSTALL_DIR}/${OVMF_FILENAME_CODE}")
-set(OVMF_LOCAL_PATH_VARS "${OVMF_INSTALL_DIR}/${OVMF_FILENAME_VARS}")
-
-# Download and Verify
-if(EXISTS "${OVMF_LOCAL_PATH_CODE}")
-    message(STATUS "OVMF binary already exists at: ${OVMF_LOCAL_PATH_CODE}")
-else()
-    message(STATUS "Downloading ${OVMF_FILENAME_CODE} from edk2-nightly...")
-
+    message(STATUS "Downloading ${label}...")
     file(
-        DOWNLOAD
-        "${EDK2_NIGHTLY_URL}/${OVMF_FILENAME_CODE}"
-        "${OVMF_LOCAL_PATH_CODE}"
-        # SHOW_PROGRESS
-        TIMEOUT 60
-        STATUS DOWNLOAD_STATUS
-        LOG DOWNLOAD_LOG
+        DOWNLOAD "${remote_url}"
+        "${local_path}"
+        TLS_VERIFY ON
+        TIMEOUT 120
+        STATUS _hazel_download_status
+        LOG _hazel_download_log
     )
 
-    list(GET DOWNLOAD_STATUS 0 STATUS_CODE)
-    list(GET DOWNLOAD_STATUS 1 STATUS_MSG)
-
-    if(NOT STATUS_CODE EQUAL 0)
-        file(REMOVE "${OVMF_LOCAL_PATH_CODE}") # Clean up partial file
-        message(FATAL_ERROR "Download failed: ${STATUS_MSG}\nLog: ${DOWNLOAD_LOG}")
-    else()
-        message(STATUS "Successfully downloaded to: ${OVMF_LOCAL_PATH_CODE}")
+    list(GET _hazel_download_status 0 _hazel_status_code)
+    list(GET _hazel_download_status 1 _hazel_status_message)
+    if(NOT _hazel_status_code EQUAL 0)
+        file(REMOVE "${local_path}")
+        message(
+            FATAL_ERROR
+            "Failed to download ${label}: ${_hazel_status_message}\n${_hazel_download_log}"
+        )
     endif()
-endif()
 
-# Download and Verify
-if(EXISTS "${OVMF_LOCAL_PATH_VARS}")
-    message(STATUS "OVMF binary already exists at: ${OVMF_LOCAL_PATH_VARS}")
-else()
-    message(STATUS "Downloading ${OVMF_FILENAME_VARS} from edk2-nightly...")
+    message(STATUS "Downloaded ${label} to: ${local_path}")
+endfunction()
 
-    file(
-        DOWNLOAD
-        "${EDK2_NIGHTLY_URL}/${OVMF_FILENAME_VARS}"
-        "${OVMF_LOCAL_PATH_VARS}"
-        # SHOW_PROGRESS
-        TIMEOUT 60
-        STATUS DOWNLOAD_STATUS
-        LOG DOWNLOAD_LOG
+function(setup_ovmf)
+    if("${${PROJECT_NAME}_ARCHITECTURE}" STREQUAL "x86_64")
+        set(_hazel_ovmf_filename_code "RELEASEX64_OVMF_CODE.fd")
+        set(_hazel_ovmf_filename_vars "RELEASEX64_OVMF_VARS.fd")
+    else()
+        message(FATAL_ERROR "No OVMF mapping for architecture '${${PROJECT_NAME}_ARCHITECTURE}'.")
+    endif()
+
+    file(MAKE_DIRECTORY "${OVMF_INSTALL_DIR}")
+
+    set(_hazel_ovmf_local_path_code "${OVMF_INSTALL_DIR}/${_hazel_ovmf_filename_code}")
+    set(_hazel_ovmf_local_path_vars "${OVMF_INSTALL_DIR}/${_hazel_ovmf_filename_vars}")
+
+    _hazel_download_file_if_missing(
+        "${HAZEL_OVMF_BASE_URL}/${_hazel_ovmf_filename_code}"
+        "${_hazel_ovmf_local_path_code}"
+        "${_hazel_ovmf_filename_code}"
+    )
+    _hazel_download_file_if_missing(
+        "${HAZEL_OVMF_BASE_URL}/${_hazel_ovmf_filename_vars}"
+        "${_hazel_ovmf_local_path_vars}"
+        "${_hazel_ovmf_filename_vars}"
     )
 
-    list(GET DOWNLOAD_STATUS 0 STATUS_CODE)
-    list(GET DOWNLOAD_STATUS 1 STATUS_MSG)
-
-    if(NOT STATUS_CODE EQUAL 0)
-        file(REMOVE "${OVMF_LOCAL_PATH_VARS}") # Clean up partial file
-        message(FATAL_ERROR "Download failed: ${STATUS_MSG}\nLog: ${DOWNLOAD_LOG}")
-    else()
-        message(STATUS "Successfully downloaded to: ${OVMF_LOCAL_PATH_VARS}")
-    endif()
-endif()
-
-# Expose Variable for other targets
-set(OVMF_CODE_BINARY_PATH "${OVMF_LOCAL_PATH_CODE}" CACHE FILEPATH "Path to the downloaded OVMF (Code) binary" FORCE)
-set(OVMF_VARS_BINARY_PATH "${OVMF_LOCAL_PATH_VARS}" CACHE FILEPATH "Path to the downloaded OVMF (Vars) binary" FORCE)
+    set(OVMF_CODE_BINARY_PATH
+        "${_hazel_ovmf_local_path_code}"
+        CACHE FILEPATH
+        "Path to the downloaded OVMF (Code) binary"
+        FORCE
+    )
+    set(OVMF_VARS_BINARY_PATH
+        "${_hazel_ovmf_local_path_vars}"
+        CACHE FILEPATH
+        "Path to the downloaded OVMF (Vars) binary"
+        FORCE
+    )
+    set(OVMF_CODE_BINARY_PATH "${_hazel_ovmf_local_path_code}" PARENT_SCOPE)
+    set(OVMF_VARS_BINARY_PATH "${_hazel_ovmf_local_path_vars}" PARENT_SCOPE)
+endfunction()

@@ -126,8 +126,14 @@ static inline bool pkey_is_usable(const arch_pagemap_t* map, uint8_t pkey) {
     return pkey_is_active(map, pkey);
 }
 
-static inline void pkru_allow_key(uint32_t* pkru, uint8_t pkey) {
-    *pkru &= ~pkru_pair_mask(pkey);
+static inline bool pkey_alloc_flags_valid(uint32_t flags) {
+    return (flags & ~X86_PKEY_FLAG_MASK) == 0;
+}
+
+static inline void pkru_set_key_flags(uint32_t* pkru, uint8_t pkey, uint32_t flags) {
+    uint32_t shift = pkey * 2;
+    uint32_t pair  = (flags & X86_PKEY_FLAG_MASK) << shift;
+    *pkru          = (*pkru & ~pkru_pair_mask(pkey)) | pair;
 }
 
 static inline void pkru_deny_key(uint32_t* pkru, uint8_t pkey) {
@@ -884,9 +890,10 @@ void arch_mmu_free_pcid(arch_pagemap_t* map) {
     release_spinlock(&map->lock);
 }
 
-int arch_mmu_allocate_pkey(arch_pagemap_t* map) {
+int arch_mmu_allocate_pkey(arch_pagemap_t* map, uint32_t flags) {
     if (!map) return ERR_INVALID;
     if (!pku_supported) return ERR_BAD_F;
+    if (!pkey_alloc_flags_valid(flags)) return ERR_INVALID;
 
     acquire_spinlock(&map->lock);
 
@@ -898,7 +905,7 @@ int arch_mmu_allocate_pkey(arch_pagemap_t* map) {
 
     uint8_t pkey = (uint8_t)ctz((unsigned int)free_mask);
     map->active_pkeys |= pkey_bit(pkey);
-    pkru_allow_key(&map->pkru_state, pkey);
+    pkru_set_key_flags(&map->pkru_state, pkey, flags);
 
     uint32_t pkru_val = map->pkru_state;
     release_spinlock(&map->lock);

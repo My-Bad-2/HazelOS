@@ -12,4 +12,3 @@ function(project_assure_out_of_source_builds)
         message(FATAL_ERROR "Quitting...")
     endif()
 endfunction()
-

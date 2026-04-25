@@ -1,8 +1,17 @@
-set(USERLAND_LINK_SCRIPT ${CMAKE_SOURCE_DIR}/misc/linker/${${PROJECT_NAME}_ARCHITECTURE}-userland.ld)
-set(
-    USERLAND_INCLUDE_DIR
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/misc/ComponentProject.cmake")
+
+hazel_component_project(NAME HazelUserland OUT_SUPERPROJECT_VAR HAZEL_USERLAND_SUPERPROJECT)
+
+set(_hazel_userland_namespace "${HAZEL_USERLAND_SUPERPROJECT}")
+
+set(USERLAND_CX_FLAGS -mavx -mavx2)
+
+set(USERLAND_LINK_SCRIPT
+    ${CMAKE_SOURCE_DIR}/misc/linker/${${_hazel_userland_namespace}_ARCHITECTURE}-userland.ld
+)
+set(USERLAND_INCLUDE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/arch/${${PROJECT_NAME}_ARCHITECTURE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/arch/${${_hazel_userland_namespace}_ARCHITECTURE}"
     ${FREESTND_HDRS_DIR}
     ${UACPI_INCLUDES}
 )
@@ -11,7 +20,7 @@ collect_sources_filtered(
     VAR USERLAND_SOURCES
     ROOT ${CMAKE_CURRENT_SOURCE_DIR}/src
     ARCH_DIR arch
-    CURRENT_ARCH ${${PROJECT_NAME}_ARCHITECTURE}
+    CURRENT_ARCH ${${_hazel_userland_namespace}_ARCHITECTURE}
     DEBUG OFF
 )
 
@@ -25,24 +34,31 @@ target_link_libraries(userland llvm-libc ${CRT_LIBRARY_PATH}/libclang_rt.builtin
 target_apply_compile_settings(
     TARGET userland
     LANG "C;ASM"
-    FLAGS ${${PROJECT_NAME}_CX_FLAGS} ${USERLAND_CX_FLAGS} ${${PROJECT_NAME}_CX_DEFINES} ${${PROJECT_NAME}_CX_WARNING_FLAGS}
+    FLAGS
+        ${${_hazel_userland_namespace}_CX_FLAGS}
+        ${${_hazel_userland_namespace}_USERLAND_CX_FLAGS}
+        ${USERLAND_CX_FLAGS}
+        ${${_hazel_userland_namespace}_CX_DEFINES}
+        ${${_hazel_userland_namespace}_CX_WARNING_FLAGS}
 )
 
 target_apply_linker_settings(
     TARGET userland
     LANG "C"
     SCRIPT ${USERLAND_LINK_SCRIPT}
-    SKIP_CHECK ON
-    FLAGS ${${PROJECT_NAME}_LINK_FLAGS}
+    FLAGS ${${_hazel_userland_namespace}_LINK_FLAGS}
 )
 
 add_custom_command(
-    TARGET userland POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:userland>
-            ${${PROJECT_NAME}_ISO_DIR}/boot/limine/
+    TARGET userland
+    POST_BUILD
+    COMMAND
+        ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:userland>
+        ${${_hazel_userland_namespace}_ISO_DIR}/boot/limine/
     COMMENT "Copying userland to ISO directory"
     VERBATIM
 )
 
-install(TARGETS userland DESTINATION ${${PROJECT_NAME}_ISO_DIR}/boot/limine)
+install(TARGETS userland DESTINATION ${${_hazel_userland_namespace}_ISO_DIR}/boot/limine)
+
+hazel_component_export_target(EXPORT_VAR HAZEL_USERLAND_TARGET TARGET userland)

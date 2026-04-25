@@ -31,6 +31,11 @@ extern "C" {
 
 #define VMM_FLAG_COW VMM_FLAG_SHARED
 
+#define PKEY_ALLOC_FLAG_NONE           0x0u
+#define PKEY_ALLOC_FLAG_ACCESS_DISABLE 0x1u  // blocks data reads and writes.
+#define PKEY_ALLOC_FLAG_WRITE_DISABLE  0x2u  // blocks writes when ACCESS_DISABLE is clear.
+#define PKEY_ALLOC_FLAG_MASK (PKEY_ALLOC_FLAG_ACCESS_DISABLE | PKEY_ALLOC_FLAG_WRITE_DISABLE)
+
 typedef struct arch_pagemap arch_pagemap_t;
 
 // Per Process
@@ -103,7 +108,7 @@ typedef struct {
     uint8_t pkey;
 } pagemap_protect_args_t;
 
-int pagemap_allocate_pkey(pagemap_t* map);
+int pagemap_allocate_pkey(pagemap_t* map, uint32_t flags);
 void pagemap_free_pkey(pagemap_t* map, uint8_t pkey);
 
 int pagemap_map_ex(pagemap_t* map, const pagemap_map_op_t* op);

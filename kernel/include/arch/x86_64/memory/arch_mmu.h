@@ -10,6 +10,12 @@
 #define X86_MAX_PCID  4095
 #define X86_MAX_PKEYS 15
 
+// PKRU rights bits per key as defined by x86-64.
+#define X86_PKEY_FLAG_NONE           0x0u
+#define X86_PKEY_FLAG_ACCESS_DISABLE 0x1u
+#define X86_PKEY_FLAG_WRITE_DISABLE  0x2u
+#define X86_PKEY_FLAG_MASK           (X86_PKEY_FLAG_ACCESS_DISABLE | X86_PKEY_FLAG_WRITE_DISABLE)
+
 #define USER_SPACE_END_4L     0x00007ffffffffffful
 #define USER_SPACE_END_5L     0x00fffffffffffffful
 #define KERNEL_SPACE_START_4L 0xffff800000000000ul
@@ -56,7 +62,7 @@ void arch_mmu_delete_pagemap(arch_pagemap_t* map);
 
 int arch_mmu_allocate_pcid(arch_pagemap_t* map);
 void arch_mmu_free_pcid(arch_pagemap_t* map);
-int arch_mmu_allocate_pkey(arch_pagemap_t* map);
+int arch_mmu_allocate_pkey(arch_pagemap_t* map, uint32_t flags);
 void arch_mmu_write_pkru(arch_pagemap_t* map);
 void arch_mmu_free_pkey(arch_pagemap_t* map, uint8_t pkey);
 

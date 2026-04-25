@@ -11,14 +11,11 @@
 static kmem_cache_t* pagemap_cache = nullptr;
 
 pagemap_t* pagemap_create(void) {
-    if (!pagemap_cache) {
+    if (!pagemap_cache)
         pagemap_cache =
             kmem_cache_create("pagemap_cache", sizeof(pagemap_t), _Alignof(pagemap_t), 0, nullptr);
 
-        if (!pagemap_cache) {
-            return nullptr;
-        }
-    }
+    if (!pagemap_cache) return nullptr;
 
     pagemap_t* map = kmem_cache_alloc(pagemap_cache);
     if (!map) {
@@ -39,9 +36,7 @@ pagemap_t* pagemap_create(void) {
 }
 
 void pagemap_release(pagemap_t* map) {
-    if (!map) {
-        return;
-    }
+    if (!map) return;
 
     size_t flags         = acquire_interrupt_lock(&map->lock);
     arch_pagemap_t* arch = map->arch;
@@ -53,35 +48,25 @@ void pagemap_release(pagemap_t* map) {
 }
 
 void pagemap_load(pagemap_t* map) {
-    if (!map || !map->arch) {
-        return;
-    }
+    if (!map || !map->arch) return;
 
     arch_mmu_allocate_pcid(map->arch);
     arch_mmu_load(map->arch);
     arch_mmu_write_pkru(map->arch);
 }
 
-int pagemap_allocate_pkey(pagemap_t* map) {
-    if (!map || !map->arch) {
-        return ERR_INVALID;
-    }
-
-    return arch_mmu_allocate_pkey(map->arch);
+int pagemap_allocate_pkey(pagemap_t* map, uint32_t flags) {
+    if (!map || !map->arch) return ERR_INVALID;
+    return arch_mmu_allocate_pkey(map->arch, flags);
 }
 
 void pagemap_free_pkey(pagemap_t* map, uint8_t pkey) {
-    if (!map || !map->arch) {
-        return;
-    }
-
+    if (!map || !map->arch) return;
     arch_mmu_free_pkey(map->arch, pkey);
 }
 
 int pagemap_map_ex(pagemap_t* map, const pagemap_map_op_t* op) {
-    if (!map || !map->arch || !op || op->length == 0) {
-        return ERR_INVALID;
-    }
+    if (!map || !map->arch || !op || op->length == 0) return ERR_INVALID;
 
     arch_mmu_map_args_t arch_args = {
         .virt_addr      = op->virt_addr,
@@ -98,9 +83,7 @@ int pagemap_map_ex(pagemap_t* map, const pagemap_map_op_t* op) {
 }
 
 int pagemap_unmap_ex(pagemap_t* map, const pagemap_unmap_op_t* op) {
-    if (!map || !map->arch || !op || op->length == 0) {
-        return ERR_INVALID;
-    }
+    if (!map || !map->arch || !op || op->length == 0) return ERR_INVALID;
 
     arch_mmu_unmap_args_t arch_args = {
         .virt_addr      = op->virt_addr,
@@ -113,9 +96,7 @@ int pagemap_unmap_ex(pagemap_t* map, const pagemap_unmap_op_t* op) {
 }
 
 int pagemap_protect_ex(pagemap_t* map, const pagemap_protect_op_t* op) {
-    if (!map || !map->arch || !op || op->length == 0) {
-        return ERR_INVALID;
-    }
+    if (!map || !map->arch || !op || op->length == 0) return ERR_INVALID;
 
     arch_mmu_protect_args_t arch_args = {
         .virt_addr      = op->virt_addr,

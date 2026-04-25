@@ -1,26 +1,68 @@
-# SPDX-License-Identifier: MIT
-#
-# SPDX-FileCopyrightText: Copyright (c) 2019-2023 Lars Melchior and contributors
+include_guard(GLOBAL)
 
-set(CPM_DOWNLOAD_VERSION 0.42.0)
-set(CPM_HASH_SUM "2020b4fc42dba44817983e06342e682ecfc3d2f484a581f11cc5731fbe4dce8a")
+set(HAZEL_CPM_DOWNLOAD_VERSION "0.42.1")
+set(HAZEL_CPM_HASH_SUM "f3a6dcc6a04ce9e7f51a127307fa4f699fb2bade357a8eb4c5b45df76e1dc6a5")
 
-if(CPM_SOURCE_CACHE)
-  set(CPM_DOWNLOAD_LOCATION "${CPM_SOURCE_CACHE}/cpm/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
-elseif(DEFINED ENV{CPM_SOURCE_CACHE})
-  set(CPM_DOWNLOAD_LOCATION "$ENV{CPM_SOURCE_CACHE}/cpm/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
-else()
-  set(CPM_DOWNLOAD_LOCATION "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
-endif()
-
-# Expand relative path. This is important if the provided path contains a tilde (~)
-get_filename_component(CPM_DOWNLOAD_LOCATION ${CPM_DOWNLOAD_LOCATION} ABSOLUTE)
-
-file(DOWNLOAD
-     https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake
-     ${CPM_DOWNLOAD_LOCATION} EXPECTED_HASH SHA256=${CPM_HASH_SUM}
+set(HAZEL_CPM_SOURCE_CACHE
+    "${CMAKE_SOURCE_DIR}/cache"
+    CACHE PATH
+    "Global source cache used by CPM.cmake"
 )
 
-include(${CPM_DOWNLOAD_LOCATION})
+if(NOT DEFINED CPM_SOURCE_CACHE OR "${CPM_SOURCE_CACHE}" STREQUAL "")
+    set(CPM_SOURCE_CACHE
+        "${HAZEL_CPM_SOURCE_CACHE}"
+        CACHE PATH
+        "Directory used by CPM.cmake to cache package sources"
+        FORCE
+    )
+endif()
 
-set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/cache")
+if(CPM_SOURCE_CACHE)
+    set(CPM_DOWNLOAD_LOCATION "${CPM_SOURCE_CACHE}/cpm/CPM_${HAZEL_CPM_DOWNLOAD_VERSION}.cmake")
+elseif(DEFINED ENV{CPM_SOURCE_CACHE} AND NOT "$ENV{CPM_SOURCE_CACHE}" STREQUAL "")
+    set(CPM_DOWNLOAD_LOCATION "$ENV{CPM_SOURCE_CACHE}/cpm/CPM_${HAZEL_CPM_DOWNLOAD_VERSION}.cmake")
+else()
+    set(CPM_DOWNLOAD_LOCATION "${CMAKE_BINARY_DIR}/cmake/CPM_${HAZEL_CPM_DOWNLOAD_VERSION}.cmake")
+endif()
+
+get_filename_component(CPM_DOWNLOAD_LOCATION "${CPM_DOWNLOAD_LOCATION}" ABSOLUTE)
+get_filename_component(_hazel_cpm_download_dir "${CPM_DOWNLOAD_LOCATION}" DIRECTORY)
+file(MAKE_DIRECTORY "${_hazel_cpm_download_dir}")
+
+if(NOT EXISTS "${CPM_DOWNLOAD_LOCATION}")
+    message(STATUS "Downloading CPM.cmake v${HAZEL_CPM_DOWNLOAD_VERSION}...")
+
+    file(
+        DOWNLOAD
+            "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${HAZEL_CPM_DOWNLOAD_VERSION}/CPM.cmake"
+        "${CPM_DOWNLOAD_LOCATION}"
+        EXPECTED_HASH SHA256=${HAZEL_CPM_HASH_SUM}
+        TLS_VERIFY ON
+        STATUS _hazel_cpm_download_status
+        LOG _hazel_cpm_download_log
+    )
+
+    list(GET _hazel_cpm_download_status 0 _hazel_cpm_download_code)
+    list(GET _hazel_cpm_download_status 1 _hazel_cpm_download_message)
+    if(NOT _hazel_cpm_download_code EQUAL 0)
+        file(REMOVE "${CPM_DOWNLOAD_LOCATION}")
+        message(
+            FATAL_ERROR
+            "Failed to download CPM.cmake: ${_hazel_cpm_download_message}\n${_hazel_cpm_download_log}"
+        )
+    endif()
+endif()
+
+include("${CPM_DOWNLOAD_LOCATION}")
+
+function(hazel_cpm_add_package)
+    if(NOT COMMAND CPMAddPackage)
+        message(
+            FATAL_ERROR
+            "CPMAddPackage is unavailable. Ensure cmake/deps/CPM.cmake is included first."
+        )
+    endif()
+
+    cpmaddpackage(${ARGN})
+endfunction()
