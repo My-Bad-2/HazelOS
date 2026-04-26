@@ -55,11 +55,13 @@ void ktimer_release(struct kobject* ref) {
     kmem_cache_free(timer_cache, timer);
 }
 
-int sys_timer_create(uint64_t* cap_out) {
+uint64_t sys_timer_create(struct interrupt_trapframe* regs) {
+    uint64_t* cap_out = (uint64_t*)SYSCALL_FIRST_ARG(regs);
+
     process_t* proc = smp_current_core()->curr_thread->owner;
 
     struct kernel_timer* timer = kmem_cache_alloc(timer_cache);
-    if (!timer) return ERR_NO_MEM;
+    if (!timer) return (uint64_t)ERR_NO_MEM;
 
     memset(timer, 0, sizeof(struct kernel_timer));
     timer->port_state.auto_clear = IPC_EVENT_EDGE_TRIGGERED;
@@ -74,7 +76,7 @@ int sys_timer_create(uint64_t* cap_out) {
 
     if (!c) {
         kmem_cache_free(timer_cache, timer);
-        return ERR_NO_MEM;
+        return (uint64_t)ERR_NO_MEM;
     }
 
     atomic_store_explicit(&c->object_ptr, (uintptr_t)timer, memory_order_release);
@@ -85,19 +87,23 @@ int sys_timer_create(uint64_t* cap_out) {
     return ERR_OK;
 }
 
-int sys_timer_set(uint64_t timer_cap, uint64_t delay_ns, uint64_t interval_ns) {
+uint64_t sys_timer_set(struct interrupt_trapframe* regs) {
+    const uint64_t timer_cap   = SYSCALL_FIRST_ARG(regs);
+    const uint64_t delay_ns    = SYSCALL_SECOND_ARG(regs);
+    const uint64_t interval_ns = SYSCALL_THIRD_ARG(regs);
+
     per_cpu_data_t* cpu = smp_current_core();
     process_t* proc     = cpu->curr_thread->owner;
 
     struct capability* cap = cap_lookup(proc->root_cnode, timer_cap, RIGHT_WRITE | RIGHT_TIMER_ARM);
-    if (!cap || cap->type != CAP_TYPE_TIMER) return ERR_INVALID_CAP;
+    if (!cap || cap->type != CAP_TYPE_TIMER) return (uint64_t)ERR_INVALID_CAP;
 
     struct kernel_timer* timer =
         (struct kernel_timer*)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
 
     size_t flags = acquire_qinterrupt_lock(&timer->lock);
 
-    // Canacquire_qspinlockcel any existing armed timer before modifying the union state
+    // Cancel any existing armed timer before modifying the union state
     if (timer->state == KTIMER_STATE_LR)
         lrtimer_cancel(&timer->event.lr);
     else if (timer->state == KTIMER_STATE_HR)
@@ -153,12 +159,13 @@ int sys_timer_set(uint64_t timer_cap, uint64_t delay_ns, uint64_t interval_ns) {
     return ERR_OK;
 }
 
-int sys_timer_cancel(uint64_t timer_cap) {
-    process_t* proc = smp_current_core()->curr_thread->owner;
+uint64_t sys_timer_cancel(struct interrupt_trapframe* regs) {
+    const uint64_t timer_cap = SYSCALL_FIRST_ARG(regs);
 
+    process_t* proc = smp_current_core()->curr_thread->owner;
     struct capability* cap =
         cap_lookup(proc->root_cnode, timer_cap, RIGHT_WRITE | RIGHT_TIMER_CANCEL);
-    if (!cap || cap->type != CAP_TYPE_TIMER) return ERR_INVALID_CAP;
+    if (!cap || cap->type != CAP_TYPE_TIMER) return (uint64_t)ERR_INVALID_CAP;
 
     struct kernel_timer* timer =
         (struct kernel_timer*)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);

@@ -191,9 +191,7 @@ static void sleep_callback(void* ctx) {
 }
 
 static int internal_sleep_timeout(int64_t timeout_ms, thread_state_t sleep_state) {
-    if (unlikely(timeout_ms < 0)) {
-        return ERR_INVALID;
-    }
+    if (unlikely(timeout_ms < 0)) return ERR_INVALID;
 
     if (unlikely(timeout_ms == 0)) {
         if (sleep_state == THREAD_SLEEPING) {

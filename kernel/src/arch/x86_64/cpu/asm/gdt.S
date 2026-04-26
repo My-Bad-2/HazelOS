@@ -1,7 +1,6 @@
-.section .text
+#include <asm.h>
 
-.global flush_gdt
-.type flush_gdt, @function
+.section .text
 
 # =========================================================
 # void flush_gdt(void* gdtr, uint16_t cs, uint16_t ss)
@@ -11,7 +10,7 @@
 #   %rsi = Code Segment Selector
 #   %rdx = Data Segment Selector
 # =========================================================
-flush_gdt:
+SYM_FUNC_START(flush_gdt)
     lgdtq (%rdi)
 
     # Reload Data Segment
@@ -26,15 +25,13 @@ flush_gdt:
     movw %ax, %gs
 
     # Reload Code Segment
-    pushq %rsi              # Push the new CS Selector
+    push_reg %rsi           # Push the new CS Selector
     leaq 1f(%rip), %rax     # Load the address of label `1`
-    pushq %rax              # Push the return address (RIP)
+    push_reg %rax           # Push the return address (RIP)
     lretq                   # Pops RIP, then CS
 1:
-    retq
-
-.global flush_tss
-.type flush_tss, @function
+    RET_AND_SPECULATION_POSTFENCE
+SYM_FUNC_END(flush_gdt)
 
 # =========================================================
 # void flush_tss(uint16_t tss_offset)
@@ -42,6 +39,7 @@ flush_gdt:
 # Arguments:
 #   %rdi = TSS Selector Offset
 # =========================================================
-flush_tss:
+SYM_FUNC_START(flush_tss)
     ltr %di
-    ret
+    RET_AND_SPECULATION_POSTFENCE
+SYM_FUNC_END(flush_tss)

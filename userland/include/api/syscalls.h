@@ -15,6 +15,8 @@ extern "C" {
 #define SYS_SCHED_CLONE         (SYS_CATEGORY_SCHED | 0x03)
 #define SYS_SCHED_YIELD         (SYS_CATEGORY_SCHED | 0x04)
 #define SYS_SCHED_SLEEP         (SYS_CATEGORY_SCHED | 0x05)
+#define SYS_SCHED_PROCESS_EXIT  (SYS_CATEGORY_SCHED | 0x06)
+#define SYS_SCHED_THREAD_EXIT   (SYS_CATEGORY_SCHED | 0x07)
 
 #define SYS_WRITE    0x01
 #define SYS_MMAP     0x09
@@ -65,6 +67,9 @@ int64_t clone(
 
 void yield(void);
 int64_t thread_sleep(uint64_t ns);
+
+[[noreturn]] void thread_exit(int exit_code);
+[[noreturn]] void process_exit(int exit_code);
 
 #ifdef __cplusplus
 }

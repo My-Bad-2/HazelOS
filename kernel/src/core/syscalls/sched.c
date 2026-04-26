@@ -5,43 +5,35 @@
 #include "core/capability.h"
 #include "core/errors.h"
 #include "core/syscalls.h"
+#include "cpu/exception.h"
 #include "cpu/smp.h"
 #include "libs/kobject.h"
 #include "memory/vma.h"
 #include "sched/process.h"
 #include "sched/scheduler.h"
 
-static inline bool write_cap_out(uint64_t* ptr, uint64_t val) {
-    if (!ptr) return true;
+uint64_t sys_process_create(struct interrupt_trapframe* regs) {
+    const char* user_name    = (const char*)SYSCALL_FIRST_ARG(regs);
+    uint64_t* out_proc_cap   = (uint64_t*)SYSCALL_SECOND_ARG(regs);
+    uint64_t* out_cnode_cap  = (uint64_t*)SYSCALL_THIRD_ARG(regs);
+    uint64_t* out_vspace_cap = (uint64_t*)SYSCALL_FOURTH_ARG(regs);
 
-    if (!vmm_is_user_region((uintptr_t)ptr, sizeof(uint64_t))) return false;
-
-    copy_to_user(ptr, &val, sizeof(uint64_t));
-    return true;
-}
-
-int64_t sys_process_create(
-    const char* user_name,
-    uint64_t* out_proc_cap,
-    uint64_t* out_cnode_cap,
-    uint64_t* out_vspace_cap
-) {
     char name[32] = {0};
     if (user_name) {
-        if (!vmm_is_user_region((uintptr_t)user_name, 1)) return ERR_FAULT;
+        if (!vmm_is_user_region((uintptr_t)user_name, 1)) return (uint64_t)ERR_FAULT;
         strncpy(name, user_name, sizeof(name) - 1);
     } else {
         strcpy(name, "user_proc");
     }
 
     struct vm_space* new_vspace = vmm_create_space(false);
-    if (!new_vspace) return ERR_NO_MEM;
+    if (!new_vspace) return (uint64_t)ERR_NO_MEM;
 
     int error           = ERR_OK;
     process_t* new_proc = process_create(name, false, new_vspace, &error);
     if (!new_proc) {
         vmm_space_release(&new_vspace->refcount);
-        return error;
+        return (uint64_t)error;
     }
 
     thread_t* curr             = smp_current_core()->curr_thread;
@@ -94,28 +86,28 @@ int64_t sys_process_create(
         cap_close(parent_croot, c_cap);
         cap_close(parent_croot, v_cap);
         kref_put(&new_proc->kobj, process_release);
-        return ERR_FAULT;
+        return (uint64_t)ERR_FAULT;
     }
 
     return ERR_OK;
 }
 
-int64_t sys_thread_spawn(
-    uint64_t target_proc_cap,
-    uint64_t target_vspace_cap,
-    uintptr_t entry_rip,
-    uintptr_t stack_rsp,
-    uint64_t arg1,
-    uint64_t* out_thread_cap
-) {
+uint64_t sys_thread_spawn(struct interrupt_trapframe* regs) {
+    const uint64_t target_proc_cap   = SYSCALL_FIRST_ARG(regs);
+    const uint64_t target_vspace_cap = SYSCALL_SECOND_ARG(regs);
+    const uintptr_t entry_rip        = SYSCALL_THIRD_ARG(regs);
+    const uintptr_t stack_rsp        = SYSCALL_FOURTH_ARG(regs);
+    const uint64_t arg1              = SYSCALL_FIFTH_ARG(regs);
+    uint64_t* out_thread_cap         = (uint64_t*)SYSCALL_SIXTH_ARG(regs);
+
     thread_t* curr      = smp_current_core()->curr_thread;
     struct cnode* croot = curr->owner->root_cnode;
 
     struct capability* p_cap = cap_lookup(croot, target_proc_cap, RIGHT_WRITE);
-    if (unlikely(!p_cap || p_cap->type != CAP_TYPE_PROCESS)) return ERR_INVALID_CAP;
+    if (unlikely(!p_cap || p_cap->type != CAP_TYPE_PROCESS)) return (uint64_t)ERR_INVALID_CAP;
 
     struct capability* v_cap = cap_lookup(croot, target_vspace_cap, RIGHT_READ);
-    if (unlikely(!v_cap || v_cap->type != CAP_TYPE_VSPACE)) return ERR_INVALID_CAP;
+    if (unlikely(!v_cap || v_cap->type != CAP_TYPE_VSPACE)) return (uint64_t)ERR_INVALID_CAP;
 
     process_t* target_proc =
         (process_t*)atomic_load_explicit(&p_cap->object_ptr, memory_order_acquire);
@@ -123,9 +115,9 @@ int64_t sys_thread_spawn(
         (struct vm_space*)atomic_load_explicit(&v_cap->object_ptr, memory_order_acquire);
 
     if (unlikely(!target_proc || !target_vspace || target_proc->state != PROCESS_ALIVE))
-        return ERR_SRCH;
+        return (uint64_t)ERR_SRCH;
 
-    if (unlikely(target_proc->vspace != target_vspace)) return ERR_INVALID;
+    if (unlikely(target_proc->vspace != target_vspace)) return (uint64_t)ERR_INVALID;
 
     int err              = ERR_OK;
     thread_t* new_thread = thread_create(
@@ -140,13 +132,13 @@ int64_t sys_thread_spawn(
         0
     );
 
-    if (unlikely(!new_thread)) return err;
+    if (unlikely(!new_thread)) return (uint64_t)err;
 
     uint64_t t_cap_id        = 0;
     struct capability* t_cap = cap_alloc(croot, &t_cap_id);
     if (unlikely(!t_cap)) {
         kref_put(&new_thread->kobj, thread_release);
-        return ERR_CAP_EXHAUSTED;
+        return (uint64_t)ERR_CAP_EXHAUSTED;
     }
 
     acquire_qspinlock(&t_cap->lock);
@@ -162,7 +154,7 @@ int64_t sys_thread_spawn(
         if (!write_cap_out(out_thread_cap, t_cap_id)) {
             cap_close(croot, t_cap_id);
             kref_put(&new_thread->kobj, thread_release);
-            return ERR_FAULT;
+            return (uint64_t)ERR_FAULT;
         }
     }
 
@@ -172,16 +164,18 @@ int64_t sys_thread_spawn(
     return ERR_OK;
 }
 
-int64_t sys_clone(
-    uint64_t flags,
-    uintptr_t child_rsp_override,
-    uintptr_t child_rip_override,
-    struct interrupt_trapframe* regs,
-    uint64_t* out_proc_cap,
-    uint64_t* out_thread_cap,
-    uint64_t* out_cnode_cap,
-    uint64_t* out_vspace_cap
-) {
+uint64_t sys_clone(struct interrupt_trapframe* regs) {
+    uint64_t flags               = SYSCALL_FIRST_ARG(regs);
+    uintptr_t child_rsp_override = SYSCALL_SECOND_ARG(regs);
+    uintptr_t child_rip_override = SYSCALL_THIRD_ARG(regs);
+
+    struct clone_args args;
+    copy_from_user(&args, (void*)SYSCALL_FOURTH_ARG(regs), sizeof(struct clone_args));
+    uint64_t* out_proc_cap   = args.out_proc_cap;
+    uint64_t* out_thread_cap = args.out_thread_cap;
+    uint64_t* out_cnode_cap  = args.out_cnode_cap;
+    uint64_t* out_vspace_cap = args.out_vspace_cap;
+
     thread_t* curr         = smp_current_core()->curr_thread;
     process_t* target_proc = curr->owner;
     struct cnode* croot    = target_proc->root_cnode;
@@ -191,14 +185,14 @@ int64_t sys_clone(
     int error = 0;
     if (!(flags & CLONE_INTO_CURRENT_PROCESS)) {
         target_proc = process_clone(curr->owner, flags, &error);
-        if (unlikely(!target_proc)) return error;
+        if (unlikely(!target_proc)) return (uint64_t)error;
     }
 
     thread_t* child_thread =
         thread_clone(target_proc, curr, regs, child_rsp_override, child_rip_override, &error);
     if (unlikely(!child_thread)) {
         if (!(flags & CLONE_INTO_CURRENT_PROCESS)) kref_put(&target_proc->kobj, process_release);
-        return ERR_NO_MEM;
+        return (uint64_t)ERR_NO_MEM;
     }
 
     bool cap_error = 0;
@@ -227,7 +221,7 @@ int64_t sys_clone(
         kref_put(&child_thread->kobj, thread_release);
         if (!(flags & CLONE_INTO_CURRENT_PROCESS)) kref_put(&target_proc->kobj, process_release);
 
-        return ERR_CAP_EXHAUSTED;
+        return (uint64_t)ERR_CAP_EXHAUSTED;
     }
 
     acquire_qspinlock(&t_slot->lock);
@@ -288,7 +282,7 @@ int64_t sys_clone(
             kref_put(&target_proc->kobj, process_release);
         }
 
-        return ERR_FAULT;
+        return (uint64_t)ERR_FAULT;
     }
 
     if (!(flags & CLONE_SUSPENDED)) scheduler_add_thread(child_thread);
@@ -300,14 +294,25 @@ int64_t sys_clone(
     return ERR_OK;
 }
 
-void sys_sched_yield(void) {
+uint64_t sys_sched_yield(struct interrupt_trapframe*) {
     scheduler_yield();
+    return ERR_OK;
 }
 
 #define NS_PER_MS 1000000ul
 
-int64_t sys_thread_sleep(uint64_t ns) {
-    uint64_t ms = ns / NS_PER_MS;
+uint64_t sys_thread_sleep(struct interrupt_trapframe* regs) {
+    uint64_t ms = SYSCALL_FIRST_ARG(regs) / NS_PER_MS;
     if (ms == 0) ms = 1;
-    return scheduler_sleep((int64_t)ms);
+    return (uint64_t)scheduler_sleep((int64_t)ms);
+}
+
+uint64_t sys_process_exit(struct interrupt_trapframe* regs) {
+    process_exit((int)SYSCALL_FIRST_ARG(regs));
+    return ERR_OK;
+}
+
+uint64_t sys_thread_exit(struct interrupt_trapframe* regs) {
+    thread_exit((int)SYSCALL_FIRST_ARG(regs));
+    return ERR_OK;
 }

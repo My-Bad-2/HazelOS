@@ -61,6 +61,11 @@
 #define rdrand(x) __builtin_ia32_rdrand64_step((unsigned long*)(x))
 #endif
 
+#if __has_builtin(__builtin_add_overflow)
+#define add_overflow(a, b, res) __builtin_add_overflow((a), (b), (res))
+#else
+#endif
+
 typedef __int128 int128_t;
 typedef unsigned __int128 uint128_t;
 typedef ptrdiff_t ssize_t;

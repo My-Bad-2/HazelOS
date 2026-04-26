@@ -23,6 +23,13 @@ struct interrupt_trapframe {
     uint64_t ss;
 };
 
+#define SYSCALL_FIRST_ARG(regs)  ((regs)->rdi)
+#define SYSCALL_SECOND_ARG(regs) ((regs)->rsi)
+#define SYSCALL_THIRD_ARG(regs)  ((regs)->rdx)
+#define SYSCALL_FOURTH_ARG(regs) ((regs)->r10)
+#define SYSCALL_FIFTH_ARG(regs)  ((regs)->r8)
+#define SYSCALL_SIXTH_ARG(regs)  ((regs)->r9)
+
 typedef struct {
     uint64_t r15;
     uint64_t r14;

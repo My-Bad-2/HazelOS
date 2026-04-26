@@ -1,8 +1,6 @@
 #ifndef KERNEL_DRIVERS_KTIMER_H
 #define KERNEL_DRIVERS_KTIMER_H 1
 
-#include <stdint.h>
-
 #include "drivers/timer.h"
 #include "sched/ipc.h"
 
@@ -33,9 +31,5 @@ struct kernel_timer {
 
 void ktimer_init(void);
 void ktimer_release(struct kobject* ref);
-
-int sys_timer_create(uint64_t* cap_out);
-int sys_timer_set(uint64_t timer_cap, uint64_t delay_ns, uint64_t interval_ns);
-int sys_timer_cancel(uint64_t timer_cap);
 
 #endif

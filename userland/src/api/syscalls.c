@@ -84,3 +84,13 @@ void yield(void) {
 int64_t thread_sleep(uint64_t ns) {
     return syscall(SYS_SCHED_SLEEP, (long)ns);
 }
+
+void thread_exit(int exit_code) {
+    syscall(SYS_SCHED_THREAD_EXIT, exit_code);
+    while (true);
+}
+
+void process_exit(int exit_code) {
+    syscall(SYS_SCHED_PROCESS_EXIT, exit_code);
+    while (true);
+}

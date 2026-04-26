@@ -1,3 +1,4 @@
+#include "core/errors.h"
 #ifndef KERNEL_SCHED_SYSCALLS_H
 #define KERNEL_SCHED_SYSCALLS_H 1
 
@@ -5,6 +6,7 @@
 #include <stdint.h>
 
 #include "cpu/exception.h"
+#include "memory/vma.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +42,8 @@ extern "C" {
 #define SYS_SCHED_CLONE         (SYS_CATEGORY_SCHED | 0x03)
 #define SYS_SCHED_YIELD         (SYS_CATEGORY_SCHED | 0x04)
 #define SYS_SCHED_SLEEP         (SYS_CATEGORY_SCHED | 0x05)
+#define SYS_SCHED_PROCESS_EXIT  (SYS_CATEGORY_SCHED | 0x06)
+#define SYS_SCHED_THREAD_EXIT   (SYS_CATEGORY_SCHED | 0x07)
 
 // VSpace Syscalls
 #define SYS_MEM_MAP     (SYS_CATEGORY_MEM | 0x01)
@@ -65,14 +69,23 @@ extern "C" {
 
 #define OPTION_WAIT_NOHANG 1
 
-size_t copy_from_user(void* dest, const void* src, size_t len);
-size_t copy_to_user(void* dest, const void* src, size_t len);
+int copy_from_user(void* dest, const void* src, size_t len);
+int copy_to_user(void* dest, const void* src, size_t len);
 
 void syscalls_init(void);
 int64_t sys_write(uint32_t fd, const char* user_buf, size_t count);
 
-int64_t sys_fork(struct interrupt_trapframe* tf);
-void sys_exit(int exit_code);
+// --- Capability Category ---
+uint64_t sys_cap_delegate(struct interrupt_trapframe* regs);
+uint64_t sys_cap_close(struct interrupt_trapframe* regs);
+uint64_t sys_cap_copy(struct interrupt_trapframe* regs);
+uint64_t sys_cap_mint(struct interrupt_trapframe* regs);
+uint64_t sys_cap_alias(struct interrupt_trapframe* regs);
+
+// --- Timer Category ---
+uint64_t sys_timer_create(struct interrupt_trapframe* regs);
+uint64_t sys_timer_set(struct interrupt_trapframe* regs);
+uint64_t sys_timer_cancel(struct interrupt_trapframe* regs);
 
 // --- Scheduling Category ---
 struct clone_args {
@@ -82,38 +95,13 @@ struct clone_args {
     uint64_t* out_thread_cap;
 };
 
-int64_t sys_process_create(
-    const char* name,
-    uint64_t* out_proc_cap,
-    uint64_t* out_cnode_cap,
-    uint64_t* out_vspace_cap
-);
-
-int64_t sys_thread_spawn(
-    uint64_t target_proc_cap,
-    uint64_t target_vspace_cap,
-    uintptr_t entry_rip,
-    uintptr_t stack_rsp,
-    uint64_t arg1,
-    uint64_t* out_thread_cap
-);
-
-int64_t sys_clone(
-    uint64_t flags,
-    uintptr_t child_rsp_override,
-    uintptr_t child_rip_override,
-    struct interrupt_trapframe* regs,
-    uint64_t* out_proc_cap,
-    uint64_t* out_thread_cap,
-    uint64_t* out_cnode_cap,
-    uint64_t* out_vspace_cap
-);
-
-void sys_sched_yield(void);
-int64_t sys_thread_sleep(uint64_t ns);
-
-[[noreturn]] void thread_exit(int exit_code);
-[[noreturn]] void thread_exit(int exit_code);
+uint64_t sys_process_create(struct interrupt_trapframe* regs);
+uint64_t sys_thread_spawn(struct interrupt_trapframe* regs);
+uint64_t sys_clone(struct interrupt_trapframe* regs);
+uint64_t sys_sched_yield(struct interrupt_trapframe* regs);
+uint64_t sys_thread_sleep(struct interrupt_trapframe* regs);
+uint64_t sys_process_exit(struct interrupt_trapframe* regs);
+uint64_t sys_thread_exit(struct interrupt_trapframe* regs);
 
 // Memory Management
 #define VMO_CREATE_RAM       0x0001u  // Standard Zeroed RAM
@@ -136,29 +124,23 @@ int64_t sys_thread_sleep(uint64_t ns);
 #define PKEY_FLAG_ACCESS_DISABLE 0x1u  // Blocks data reads and writes.
 #define PKEY_FLAG_WRITE_DISABLE  0x2u  // Blocks writes when ACCESS_DISABLE is clear.
 
-int sys_vmo_create(size_t size, uint32_t vmo_flags, uint64_t* out_vmo_cap);
-int sys_vmo_resize(uint64_t vmo_cap, size_t new_size);
-int sys_vmo_read(uint64_t vmo_cap, void* buffer, size_t offset, size_t size);
-int sys_vmo_write(uint64_t vmo_cap, const void* buffer, size_t offset, size_t size);
-int sys_vmo_clone(
-    uint64_t src_vmo_cap,
-    size_t offset,
-    size_t size,
-    uint32_t flags,
-    uint64_t* out_vmo_cap
-);
+uint64_t sys_vmo_create(struct interrupt_trapframe* regs);
+uint64_t sys_vmo_resize(struct interrupt_trapframe* regs);
+uint64_t sys_vmo_read(struct interrupt_trapframe* regs);
+uint64_t sys_vmo_write(struct interrupt_trapframe* regs);
+uint64_t sys_vmo_clone(struct interrupt_trapframe* regs);
 
-uintptr_t sys_vspace_map(
-    uint64_t vspace_cap,
-    uint64_t vmo_cap,
-    size_t vmo_offset,
-    uintptr_t hint_addr,
-    size_t size,
-    uint32_t map_flags
-);
-int sys_vspace_unmap(uint64_t vspace_cap, uintptr_t addr, size_t size);
-int sys_vspace_protect(uint64_t vspace_cap, uintptr_t addr, size_t size, uint32_t new_prots);
-int sys_pkey_alloc(uint64_t vspace_cap, uint32_t flags);
+uintptr_t sys_vspace_map(struct interrupt_trapframe* regs);
+uint64_t sys_vspace_unmap(struct interrupt_trapframe* regs);
+uint64_t sys_vspace_protect(struct interrupt_trapframe* regs);
+uint64_t sys_pkey_alloc(struct interrupt_trapframe* regs);
+
+static inline bool write_cap_out(uint64_t* ptr, uint64_t val) {
+    if (!ptr) return true;
+
+    if (!vmm_is_user_region((uintptr_t)ptr, sizeof(uint64_t))) return false;
+    return copy_to_user(ptr, &val, sizeof(uint64_t)) == ERR_OK;
+}
 
 #ifdef __cplusplus
 }

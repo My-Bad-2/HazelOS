@@ -168,33 +168,4 @@ int cspace_find_by_koid(struct cnode* root, uint64_t target_koid, uint64_t* out_
 void cap_object_ref(uint8_t type, void* obj);
 void cap_object_unref(uint8_t type, void* obj);
 
-int sys_cap_delegate(
-    struct cnode* root_cnode,
-    uint64_t dest_cnode_id,
-    uint64_t src_cap_id,
-    uint16_t reduced_rights,
-    uint64_t* new_cap_id
-);
-int sys_cap_close(struct cnode* root_cnode, uint64_t target_id);
-int sys_cap_copy(
-    struct cnode* root_cnode,
-    uint64_t dest_cnode_id,
-    uint64_t src_cap_id,
-    uint64_t* new_cap_id
-);
-int sys_cap_mint(
-    struct cnode* root_cnode,
-    uint64_t dest_cnode_id,
-    uint64_t src_cap_id,
-    uint16_t new_rights,
-    uint32_t badge_val,
-    uint64_t* new_cap_id
-);
-int sys_cap_alias(
-    struct cnode* root_cnode,
-    uint64_t src_cap_id,
-    uint16_t reduced_rights,
-    uint64_t* new_cap_id
-);
-
 #endif

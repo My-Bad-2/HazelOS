@@ -3,23 +3,20 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "compiler.h"
 #include "core/errors.h"
 #include "cpu/cpu.h"
-#include "memory/memory.h"
+#include "memory/vmm.h"
 
 static bool smap_supported = false;
 static bool smep_supported = false;
 
 static inline void stac(void) {
-    if (smap_supported) {
-        asm volatile("stac" ::: "memory", "cc");
-    }
+    if (smap_supported) asm volatile("stac" ::: "memory", "cc");
 }
 
 static inline void clac(void) {
-    if (smap_supported) {
-        asm volatile("clac" ::: "memory", "cc");
-    }
+    if (smap_supported) asm volatile("clac" ::: "memory", "cc");
 }
 
 // NOLINTNEXTLINE
@@ -29,16 +26,14 @@ void arch_syscalls_init(void) {
 }
 
 static inline int access_ok(const void* addr, size_t len) {
-    uintptr_t uaddr      = (uintptr_t)addr;
-    uintptr_t user_limit = to_higher_half(0);
-
-    return (uaddr < user_limit) && (len <= (user_limit - uaddr));
+    const uintptr_t uaddr = (uintptr_t)addr;
+    if (uaddr >= get_kernel_space_start_limit() || (uaddr + len >= get_kernel_space_end_limit()))
+        return false;
+    return true;
 }
 
-size_t copy_from_user(void* dest, const void* src, size_t len) {
-    if (!access_ok(src, len)) {
-        return len;
-    }
+int copy_from_user(void* dest, const void* src, size_t len) {
+    if (unlikely(!access_ok(src, len))) return ERR_INVALID;
 
     stac();
     memcpy(dest, src, len);
@@ -47,10 +42,8 @@ size_t copy_from_user(void* dest, const void* src, size_t len) {
     return ERR_OK;
 }
 
-size_t copy_to_user(void* dest, const void* src, size_t len) {
-    if (!access_ok(dest, len)) {
-        return len;
-    }
+int copy_to_user(void* dest, const void* src, size_t len) {
+    if (unlikely(!access_ok(src, len))) return ERR_INVALID;
 
     stac();
     memcpy(dest, src, len);

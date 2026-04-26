@@ -4,6 +4,7 @@
 #include "core/capability.h"
 #include "core/errors.h"
 #include "core/syscalls.h"
+#include "cpu/exception.h"
 #include "cpu/smp.h"
 #include "libs/math.h"
 #include "memory/memory.h"
@@ -53,22 +54,26 @@ resolve_vspace(struct cnode* root, uint64_t cap_id, uint16_t required_rights) {
     return cap_resolve(root, cap_id, required_rights, CAP_TYPE_VSPACE);
 }
 
-int sys_vmo_create(size_t size, uint32_t flags, uint64_t* out_vmo_cap) {
+uint64_t sys_vmo_create(struct interrupt_trapframe* regs) {
+    size_t size           = SYSCALL_FIRST_ARG(regs);
+    uint32_t flags        = SYSCALL_SECOND_ARG(regs);
+    uint64_t* out_vmo_cap = (uint64_t*)SYSCALL_THIRD_ARG(regs);
+
     struct process* proc = smp_current_core()->curr_thread->owner;
-    if (unlikely(!proc || !out_vmo_cap || size == 0)) return ERR_INVALID;
+    if (unlikely(!proc || !out_vmo_cap || size == 0)) return (uint64_t)ERR_INVALID;
 
     vmo_type_t type = (flags & VMO_CREATE_PHYSICAL) ? VM_OBJ_PHYSICAL : VM_OBJ_ANONYMOUS;
 
-    if (type == VM_OBJ_PHYSICAL) return ERR_DENIED;
+    if (type == VM_OBJ_PHYSICAL) return (uint64_t)ERR_DENIED;
 
     vm_object_t* vmo = vm_object_create(type, size);
-    if (!vmo) return ERR_NO_MEM;
+    if (!vmo) return (uint64_t)ERR_NO_MEM;
 
     uint64_t cap_id;
     struct capability* cap = cap_alloc(proc->root_cnode, &cap_id);
     if (!cap) {
         vm_object_deref(vmo);
-        return ERR_CAP_EXHAUSTED;
+        return (uint64_t)ERR_CAP_EXHAUSTED;
     }
 
     acquire_qspinlock(&cap->lock);
@@ -77,22 +82,20 @@ int sys_vmo_create(size_t size, uint32_t flags, uint64_t* out_vmo_cap) {
     cap->rights = RIGHT_READ | RIGHT_WRITE | RIGHT_EXECUTE | RIGHT_MAP;
     release_qspinlock(&cap->lock);
 
-    if (copy_to_user(out_vmo_cap, &cap_id, sizeof(uint64_t)) != 0) {
-        sys_cap_close(proc->root_cnode, cap_id);
-        return ERR_FAULT;
-    }
+    if (write_cap_out(out_vmo_cap, cap_id)) return ERR_OK;
 
-    return ERR_OK;
+    cap_close(proc->root_cnode, cap_id);
+    return (uint64_t)ERR_FAULT;
 }
 
-uintptr_t sys_vspace_map(
-    uint64_t vspace_cap,
-    uint64_t vmo_cap,
-    size_t vmo_offset,
-    uintptr_t hint_addr,
-    size_t size,
-    uint32_t map_flags
-) {
+uintptr_t sys_vspace_map(struct interrupt_trapframe* regs) {
+    const uint64_t vspace_cap = SYSCALL_FIRST_ARG(regs);
+    const uint64_t vmo_cap    = SYSCALL_SECOND_ARG(regs);
+    const size_t vmo_offset   = SYSCALL_THIRD_ARG(regs);
+    const uintptr_t hint_addr = SYSCALL_FOURTH_ARG(regs);
+    const size_t size         = SYSCALL_FIFTH_ARG(regs);
+    const uint32_t map_flags  = SYSCALL_SIXTH_ARG(regs);
+
     struct process* proc = smp_current_core()->curr_thread->owner;
     struct cnode* root   = proc->root_cnode;
 
@@ -128,24 +131,31 @@ uintptr_t sys_vspace_map(
     return (uintptr_t)mapped_addr;
 }
 
-int sys_vspace_unmap(uint64_t vspace_cap, uintptr_t addr, size_t size) {
+uint64_t sys_vspace_unmap(struct interrupt_trapframe* regs) {
+    const uint64_t vspace_cap = SYSCALL_FIRST_ARG(regs);
+    const uintptr_t addr      = SYSCALL_SECOND_ARG(regs);
+    const size_t size         = SYSCALL_THIRD_ARG(regs);
+
     struct process* proc = smp_current_core()->curr_thread->owner;
 
     struct vm_space* space = resolve_vspace(proc->root_cnode, vspace_cap, RIGHT_WRITE);
-    if (!space) return ERR_DENIED;
+    if (!space) return (uint64_t)ERR_DENIED;
 
-    if (!is_aligned(addr, PAGE_SIZE_SMALL) || size == 0) return ERR_INVALID;
+    if (!is_aligned(addr, PAGE_SIZE_SMALL) || size == 0) return (uint64_t)ERR_INVALID;
     vmfree(space, (void*)addr, size);
     return ERR_OK;
 }
 
-int sys_vmo_resize(uint64_t vmo_cap, size_t new_size) {
+uint64_t sys_vmo_resize(struct interrupt_trapframe* regs) {
+    const uint64_t vmo_cap = SYSCALL_FIRST_ARG(regs);
+    const size_t new_size  = SYSCALL_SECOND_ARG(regs);
+
     struct process* proc = smp_current_core()->curr_thread->owner;
-    if (unlikely(!proc || !proc->root_cnode)) return ERR_INVALID;
+    if (unlikely(!proc || !proc->root_cnode)) return (uint64_t)ERR_INVALID;
 
     vm_object_t* vmo = cap_resolve(proc->root_cnode, vmo_cap, RIGHT_WRITE, CAP_TYPE_VMO);
-    if (!vmo) return ERR_DENIED;
-    if (vmo->type == VM_OBJ_PHYSICAL) return ERR_PERM;
+    if (!vmo) return (uint64_t)ERR_DENIED;
+    if (vmo->type == VM_OBJ_PHYSICAL) return (uint64_t)ERR_PERM;
 
     size_t aligned_new = align_up(new_size, PAGE_SIZE_SMALL);
 
@@ -168,20 +178,25 @@ int sys_vmo_resize(uint64_t vmo_cap, size_t new_size) {
     return ERR_OK;
 }
 
-int sys_vspace_protect(uint64_t vspace_cap, uintptr_t addr, size_t size, uint32_t new_prots) {
+uint64_t sys_vspace_protect(struct interrupt_trapframe* regs) {
+    const uint64_t vspace_cap = SYSCALL_FIRST_ARG(regs);
+    const uintptr_t addr      = SYSCALL_SECOND_ARG(regs);
+    const size_t size         = SYSCALL_THIRD_ARG(regs);
+    const uint32_t new_prots  = SYSCALL_FOURTH_ARG(regs);
+
     process_t* proc = smp_current_core()->curr_thread->owner;
 
     struct vm_space* space = resolve_vspace(proc->root_cnode, vspace_cap, RIGHT_WRITE);
-    if (!space) return ERR_DENIED;
+    if (!space) return (uint64_t)ERR_DENIED;
 
-    if (!is_aligned(addr, PAGE_SIZE_SMALL) || size == 0) return ERR_INVALID;
+    if (!is_aligned(addr, PAGE_SIZE_SMALL) || size == 0) return (uint64_t)ERR_INVALID;
 
     uint32_t prot_flags = 0;
     if (new_prots & VSPACE_PROT_READ) prot_flags |= VMM_FLAG_READ;
     if (new_prots & VSPACE_PROT_WRITE) prot_flags |= VMM_FLAG_WRITE;
     if (new_prots & VSPACE_PROT_EXEC) prot_flags |= VMM_FLAG_EXECUTE;
 
-    return vmprotect(space, addr, size, prot_flags);
+    return (uint64_t)vmprotect(space, addr, size, prot_flags);
 }
 
 #define min(a, b) ((a) > (b) ? (b) : (a))
@@ -252,35 +267,45 @@ vmo_direct_io(uint64_t vmo_cap, void* buffer, size_t offset, size_t size, bool i
     return ERR_OK;
 }
 
-int sys_vmo_read(uint64_t vmo_cap, void* buffer, size_t offset, size_t size) {
-    return vmo_direct_io(vmo_cap, buffer, offset, size, false);
+uint64_t sys_vmo_read(struct interrupt_trapframe* regs) {
+    const uint64_t vmo_cap = SYSCALL_FIRST_ARG(regs);
+    void* buffer           = (void*)SYSCALL_SECOND_ARG(regs);
+    const size_t offset    = SYSCALL_THIRD_ARG(regs);
+    const size_t size      = SYSCALL_FOURTH_ARG(regs);
+
+    return (uint64_t)vmo_direct_io(vmo_cap, buffer, offset, size, false);
 }
 
-int sys_vmo_write(uint64_t vmo_cap, const void* buffer, size_t offset, size_t size) {
-    return vmo_direct_io(vmo_cap, (void*)buffer, offset, size, true);
+uint64_t sys_vmo_write(struct interrupt_trapframe* regs) {
+    const uint64_t vmo_cap = SYSCALL_FIRST_ARG(regs);
+    const void* buffer     = (const void*)SYSCALL_SECOND_ARG(regs);
+    const size_t offset    = SYSCALL_THIRD_ARG(regs);
+    const size_t size      = SYSCALL_FOURTH_ARG(regs);
+
+    return (uint64_t)vmo_direct_io(vmo_cap, (void*)buffer, offset, size, true);
 }
 
-int sys_vmo_clone(
-    uint64_t src_vmo_cap,
-    size_t offset,
-    size_t size,
-    uint32_t,
-    uint64_t* out_vmo_cap
-) {
+uint64_t sys_vmo_clone(struct interrupt_trapframe* regs) {
+    const uint64_t src_vmo_cap = SYSCALL_FIRST_ARG(regs);
+    const size_t offset        = SYSCALL_SECOND_ARG(regs);
+    const size_t size          = SYSCALL_THIRD_ARG(regs);
+    const uint32_t flags       = SYSCALL_FOURTH_ARG(regs);
+    uint64_t* out_vmo_cap      = (uint64_t*)SYSCALL_FIFTH_ARG(regs);
+
     process_t* proc = smp_current_core()->curr_thread->owner;
-    if (unlikely(!proc || !out_vmo_cap)) return ERR_INVALID;
+    if (unlikely(!proc || !out_vmo_cap)) return (uint64_t)ERR_INVALID;
 
     vm_object_t* parent = cap_resolve(proc->root_cnode, src_vmo_cap, RIGHT_READ, CAP_TYPE_VMO);
-    if (unlikely(!parent)) return ERR_DENIED;
-    if (unlikely(offset > parent->size)) return ERR_INVALID;
+    if (unlikely(!parent)) return (uint64_t)ERR_DENIED;
+    if (unlikely(offset > parent->size)) return (uint64_t)ERR_INVALID;
 
     size_t clone_size = (size > 0) ? size : (parent->size - offset);
 
     if (unlikely(offset + clone_size > parent->size || offset + clone_size < offset))
-        return ERR_INVALID;
+        return (uint64_t)ERR_INVALID;
 
     vm_object_t* shadow = vm_object_create_shadow(parent, offset, clone_size);
-    if (unlikely(!shadow)) return ERR_NO_MEM;
+    if (unlikely(!shadow)) return (uint64_t)ERR_NO_MEM;
 
     if (size > 0 && size < shadow->size) shadow->size = align_up(size, PAGE_SIZE_SMALL);
 
@@ -288,7 +313,7 @@ int sys_vmo_clone(
     struct capability* cap = cap_alloc(proc->root_cnode, &cap_id);
     if (unlikely(!cap)) {
         vm_object_deref(shadow);
-        return ERR_CAP_EXHAUSTED;
+        return (uint64_t)ERR_CAP_EXHAUSTED;
     }
 
     acquire_qspinlock(&cap->lock);
@@ -297,20 +322,21 @@ int sys_vmo_clone(
     cap->rights = RIGHT_ALL;
     release_qspinlock(&cap->lock);
 
-    if (unlikely(copy_to_user(out_vmo_cap, &cap_id, sizeof(uint64_t)) != 0)) {
-        sys_cap_close(proc->root_cnode, cap_id);
-        return ERR_FAULT;
-    }
+    if (write_cap_out(out_vmo_cap, cap_id)) return ERR_OK;
 
-    return ERR_OK;
+    cap_close(proc->root_cnode, cap_id);
+    return (uint64_t)ERR_FAULT;
 }
 
-int sys_pkey_alloc(uint64_t vspace_cap, uint32_t flags) {
+uint64_t sys_pkey_alloc(struct interrupt_trapframe* regs) {
+    uint64_t vspace_cap = SYSCALL_FIRST_ARG(regs);
+    uint32_t flags      = SYSCALL_SECOND_ARG(regs);
+
     struct process* proc = smp_current_core()->curr_thread->owner;
     struct cnode* root   = proc->root_cnode;
 
     struct vm_space* space = resolve_vspace(root, vspace_cap, RIGHT_WRITE);
-    if (!space) return ERR_DENIED;
+    if (!space) return (uint64_t)ERR_DENIED;
 
-    return pagemap_allocate_pkey(space->map, flags);
+    return (uint64_t)pagemap_allocate_pkey(space->map, flags);
 }

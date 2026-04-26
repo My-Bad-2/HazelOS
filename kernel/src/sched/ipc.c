@@ -9,6 +9,7 @@
 #include "core/capability.h"
 #include "core/errors.h"
 #include "core/syscalls.h"
+#include "cpu/exception.h"
 #include "cpu/smp.h"
 #include "drivers/ktimer.h"
 #include "libs/dlist.h"
@@ -21,15 +22,6 @@
 static kmem_cache_t* endpoint_cache  = nullptr;
 static kmem_cache_t* port_cache      = nullptr;
 static kmem_cache_t* pager_req_cache = nullptr;
-
-static inline bool write_cap_out(uint64_t* ptr, uint64_t val) {
-    if (!ptr) return true;
-
-    if (!vmm_is_user_region((uintptr_t)ptr, sizeof(uint64_t))) return false;
-
-    copy_to_user(ptr, &val, sizeof(uint64_t));
-    return true;
-}
 
 void ipc_init(void) {
     endpoint_cache = kmem_cache_create(
@@ -207,7 +199,10 @@ void ipc_port_release(struct kobject* ref) {
     kmem_cache_free(port_cache, port);
 }
 
-int sys_endpoint_create(uint64_t* cap0_out, uint64_t* cap1_out) {
+uint64_t sys_endpoint_create(struct interrupt_trapframe* regs) {
+    uint64_t* cap0_out = (uint64_t*)SYSCALL_FIRST_ARG(regs);
+    uint64_t* cap1_out = (uint64_t*)SYSCALL_SECOND_ARG(regs);
+
     process_t* proc = smp_current_core()->curr_thread->owner;
 
     struct ipc_endpoint* ep0 = kmem_cache_alloc(endpoint_cache);
@@ -216,7 +211,7 @@ int sys_endpoint_create(uint64_t* cap0_out, uint64_t* cap1_out) {
     if (!ep0 || !ep1) {
         if (ep0) kmem_cache_free(endpoint_cache, ep0);
         if (ep1) kmem_cache_free(endpoint_cache, ep1);
-        return ERR_NO_MEM;
+        return (uint64_t)ERR_NO_MEM;
     }
 
     memset(ep0, 0, sizeof(struct ipc_endpoint));
@@ -247,7 +242,7 @@ int sys_endpoint_create(uint64_t* cap0_out, uint64_t* cap1_out) {
         if (c1) cap_close(proc->root_cnode, cap1);
         kmem_cache_free(endpoint_cache, ep0);
         kmem_cache_free(endpoint_cache, ep1);
-        return ERR_NO_MEM;
+        return (uint64_t)ERR_NO_MEM;
     }
 
     atomic_store_explicit(&c0->object_ptr, (uintptr_t)ep0, memory_order_release);
@@ -258,17 +253,19 @@ int sys_endpoint_create(uint64_t* cap0_out, uint64_t* cap1_out) {
     c1->type   = CAP_TYPE_ENDPOINT;
     c1->rights = RIGHT_ALL;
 
-    if (cap0_out && cap1_out)
-        if (!write_cap_out(cap0_out, cap0) || !write_cap_out(cap1_out, cap1)) return ERR_FAULT;
+    if (!write_cap_out(cap0_out, cap0) || !write_cap_out(cap1_out, cap1))
+        return (uint64_t)ERR_FAULT;
 
     return ERR_OK;
 }
 
-int sys_port_create(uint64_t* cap_out) {
+uint64_t sys_port_create(struct interrupt_trapframe* regs) {
+    uint64_t* cap_out = (uint64_t*)SYSCALL_FIRST_ARG(regs);
+
     process_t* proc = smp_current_core()->curr_thread->owner;
 
     struct ipc_port* port = kmem_cache_alloc(port_cache);
-    if (!port) return ERR_NO_MEM;
+    if (!port) return (uint64_t)ERR_NO_MEM;
 
     memset(port, 0, sizeof(struct ipc_port));
     kref_init(&port->refcount, CAP_TYPE_PORT);
@@ -280,25 +277,28 @@ int sys_port_create(uint64_t* cap_out) {
     struct capability* c = cap_alloc(proc->root_cnode, &cap);
     if (!c) {
         kmem_cache_free(port_cache, port);
-        return ERR_NO_MEM;
+        return (uint64_t)ERR_NO_MEM;
     }
 
     atomic_store_explicit(&c->object_ptr, (uintptr_t)port, memory_order_release);
     c->type   = CAP_TYPE_PORT;
     c->rights = RIGHT_ALL;
 
-    if (cap_out)
-        if (!write_cap_out(cap_out, cap)) return ERR_FAULT;
+    if (!write_cap_out(cap_out, cap)) return (uint64_t)ERR_FAULT;
     return ERR_OK;
 }
 
-int sys_port_bind(uint64_t port_cap, uint64_t target_cap, uint64_t key) {
+uint64_t sys_port_bind(struct interrupt_trapframe* regs) {
+    const uint64_t port_cap   = SYSCALL_FIRST_ARG(regs);
+    const uint64_t target_cap = SYSCALL_SECOND_ARG(regs);
+    const uint64_t key        = SYSCALL_THIRD_ARG(regs);
+
     process_t* proc = smp_current_core()->curr_thread->owner;
 
     struct capability* p_cap = cap_lookup(proc->root_cnode, port_cap, RIGHT_WRITE);
     struct capability* t_cap = cap_lookup(proc->root_cnode, target_cap, RIGHT_WRITE);
 
-    if (!p_cap || !t_cap || p_cap->type != CAP_TYPE_PORT) return ERR_INVALID_CAP;
+    if (!p_cap || !t_cap || p_cap->type != CAP_TYPE_PORT) return (uint64_t)ERR_INVALID_CAP;
 
     struct ipc_port* port =
         (struct ipc_port*)atomic_load_explicit(&p_cap->object_ptr, memory_order_acquire);
@@ -335,17 +335,20 @@ int sys_port_bind(uint64_t port_cap, uint64_t target_cap, uint64_t key) {
         return ERR_OK;
     }
 
-    return ERR_INVALID_CAP;
+    return (uint64_t)ERR_INVALID_CAP;
 }
 
-int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {
+uint64_t sys_channel_write(struct interrupt_trapframe* regs) {
+    uint64_t ep_cap_id       = SYSCALL_FIRST_ARG(regs);
+    struct ipc_msg* user_msg = (struct ipc_msg*)SYSCALL_SECOND_ARG(regs);
+
+    struct ipc_msg msg;
+    if (copy_from_user(&msg, user_msg, sizeof(struct ipc_msg)) != 0) return (uint64_t)ERR_FAULT;
+
     process_t* proc = smp_current_core()->curr_thread->owner;
 
     struct capability* cap = cap_lookup(proc->root_cnode, ep_cap_id, RIGHT_WRITE);
-    if (!cap) return ERR_INVALID_CAP;
-
-    struct ipc_msg msg;
-    if (copy_from_user(&msg, user_msg, sizeof(struct ipc_msg)) != 0) return ERR_FAULT;
+    if (!cap) return (uint64_t)ERR_INVALID_CAP;
 
     if (cap->type == CAP_TYPE_REPLY) {
         thread_t* target_thread =
@@ -355,7 +358,7 @@ int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {
                                         (msg.cap_count * sizeof(struct capability*)) +
                                         (msg.cap_count * sizeof(struct cap_disp));
         struct ipc_msg_internal* kmsg = kmalloc(total_size);
-        if (!kmsg) return ERR_NO_MEM;
+        if (!kmsg) return (uint64_t)ERR_NO_MEM;
 
         kmsg->data_len  = msg.data_len;
         kmsg->cap_count = msg.cap_count;
@@ -364,7 +367,7 @@ int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {
         int err = msg_extract_caps(proc, &msg, kmsg);
         if (err != ERR_OK) {
             kfree(kmsg);
-            return err;
+            return (uint64_t)err;
         }
 
         target_thread->ipc_state.rpc_reply_msg = kmsg;
@@ -379,23 +382,23 @@ int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {
     struct ipc_iovec iovs[16];
 
     if (msg.flags & IPC_FLAG_IOVEC) {
-        if (msg.data_len > 16) return ERR_INVALID;
+        if (msg.data_len > 16) return (uint64_t)ERR_INVALID;
         if (copy_from_user(iovs, msg.data, msg.data_len * sizeof(struct ipc_iovec)) != 0)
-            return ERR_FAULT;
+            return (uint64_t)ERR_FAULT;
 
         for (size_t i = 0; i < msg.data_len; ++i) total_data_bytes += iovs[i].len;
     } else {
         total_data_bytes = msg.data_len;
     }
 
-    if (unlikely(cap->type != CAP_TYPE_ENDPOINT)) return ERR_INVALID_CAP;
+    if (unlikely(cap->type != CAP_TYPE_ENDPOINT)) return (uint64_t)ERR_INVALID_CAP;
 
     size_t total_size = sizeof(struct ipc_msg_internal) + msg.data_len +
                         (msg.cap_count * sizeof(struct capability*)) +
                         (msg.cap_count * sizeof(struct cap_disp));
 
     struct ipc_msg_internal* kmsg = kmalloc(total_size);
-    if (!kmsg) return ERR_NO_MEM;
+    if (!kmsg) return (uint64_t)ERR_NO_MEM;
 
     kmsg->data_len     = msg.data_len;
     kmsg->cap_count    = msg.cap_count;
@@ -408,7 +411,7 @@ int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {
             if (iovs[i].len > 0) {
                 if (copy_from_user(kmsg_data + offset, iovs[i].base, iovs[i].len) != 0) {
                     kfree(kmsg);
-                    return ERR_FAULT;
+                    return (uint64_t)ERR_FAULT;
                 }
 
                 offset += iovs[i].len;
@@ -417,14 +420,14 @@ int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {
     } else if (msg.data_len > 0) {
         if (copy_from_user(kmsg_data, msg.data, msg.data_len) != 0) {
             kfree(kmsg);
-            return ERR_FAULT;
+            return (uint64_t)ERR_FAULT;
         }
     }
 
     int err = msg_extract_caps(proc, &msg, kmsg);
     if (err != ERR_OK) {
         kfree(kmsg);
-        return err;
+        return (uint64_t)err;
     }
 
     struct ipc_endpoint* ep =
@@ -436,7 +439,7 @@ int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {
     if (unlikely(!peer || ep->peer_closed)) {
         release_qspinlock(&ep->lock);
         kfree(kmsg);
-        return ERR_IPC_DISCONNECT;
+        return (uint64_t)ERR_IPC_DISCONNECT;
     }
 
     acquire_qspinlock(&peer->lock);
@@ -461,20 +464,21 @@ int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* user_msg) {
     return ERR_OK;
 }
 
-int sys_channel_read(
-    uint64_t ep_cap_id,
-    struct ipc_msg* user_msg,
-    uint32_t* badge_out,
-    int timeout_ms
-) {
+uint64_t sys_channel_read(struct interrupt_trapframe* regs) {
+    uint64_t ep_cap_id       = SYSCALL_FIRST_ARG(regs);
+    struct ipc_msg* user_msg = (struct ipc_msg*)SYSCALL_SECOND_ARG(regs);
+    uint32_t* badge_out      = (uint32_t*)SYSCALL_THIRD_ARG(regs);
+    int timeout_ms           = SYSCALL_FOURTH_ARG(regs);
+
+    struct ipc_msg msg;
+    if (copy_from_user(&msg, user_msg, sizeof(struct ipc_msg)) != ERR_OK)
+        return (uint64_t)ERR_FAULT;
+
     thread_t* me    = smp_current_core()->curr_thread;
     process_t* proc = me->owner;
 
     struct capability* cap = cap_lookup(proc->root_cnode, ep_cap_id, RIGHT_READ);
-    if (unlikely(!cap || cap->type != CAP_TYPE_ENDPOINT)) return ERR_INVALID_CAP;
-
-    struct ipc_msg msg;
-    if (copy_from_user(&msg, user_msg, sizeof(struct ipc_msg)) != ERR_OK) return ERR_FAULT;
+    if (unlikely(!cap || cap->type != CAP_TYPE_ENDPOINT)) return (uint64_t)ERR_INVALID_CAP;
 
     struct ipc_endpoint* ep =
         (struct ipc_endpoint*)atomic_load_explicit(&cap->object_ptr, memory_order_acquire);
@@ -484,12 +488,12 @@ int sys_channel_read(
     while (dlist_empty(&ep->msg_queue)) {
         if (ep->peer_closed) {
             release_qspinlock(&ep->lock);
-            return ERR_IPC_DISCONNECT;
+            return (uint64_t)ERR_IPC_DISCONNECT;
         }
 
         if (timeout_ms == 0) {
             release_qspinlock(&ep->lock);
-            return ERR_AGAIN;
+            return (uint64_t)ERR_AGAIN;
         }
 
         dlist_add_tail(&me->wait_node, &ep->blocked_receivers);
@@ -506,12 +510,12 @@ int sys_channel_read(
         if (dlist_linked(&me->wait_node)) {
             dlist_del_init(&me->wait_node);
             release_qspinlock(&ep->lock);
-            return ERR_TIMEOUT;
+            return (uint64_t)ERR_TIMEOUT;
         }
 
         if (me->ipc_state.status == ERR_IPC_DISCONNECT && dlist_empty(&ep->msg_queue)) {
             release_qspinlock(&ep->lock);
-            return ERR_IPC_DISCONNECT;
+            return (uint64_t)ERR_IPC_DISCONNECT;
         }
     }
 
@@ -534,7 +538,7 @@ int sys_channel_read(
         msg.cap_count = kmsg->cap_count;
         copy_to_user(user_msg, &msg, sizeof(struct ipc_msg));
 
-        return ERR_IPC_TRUNCATED;
+        return (uint64_t)ERR_IPC_TRUNCATED;
     }
 
     dlist_del_init(&kmsg->node);
@@ -560,22 +564,27 @@ int sys_channel_read(
     return ERR_OK;
 }
 
-int sys_channel_call(uint64_t ep_cap_id, struct ipc_msg* tx, struct ipc_msg* rx, int timeout_ms) {
+uint64_t sys_channel_call(struct interrupt_trapframe* regs) {
+    const uint64_t ep_cap_id = SYSCALL_FIRST_ARG(regs);
+    const struct ipc_msg* tx = (struct ipc_msg*)SYSCALL_SECOND_ARG(regs);
+    struct ipc_msg* rx       = (struct ipc_msg*)SYSCALL_THIRD_ARG(regs);
+    const int timeout_ms     = SYSCALL_FOURTH_ARG(regs);
+
     thread_t* me    = smp_current_core()->curr_thread;
     process_t* proc = me->owner;
 
     uint64_t reply_cap_id;
     struct capability* reply_cap = cap_alloc(proc->root_cnode, &reply_cap_id);
-    if (!reply_cap) return ERR_NO_MEM;
+    if (!reply_cap) return (uint64_t)ERR_NO_MEM;
 
     atomic_store_explicit(&reply_cap->object_ptr, (uintptr_t)me, memory_order_release);
     reply_cap->type   = CAP_TYPE_REPLY;
     reply_cap->rights = RIGHT_WRITE;
 
-    int ret = sys_channel_write(ep_cap_id, tx);
+    uint64_t ret = sys_channel_write(regs);
     if (ret != ERR_OK) {
         cap_close(proc->root_cnode, reply_cap_id);
-        return ret;
+        return (uint64_t)ret;
     }
 
     me->ipc_state.rpc_reply_msg = nullptr;
@@ -587,18 +596,18 @@ int sys_channel_call(uint64_t ep_cap_id, struct ipc_msg* tx, struct ipc_msg* rx,
 
     cap_close(proc->root_cnode, reply_cap_id);
 
-    if (me->ipc_state.rpc_reply_msg == nullptr) return ERR_TIMEOUT;
+    if (me->ipc_state.rpc_reply_msg == nullptr) return (uint64_t)ERR_TIMEOUT;
 
     struct ipc_msg_internal* kmsg = me->ipc_state.rpc_reply_msg;
     struct ipc_msg msg;
     if (copy_from_user(&msg, rx, sizeof(struct ipc_msg)) != 0) {
         kfree(kmsg);
-        return ERR_FAULT;
+        return (uint64_t)ERR_FAULT;
     }
 
     if (msg.data_len < kmsg->data_len || msg.cap_count < kmsg->cap_count) {
         kfree(kmsg);
-        return ERR_IPC_TRUNCATED;
+        return (uint64_t)ERR_IPC_TRUNCATED;
     }
 
     if (kmsg->data_len > 0) copy_to_user(msg.data, (void*)(kmsg + 1), kmsg->data_len);
@@ -612,18 +621,18 @@ int sys_channel_call(uint64_t ep_cap_id, struct ipc_msg* tx, struct ipc_msg* rx,
     return ERR_OK;
 }
 
-int sys_port_wait(
-    uint64_t port_cap,
-    struct port_event* out_events,
-    size_t max_events,
-    size_t* events_returned,
-    int timeout_ms
-) {
+uint64_t sys_port_wait(struct interrupt_trapframe* regs) {
+    const uint64_t port_cap       = SYSCALL_FIRST_ARG(regs);
+    struct port_event* out_events = (struct port_event*)SYSCALL_SECOND_ARG(regs);
+    const size_t max_events       = SYSCALL_THIRD_ARG(regs);
+    size_t* events_returned       = (size_t*)SYSCALL_FOURTH_ARG(regs);
+    const int timeout_ms          = SYSCALL_FIFTH_ARG(regs);
+
     thread_t* me    = smp_current_core()->curr_thread;
     process_t* proc = me->owner;
 
     struct capability* p_cap = cap_lookup(proc->root_cnode, port_cap, RIGHT_WAIT);
-    if (unlikely(!p_cap || p_cap->type != CAP_TYPE_PORT)) return ERR_INVALID_CAP;
+    if (unlikely(!p_cap || p_cap->type != CAP_TYPE_PORT)) return (uint64_t)ERR_INVALID_CAP;
 
     struct ipc_port* set =
         (struct ipc_port*)atomic_load_explicit(&p_cap->object_ptr, memory_order_acquire);
@@ -698,18 +707,20 @@ int sys_port_wait(
     release_qspinlock(&set->lock);
 
     if (events_returned) copy_to_user(events_returned, &count, sizeof(size_t));
-    return ret;
+    return (uint64_t)ret;
 }
 
-int sys_channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap) {
-    process_t* proc = smp_current_core()->curr_thread->owner;
+uint64_t sys_channel_forward(struct interrupt_trapframe* regs) {
+    uint64_t src_ep_cap  = SYSCALL_FIRST_ARG(regs);
+    uint64_t dest_ep_cap = SYSCALL_SECOND_ARG(regs);
+    process_t* proc      = smp_current_core()->curr_thread->owner;
 
     struct capability* cap_src = cap_lookup(proc->root_cnode, src_ep_cap, RIGHT_READ);
     struct capability* cap_dst = cap_lookup(proc->root_cnode, dest_ep_cap, RIGHT_WRITE);
 
-    if (!cap_src || !cap_dst) return ERR_INVALID_CAP;
+    if (!cap_src || !cap_dst) return (uint64_t)ERR_INVALID_CAP;
     if (cap_src->type != CAP_TYPE_ENDPOINT || cap_dst->type != CAP_TYPE_ENDPOINT)
-        return ERR_INVALID_CAP;
+        return (uint64_t)ERR_INVALID_CAP;
 
     struct ipc_endpoint* ep_src =
         (struct ipc_endpoint*)atomic_load_explicit(&cap_src->object_ptr, memory_order_acquire);
@@ -719,7 +730,7 @@ int sys_channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap) {
     acquire_qspinlock(&ep_src->lock);
     if (dlist_empty(&ep_src->msg_queue)) {
         release_qspinlock(&ep_src->lock);
-        return ERR_AGAIN;
+        return (uint64_t)ERR_AGAIN;
     }
 
     struct ipc_msg_internal* kmsg =
@@ -736,7 +747,7 @@ int sys_channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap) {
     if (unlikely(!peer || ep_dst->peer_closed)) {
         release_qspinlock(&ep_dst->lock);
         kfree(kmsg);
-        return ERR_IPC_DISCONNECT;
+        return (uint64_t)ERR_IPC_DISCONNECT;
     }
 
     acquire_qspinlock(&peer->lock);

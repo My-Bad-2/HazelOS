@@ -3,10 +3,10 @@
 
 #include <stdint.h>
 
+#include "cpu/exception.h"
 #include "libs/dlist.h"
 #include "libs/kobject.h"
 #include "libs/spinlock.h"
-#include "uapi/ipc.h"
 
 #define IPC_MAX_MSG_REGS 4  // 4 registers * 8 bytes = 32 bytes
 
@@ -76,21 +76,15 @@ struct kernel_page_request {
 void ipc_init(void);
 void port_notify(struct ipc_port* port, struct ipc_port_object* obj, uint32_t signals);
 
-int sys_endpoint_create(uint64_t* cap0_out, uint64_t* cap1_out);
-int sys_port_create(uint64_t* cap_out);
-int sys_port_bind(uint64_t port_cap, uint64_t ep_cap, uint64_t key);
-int sys_port_wait(
-    uint64_t port_cap,
-    struct port_event* out_events,
-    size_t max_events,
-    size_t* events_returned,
-    int timeout_ms
-);
+uint64_t sys_endpoint_create(struct interrupt_trapframe* regs);
+uint64_t sys_port_create(struct interrupt_trapframe* regs);
+uint64_t sys_port_bind(struct interrupt_trapframe* regs);
+uint64_t sys_port_wait(struct interrupt_trapframe* regs);
 
-int sys_channel_write(uint64_t ep_cap_id, struct ipc_msg* msg);
-int sys_channel_read(uint64_t ep_cap_id, struct ipc_msg* msg, uint32_t* badge_out, int timeout_ms);
-int sys_channel_call(uint64_t ep_cap_id, struct ipc_msg* tx, struct ipc_msg* rx, int timeout_ms);
-int sys_channel_forward(uint64_t src_ep_cap, uint64_t dest_ep_cap);
+uint64_t sys_channel_write(struct interrupt_trapframe* regs);
+uint64_t sys_channel_read(struct interrupt_trapframe* regs);
+uint64_t sys_channel_call(struct interrupt_trapframe* regs);
+uint64_t sys_channel_forward(struct interrupt_trapframe* regs);
 
 void ipc_endpoint_release(struct kobject* ref);
 void ipc_port_release(struct kobject* ref);
