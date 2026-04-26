@@ -15,7 +15,7 @@ SYM_FUNC_START(kernel_thread_entry)
     pop_value %rax   // Load function pointer
 
     // Safely execute the kernel function
-    CALL_NOSPEC %rax
+    CALL_NOSPEC_NORET %rax
     
     // If the kernel thread function accidentally returns, kill it
     call thread_exit

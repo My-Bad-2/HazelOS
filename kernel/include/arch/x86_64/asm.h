@@ -229,6 +229,15 @@ name: \
     RET_AND_SPECULATION_POSTFENCE
 .endm
 
+// Repoline mitigation for indirect calls
+// Usage: CALL_NOSPEC %rax
+.macro CALL_NOSPEC_NORET reg
+    call    999f
+    int3
+999:
+    movq    \reg, (%rsp)
+.endm
+
 // Retpoline mitigation for indirect jumps
 .macro JMP_NOSPEC reg
     call    999f
