@@ -78,7 +78,7 @@ int64_t clone(
 }
 
 void yield(void) {
-    syscall(SYS_SCHED_YIELD, 0);
+    syscall(SYS_SCHED_YIELD);
 }
 
 int64_t thread_sleep(uint64_t ns) {
