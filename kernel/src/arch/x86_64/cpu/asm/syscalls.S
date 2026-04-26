@@ -1,82 +1,59 @@
 #include <cpu/registers.h>
+#include <asm.h>
+#include <core/errors.h>
+
+#define USER_CS 0x2B
+#define USER_SS 0x23
 
 .section .text
 
-.global syscall_entry
-.global syscall_restore_path
-.extern syscall_dispatcher
-.type syscall_entry, @function
-syscall_entry:
-    cld
+EXTERN_FUNC(syscall_dispatcher)
+SYM_FUNC_START(syscall_entry)
     swapgs
 
-    movq %rsp, %gs:32
-    movq %gs:24, %rsp
+    movq %rsp, %gs:32 // Save user rsp
+    movq %gs:24, %rsp // Load kernel rsp
 
-    # Preserve registers for sysv abi and rcx/r11 ( User return info)
-    pushq %gs:32    # User RSP
-    pushq %r11      # User RFLAGS
-    pushq %rcx      # User RIP
+    // Tell the unwinder that RSP has completely changed.
+    .cfi_def_cfa %rsp, 0
 
-    # Push General Purpose Registers (Callee-saved + Arguments)
-    pushq %rax
-    pushq %rbp
-    pushq %r15
-    pushq %r14
-    pushq %r13
-    pushq %r12
-    pushq %r10
-    pushq %r9
-    pushq %r8
-    pushq %rdi
-    pushq %rsi
-    pushq %rdx
-    pushq %rbx
+    SMP_RMB()
 
-    # %rdi = ARG1
-    # %rsi = ARG2
-    # %rdx = ARG3
-    # %r10 = ARG4
-    # %r8  = ARG5
-    # %r9  = ARG6
+    push_value $USER_SS // ss
+    push_value %gs:32   // rsp
+    push_reg %r11       // rflags
+    push_value $USER_CS // cs
+    push_reg %rcx       // rip
+
+    // Simulate the ISR stub pushes
+    push_value $0
+    push_value $0x80
+
+    PUSHA_64
     
-    movq %rax, %rsi # Syscall number
-    movq %rsp, %rdi # Pointer to the stack frame
-
-    sti
+    movq %rsp, %rdi // Pass trapframe to syscall_dispatcher
+    cld
     call syscall_dispatcher
-    cli
+    cli // Disable Interrupts for safe context restoration
 
-    movq %rax, 96(%rsp)
+SYM_FUNC_END(syscall_entry)
 
-.global syscall_restore_path
-.type syscall_restore_path, @function
-syscall_restore_path:
-    popq %rbx
-    popq %rdx
-    popq %rsi
-    popq %rdi
-    popq %r8
-    popq %r9
-    popq %r10
-    popq %r12
-    popq %r13
-    popq %r14
-    popq %r15
-    popq %rbp
-    popq %rax
-
-    popq %rcx
-    popq %r11
+SYM_FUNC_START(syscall_restore_path)
+    POPA_64
     
-    cli
-    popq %rsp
+    add_to_sp 16
+    pop_reg %rcx    // Pop rip into rcx for sysret
+    add_to_sp 8     // Discard cs
+    pop_reg %r11    // Pop rflags into r11 for sysret
+    pop_reg %rsp    // Pop rsp directly to the stack pointer
+
+    // SS is discarded as we overwrite RSP and swapgs
 
     swapgs
     sysretq
+SYM_FUNC_END(syscall_restore_path)
 
-.global syscall_compat_entry
-.type syscall_compat_entry, @function
-syscall_compat_entry:
-    movq $-38, %rax
+SYM_FUNC_START(syscall_compat_entry)
+    movq $ERR_DENIED, %rax
     sysret
+SYM_FUNC_END(syscall_compat_entry)

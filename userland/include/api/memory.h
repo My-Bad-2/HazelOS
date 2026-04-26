@@ -13,6 +13,8 @@
 #define SYS_VMO_RESIZE  (SYS_CATEGORY_MEM | 0x05)
 #define SYS_VMO_READ    (SYS_CATEGORY_MEM | 0x06)
 #define SYS_VMO_WRITE   (SYS_CATEGORY_MEM | 0x07)
+#define SYS_VMO_CLONE   (SYS_CATEGORY_MEM | 0x08)
+#define SYS_MEM_WPKRU   (SYS_CATEGORY_MEM | 0x09)
 
 #define VMO_CREATE_RAM       0x0001u  // Standard Zeroed RAM
 #define VMO_CREATE_PHYSICAL  0x0002u  // Direct physical memory (MMIO)
@@ -32,10 +34,20 @@
 #define VSPACE_MAP_PAGE_2M   0x8000u   // Force 2MB Superpages
 #define VSPACE_MAP_PAGE_1G   0x10000u  // Force 1GB Hugepages
 
+#define PKEY_FLAG_ACCESS_DISABLE 0x1u  // Blocks data reads and writes.
+#define PKEY_FLAG_WRITE_DISABLE  0x2u  // Blocks writes when ACCESS_DISABLE is clear.
+
 int vmo_create(size_t size, uint32_t vmo_flags, uint64_t* out_vmo_cap);
 int vmo_resize(uint64_t vmo_cap, size_t new_size);
 int vmo_read(uint64_t vmo_cap, void* buffer, size_t offset, size_t size);
 int vmo_write(uint64_t vmo_cap, const void* buffer, size_t offset, size_t size);
+int vmo_clone(
+    uint64_t src_vmo_cap,
+    size_t offset,
+    size_t size,
+    uint32_t flags,
+    uint64_t* out_vmo_cap
+);
 
 uintptr_t vspace_map(
     uint64_t vspace_cap,
@@ -47,5 +59,6 @@ uintptr_t vspace_map(
 );
 int vspace_unmap(uint64_t vspace_cap, uintptr_t addr, size_t size);
 int vspace_protect(uint64_t vspace_cap, uintptr_t addr, size_t size, uint32_t new_prots);
+int vspace_pkey_alloc(uint64_t vspace_cap, uint32_t flags);
 
 #endif

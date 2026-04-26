@@ -22,7 +22,7 @@
 static uint64_t tsc_freq_hz   = 0;
 static uint64_t tsc_boot_time = 0;
 
-static irq_return_t timer_handler(interrupt_trapframe_t*, void*) {
+static irq_return_t timer_handler(struct interrupt_trapframe*, void*) {
     per_cpu_data_t* cpu    = smp_current_core();
     bool trigger_scheduler = false;
 

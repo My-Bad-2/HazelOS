@@ -103,7 +103,7 @@ function(project_enable_doxygen)
         ${_hazel_docs_target_name}
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${_hazel_docs_markdown_dir}"
         COMMAND
-            "${_hazel_moxygen_exe}" --anchors --output "${_hazel_docs_markdown_output}"
+            "${_hazel_moxygen_exe}" --anchors --pages --output "${_hazel_docs_markdown_output}"
             "${_hazel_docs_xml_dir}"
         DEPENDS ${_hazel_docs_xml_target}
         COMMENT "Generating Markdown documentation from Doxygen XML with moxygen"

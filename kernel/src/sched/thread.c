@@ -150,7 +150,7 @@ thread_t* thread_create(
 thread_t* thread_clone(
     process_t* target_proc,
     thread_t* parent,
-    struct syscall_regs* regs,
+    struct interrupt_trapframe* regs,
     uintptr_t rsp_override,
     uintptr_t rip_override,
     int* error_code

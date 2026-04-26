@@ -12,7 +12,6 @@
 
 struct process;
 struct thread;
-struct syscall_regs;
 
 struct ipc_msg_internal {
     struct dlist_head node;

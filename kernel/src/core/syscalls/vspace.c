@@ -304,3 +304,13 @@ int sys_vmo_clone(
 
     return ERR_OK;
 }
+
+int sys_pkey_alloc(uint64_t vspace_cap, uint32_t flags) {
+    struct process* proc = smp_current_core()->curr_thread->owner;
+    struct cnode* root   = proc->root_cnode;
+
+    struct vm_space* space = resolve_vspace(root, vspace_cap, RIGHT_WRITE);
+    if (!space) return ERR_DENIED;
+
+    return pagemap_allocate_pkey(space->map, flags);
+}

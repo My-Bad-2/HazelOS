@@ -96,7 +96,7 @@ struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code) {
     };
 }
 
-__attribute__((force_align_arg_pointer)) void pf_handler(interrupt_trapframe_t* tf) {
+__attribute__((force_align_arg_pointer)) void pf_handler(struct interrupt_trapframe* tf) {
     uintptr_t fault_addr   = read_cr2();
     struct vm_space* space = nullptr;
 

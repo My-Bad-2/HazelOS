@@ -46,3 +46,24 @@ int vmo_read(uint64_t vmo_cap, void* buffer, size_t offset, size_t size) {
 int vmo_write(uint64_t vmo_cap, const void* buffer, size_t offset, size_t size) {
     return syscall(SYS_VMO_WRITE, (long)vmo_cap, (long)buffer, (long)offset, (long)size);
 }
+
+int vmo_clone(
+    uint64_t src_vmo_cap,
+    size_t offset,
+    size_t size,
+    uint32_t flags,
+    uint64_t* out_vmo_cap
+) {
+    return syscall(
+        SYS_VMO_CLONE,
+        (long)src_vmo_cap,
+        (long)offset,
+        (long)size,
+        flags,
+        (long)out_vmo_cap
+    );
+}
+
+int vspace_pkey_alloc(uint64_t vspace_cap, uint32_t flags) {
+    return syscall(SYS_MEM_WPKRU, (long)vspace_cap, flags);
+}

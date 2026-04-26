@@ -16,7 +16,7 @@
 #include "drivers/timer.h"
 #include "libs/log.h"
 
-static irq_return_t nmi_watchdog_tick(interrupt_trapframe_t*, void*) {
+static irq_return_t nmi_watchdog_tick(struct interrupt_trapframe*, void*) {
     per_cpu_data_t* cpu = smp_current_core();
     atomic_fetch_add_explicit(&cpu->watchdog.ticks, 1, memory_order_relaxed);
     return IRQ_HANDLED;

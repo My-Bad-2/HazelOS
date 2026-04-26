@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "cpu/syscalls.h"
+#include "cpu/exception.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +50,7 @@ extern "C" {
 #define SYS_VMO_READ    (SYS_CATEGORY_MEM | 0x06)
 #define SYS_VMO_WRITE   (SYS_CATEGORY_MEM | 0x07)
 #define SYS_VMO_CLONE   (SYS_CATEGORY_MEM | 0x08)
+#define SYS_MEM_WPKRU   (SYS_CATEGORY_MEM | 0x09)
 
 // Timer Syscalls
 #define SYS_TIMER_CREATE (SYS_CATEGORY_TIMER | 0x01)
@@ -70,7 +71,7 @@ size_t copy_to_user(void* dest, const void* src, size_t len);
 void syscalls_init(void);
 int64_t sys_write(uint32_t fd, const char* user_buf, size_t count);
 
-int64_t sys_fork(struct syscall_regs* tf);
+int64_t sys_fork(struct interrupt_trapframe* tf);
 void sys_exit(int exit_code);
 
 // --- Scheduling Category ---
@@ -101,7 +102,7 @@ int64_t sys_clone(
     uint64_t flags,
     uintptr_t child_rsp_override,
     uintptr_t child_rip_override,
-    struct syscall_regs* regs,
+    struct interrupt_trapframe* regs,
     uint64_t* out_proc_cap,
     uint64_t* out_thread_cap,
     uint64_t* out_cnode_cap,
@@ -132,6 +133,9 @@ int64_t sys_thread_sleep(uint64_t ns);
 #define VSPACE_MAP_PAGE_2M   0x8000u   // Force 2MB Superpages
 #define VSPACE_MAP_PAGE_1G   0x10000u  // Force 1GB Hugepages
 
+#define PKEY_FLAG_ACCESS_DISABLE 0x1u  // Blocks data reads and writes.
+#define PKEY_FLAG_WRITE_DISABLE  0x2u  // Blocks writes when ACCESS_DISABLE is clear.
+
 int sys_vmo_create(size_t size, uint32_t vmo_flags, uint64_t* out_vmo_cap);
 int sys_vmo_resize(uint64_t vmo_cap, size_t new_size);
 int sys_vmo_read(uint64_t vmo_cap, void* buffer, size_t offset, size_t size);
@@ -154,6 +158,7 @@ uintptr_t sys_vspace_map(
 );
 int sys_vspace_unmap(uint64_t vspace_cap, uintptr_t addr, size_t size);
 int sys_vspace_protect(uint64_t vspace_cap, uintptr_t addr, size_t size, uint32_t new_prots);
+int sys_pkey_alloc(uint64_t vspace_cap, uint32_t flags);
 
 #ifdef __cplusplus
 }

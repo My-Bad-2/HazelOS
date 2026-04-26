@@ -1098,11 +1098,11 @@ void arch_mmu_init(void) {
     if (!pcid_cache) PANIC("MMU: Failed to create PCID cache");
 }
 
-const uintptr_t get_user_space_end_limit(void) {
+uintptr_t get_user_space_end_limit(void) {
     return (paging_max_levels == 5) ? USER_SPACE_END_5L : USER_SPACE_END_4L;
 }
 
-const uintptr_t get_kernel_space_end_limit(void) {
+uintptr_t get_kernel_space_end_limit(void) {
     return KERNEL_SPACE_END;
 }
 
@@ -1124,9 +1124,8 @@ void arch_mmu_free_pkey(arch_pagemap_t* map, uint8_t pkey) {
     release_spinlock(&map->lock);
 
     uint64_t cr3 = read_cr3();
-    if ((cr3 & X86_PAGE_ADDRESS_MASK) == (map->phys_root & X86_PAGE_ADDRESS_MASK)) {
+    if ((cr3 & X86_PAGE_ADDRESS_MASK) == (map->phys_root & X86_PAGE_ADDRESS_MASK))
         write_pkru_register(pkru_val);
-    }
 }
 
 int arch_mmu_protect(arch_pagemap_t* map, const arch_mmu_protect_args_t* args) {

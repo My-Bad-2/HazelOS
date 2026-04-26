@@ -176,7 +176,7 @@ int64_t sys_clone(
     uint64_t flags,
     uintptr_t child_rsp_override,
     uintptr_t child_rip_override,
-    struct syscall_regs* regs,
+    struct interrupt_trapframe* regs,
     uint64_t* out_proc_cap,
     uint64_t* out_thread_cap,
     uint64_t* out_cnode_cap,

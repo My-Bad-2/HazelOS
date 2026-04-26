@@ -4,7 +4,12 @@ hazel_component_project(NAME HazelKernel OUT_SUPERPROJECT_VAR HAZEL_KERNEL_SUPER
 
 set(_hazel_kernel_namespace "${HAZEL_KERNEL_SUPERPROJECT}")
 
-set(KERNEL_CX_FLAGS "-fno-pic" "-fno-pie" "-fno-omit-frame-pointer")
+set(KERNEL_CX_FLAGS "-fno-pic" "-fno-pie")
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
+else()
+    list(APPEND KERNEL_CX_FLAGS "-fno-omit-frame-pointer")
+endif()
 
 set(KERNEL_LINK_SCRIPT
     ${CMAKE_SOURCE_DIR}/misc/linker/${${_hazel_kernel_namespace}_ARCHITECTURE}-kernel.ld

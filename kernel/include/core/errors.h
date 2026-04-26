@@ -36,6 +36,7 @@
 #define ERR_ROFS        (-30)  // Read-only file system
 #define ERR_M_LINK      (-31)  // Too many links
 #define ERR_PIPE_BROKEN (-32)  // Broken pipe
+#define ERR_NO_SYS      (-38)  // Function not implemented
 #define ERR_BAD_MSG     (-74)  // Not a data message
 #define ERR_OVERFLOW    (-75)  // Value too large for defined data type
 

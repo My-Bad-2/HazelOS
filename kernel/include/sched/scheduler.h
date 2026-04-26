@@ -32,7 +32,7 @@ int scheduler_sleep(int64_t timeout_ms);
 void schedule(void);
 void scheduler_yield(void);
 void scheduler_directed_yield(thread_t* target);
-void scheduler_check_reschedule(interrupt_trapframe_t* tf);
+void scheduler_check_reschedule(struct interrupt_trapframe* tf);
 
 void preempt_disable();
 void preempt_enable();

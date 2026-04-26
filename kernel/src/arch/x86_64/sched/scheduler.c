@@ -6,12 +6,12 @@
 #include "cpu/smp.h"
 #include "libs/log.h"
 
-static irq_return_t reschedule_handler(interrupt_trapframe_t*, void*) {
+static irq_return_t reschedule_handler(struct interrupt_trapframe*, void*) {
     smp_current_core()->reschedule_needed = true;
     return IRQ_HANDLED;
 }
 
-void scheduler_check_reschedule(interrupt_trapframe_t* tf) {
+void scheduler_check_reschedule(struct interrupt_trapframe* tf) {
     per_cpu_data_t* cpu = smp_current_core();
 
     if (likely(!cpu->reschedule_needed || !(tf->rflags & X86_FLAGS_IF))) return;

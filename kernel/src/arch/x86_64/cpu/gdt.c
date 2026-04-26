@@ -6,9 +6,7 @@
 
 #include "libs/log.h"
 #include "memory/memory.h"
-#include "memory/pagemap.h"
 #include "memory/pmm.h"
-#include "memory/vma.h"
 
 #define GDT_ACCESS_TSS 0x09
 

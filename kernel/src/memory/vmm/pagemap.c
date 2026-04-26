@@ -258,9 +258,7 @@ bool pagemap_clone(pagemap_t* dest, pagemap_t* src) {
     }
 
     arch_pagemap_t* new_arch = arch_mmu_new_pagemap();
-    if (!new_arch) {
-        return false;
-    }
+    if (!new_arch) return false;
 
     pagemap_t* first  = ((uintptr_t)dest < (uintptr_t)src) ? dest : src;
     pagemap_t* second = (first == dest) ? src : dest;

@@ -107,7 +107,7 @@ struct vmm_fault_info arch_decode_fault_error(uintptr_t error_code);
 bool vmm_handle_fault(struct vm_space* space, uintptr_t fault_addr, uint32_t error_code);
 bool vmm_clone_space(struct vm_space* parent, struct vm_space* child);
 
-void pf_handler(interrupt_trapframe_t* tf);
+void pf_handler(struct interrupt_trapframe* tf);
 
 bool vmm_populate_vma_range(
     struct vm_space* space,

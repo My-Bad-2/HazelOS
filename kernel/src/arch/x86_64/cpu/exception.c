@@ -474,7 +474,7 @@ static void buffer_append(char** buf, size_t* remaining, const char* fmt, ...) {
     }
 }
 
-static void print_trap_frame(char* buf, size_t size, interrupt_trapframe_t* tf) {
+static void print_trap_frame(char* buf, size_t size, struct interrupt_trapframe* tf) {
     ASSERT(buf);
 
     char* curr       = buf;
@@ -572,7 +572,7 @@ static void print_trap_frame(char* buf, size_t size, interrupt_trapframe_t* tf) 
     buffer_append(&curr, &remaining, "======================================================\n");
 }
 
-static void handle_crash(interrupt_trapframe_t* tf) {
+static void handle_crash(struct interrupt_trapframe* tf) {
     char error_buffer[2048];
 
     print_trap_frame(error_buffer, sizeof(error_buffer), tf);
@@ -626,7 +626,7 @@ static void check_interrupt_storm(uint8_t vector, bool handled) {
 }
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
-void x86_exception_handler(interrupt_trapframe_t* tf) {
+void x86_exception_handler(struct interrupt_trapframe* tf) {
     ASSERT(isr_registry);
 
     if (tf->vector >= IDT_ENTRY_COUNT) {
@@ -694,7 +694,7 @@ void x86_exception_handler(interrupt_trapframe_t* tf) {
 }
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
-void x86_nmi_handler(interrupt_trapframe_t* tf) {
+void x86_nmi_handler(struct interrupt_trapframe* tf) {
     per_cpu_data_t* cpu = smp_current_core();
     nmi_check_for_panic(cpu);
 

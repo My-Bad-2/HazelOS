@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-typedef struct {
+struct interrupt_trapframe {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
     uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
 
@@ -21,7 +21,7 @@ typedef struct {
     uint64_t rflags;
     uint64_t rsp;
     uint64_t ss;
-} interrupt_trapframe_t;
+};
 
 typedef struct {
     uint64_t r15;
@@ -107,7 +107,7 @@ typedef enum {
     IRQ_WAKE_THREAD,  // It's mine, wake up my dedicated thread to process it
 } irq_return_t;
 
-typedef irq_return_t (*isr_primary_handler_t)(interrupt_trapframe_t* tf, void* ctx);
+typedef irq_return_t (*isr_primary_handler_t)(struct interrupt_trapframe* tf, void* ctx);
 typedef void (*isr_threaded_handler_t)(void* ctx);
 
 void init_isr_registry(void);

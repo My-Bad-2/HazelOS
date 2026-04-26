@@ -89,8 +89,8 @@ void dump_stacktrace(void) {
                 break;
             }
 
-            interrupt_trapframe_t* trap = (interrupt_trapframe_t*)(stub_rbp + 8);
-            uint64_t interrupted_rip    = trap->rip;
+            struct interrupt_trapframe* trap = (struct interrupt_trapframe*)(stub_rbp + 8);
+            uint64_t interrupted_rip         = trap->rip;
 
             uint64_t int_offset  = 0;
             const char* int_name = resolve_symbol(interrupted_rip, &int_offset);

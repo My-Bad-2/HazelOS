@@ -135,6 +135,6 @@ void vmm_init(void) {
     KLOG_INIT_OK();
 }
 
-const uintptr_t get_kernel_space_start_limit(void) {
+uintptr_t get_kernel_space_start_limit(void) {
     return align_up(to_higher_half(highest_address), PAGE_SIZE_LARGE);
 }

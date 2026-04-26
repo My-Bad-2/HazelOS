@@ -8,13 +8,10 @@
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
 #include "cpu/simd.h"
-#include "cpu/syscalls.h"
-#include "libs/log.h"
 #include "libs/math.h"
 #include "libs/spinlock.h"
 #include "memory/heap.h"
 #include "memory/memory.h"
-#include "memory/pagemap.h"
 #include "memory/pmm.h"
 #include "memory/vma.h"
 #include "sched/process.h"
@@ -34,13 +31,13 @@ struct kernel_stack_layout {
 
 struct user_stack_layout {
     switch_context_t ctx;
-    interrupt_trapframe_t tf;
+    struct interrupt_trapframe tf;
     uint64_t thread_exit;
 };
 
 struct clone_stack_layout {
     switch_context_t ctx;
-    struct syscall_regs regs;
+    struct interrupt_trapframe regs;
     uint64_t thread_exit;
 };
 
@@ -121,7 +118,7 @@ void arch_thread_destroy(thread_t* t) {
 int arch_thread_clone(
     thread_t* child,
     thread_t* parent,
-    struct syscall_regs* tf,
+    struct interrupt_trapframe* tf,
     uintptr_t rsp_override,
     uintptr_t rip_override
 ) {

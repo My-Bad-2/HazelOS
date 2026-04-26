@@ -6,6 +6,7 @@
 #include "core/capability.h"
 #include "core/errors.h"
 #include "cpu/cpu.h"
+#include "cpu/exception.h"
 #include "cpu/gdt.h"
 #include "cpu/registers.h"
 #include "cpu/smp.h"
@@ -20,42 +21,45 @@
 #define STAR_SET_KERNEL_BASE(base) ((uint64_t)(base) << 32)
 #define STAR_SET_USER_BASE(base)   ((uint64_t)(base) << 48)
 
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
 extern void syscall_entry(void);
 extern void syscall_compat_entry(void);
 
+// Forces the CPU to resolve the condition before speculatively loading from an array.
+static inline uint64_t array_index(uint64_t index, uint64_t size) {
+    uint64_t mask;
+
+    // Generate a mask of all 1s if index < size, else all 0s.
+    asm volatile("cmp %1, %2; sbb %0, %0;" : "=r"(mask) : "g"(size), "r"(index));
+    return index & mask;
+}
+
 void syscall_init(void) {
-    if (!cpu_has_feature(FEATURE_SYSCALL)) {
-        PANIC("SYSCALL: CPU does not support SYSCALL/SYSRET.");
-    }
+    if (!cpu_has_feature(FEATURE_SYSCALL)) PANIC("SYSCALL: CPU does not support SYSCALL/SYSRET.");
 
     uint64_t efer = read_msr(X86_MSR_IA32_EFER);
-
-    if (!(efer & X86_EFER_SCE)) {
-        write_msr(X86_MSR_IA32_EFER, efer | X86_EFER_SCE);
-    }
+    if (!(efer & X86_EFER_SCE)) write_msr(X86_MSR_IA32_EFER, efer | X86_EFER_SCE);
 
     uint64_t star = STAR_SET_KERNEL_BASE(KERNEL_CODE);
     star |= STAR_SET_USER_BASE(USER_CODE32 | 3);
-
     write_msr(X86_MSR_IA32_STAR, star);
 
-    // LSTAR: The 64-bit entry point for syscalls
     write_msr(X86_MSR_IA32_LSTAR, (uint64_t)syscall_entry);
-    // CSTAR: The 32-bit entry point for syscalls
     write_msr(X86_MSR_IA32_CSTAR, (uint64_t)syscall_compat_entry);
 
+    // Mask these flags upon syscall entry
     uint64_t mask = X86_FLAGS_IF | X86_FLAGS_DF | X86_FLAGS_TF | X86_FLAGS_CF | X86_FLAGS_PF |
                     X86_FLAGS_AF | X86_FLAGS_ZF | X86_FLAGS_SF | X86_FLAGS_OF;
-
     write_msr(X86_MSR_IA32_FMASK, mask);
 
     syscalls_init();
 }
 
-typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+typedef uint64_t (*syscall_handler_f)(struct interrupt_trapframe*);
 
 static uint64_t
-dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, struct syscall_regs* regs) {
+dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, struct interrupt_trapframe* regs) {
     struct cnode* root_cnode = cpu->curr_thread->owner->root_cnode;
 
     if (unlikely(!root_cnode)) {
@@ -119,7 +123,7 @@ dispatch_cap_syscall(uint64_t operation, per_cpu_data_t* cpu, struct syscall_reg
     return (uint64_t)status;
 }
 
-static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* regs) {
+static uint64_t dispatch_ipc_syscall(uint64_t operation, struct interrupt_trapframe* regs) {
     int status = 0;
 
     switch (operation) {
@@ -172,7 +176,7 @@ static uint64_t dispatch_ipc_syscall(uint64_t operation, struct syscall_regs* re
 }
 
 static uint64_t
-dispatch_sched_syscall(uint64_t operation, struct syscall_regs* regs, struct process*) {
+dispatch_sched_syscall(uint64_t operation, struct interrupt_trapframe* regs, struct process*) {
     uint64_t res = 0;
 
     switch (operation) {
@@ -223,13 +227,12 @@ dispatch_sched_syscall(uint64_t operation, struct syscall_regs* regs, struct pro
 }
 
 static uint64_t
-dispatch_mem_syscall(uint64_t operation, struct syscall_regs* regs, struct process* proc) {
+dispatch_mem_syscall(uint64_t operation, struct interrupt_trapframe* regs, struct process*) {
     uint64_t res = 0;
 
     switch (operation) {
         case 0x01:  // SYS_MEM_MAP
-            res = (uintptr_t)
-                sys_vspace_map(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
+            res = sys_vspace_map(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
             break;
         case 0x02:  // SYS_MEM_UNMAP
             res = (uint64_t)sys_vspace_unmap(regs->rdi, regs->rsi, regs->rdx);
@@ -249,6 +252,13 @@ dispatch_mem_syscall(uint64_t operation, struct syscall_regs* regs, struct proce
         case 0x07:  // SYS_VMO_WRITE
             res = (uint64_t)sys_vmo_write(regs->rdi, (void*)regs->rsi, regs->rdx, regs->r10);
             break;
+        case 0x08:  // SYS_VMO_CLONE
+            res = (uint64_t)
+                sys_vmo_clone(regs->rdi, regs->rsi, regs->rdx, regs->r10, (uint64_t*)regs->r8);
+            break;
+        case 0x09:  // SYS_MEM_WPKRU
+            res = (uint64_t)sys_pkey_alloc(regs->rdi, regs->rsi);
+            break;
         default:
             res = (uint64_t)ERR_DENIED;
             break;
@@ -257,7 +267,7 @@ dispatch_mem_syscall(uint64_t operation, struct syscall_regs* regs, struct proce
     return res;
 }
 
-static uint64_t dispatch_timer_syscall(uint64_t operation, struct syscall_regs* regs) {
+static uint64_t dispatch_timer_syscall(uint64_t operation, struct interrupt_trapframe* regs) {
     uint64_t res = 0;
 
     switch (operation) {
@@ -278,7 +288,7 @@ static uint64_t dispatch_timer_syscall(uint64_t operation, struct syscall_regs* 
     return res;
 }
 
-static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process*) {
+static uint64_t dispatch_misc_syscall(struct interrupt_trapframe* regs, struct process*) {
     uint64_t res = 0;
     switch (regs->rax) {
         case SYS_WRITE:
@@ -294,7 +304,7 @@ static uint64_t dispatch_misc_syscall(struct syscall_regs* regs, struct process*
 }
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
-uint64_t syscall_dispatcher(struct syscall_regs* regs) {
+uint64_t syscall_dispatcher(struct interrupt_trapframe* regs) {
     uint64_t res = 0;
 
     uint64_t sys_num   = regs->rax;

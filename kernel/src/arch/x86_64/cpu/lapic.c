@@ -67,7 +67,7 @@ static inline void lapic_wait_for_ipi_send(void) {
     }
 }
 
-static irq_return_t apic_error_handler(interrupt_trapframe_t*, void*) {
+static irq_return_t apic_error_handler(struct interrupt_trapframe*, void*) {
     lapic_write(LAPIC_REG_ERROR_STATUS, 0);
     uint32_t error_flags = lapic_read(LAPIC_REG_ERROR_STATUS);
 
@@ -105,7 +105,7 @@ static irq_return_t apic_error_handler(interrupt_trapframe_t*, void*) {
     return IRQ_HANDLED;
 }
 
-static irq_return_t apic_timer_handler(interrupt_trapframe_t*, void*) {
+static irq_return_t apic_timer_handler(struct interrupt_trapframe*, void*) {
     return IRQ_HANDLED;
 }
 

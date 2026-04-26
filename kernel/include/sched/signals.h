@@ -32,7 +32,7 @@ struct sigaction {
 
 struct sigframe {
     sigset_t old_mask;
-    struct syscall_regs regs;
+    struct interrupt_trapframe regs;
     void* fpu_state;
 };
 
