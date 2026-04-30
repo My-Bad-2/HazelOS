@@ -66,6 +66,10 @@
 #else
 #endif
 
+#if __has_builtin(__builtin_mul_overflow)
+#define mul_overflow(a, b, res) __builtin_mul_overflow((a), (b), (res))
+#endif
+
 typedef __int128 int128_t;
 typedef unsigned __int128 uint128_t;
 typedef ptrdiff_t ssize_t;

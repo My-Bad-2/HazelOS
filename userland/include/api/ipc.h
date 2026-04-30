@@ -93,7 +93,8 @@ int ipc_send(
     const void* data,
     size_t len,
     const uint64_t* caps,
-    size_t num_caps
+    size_t num_caps,
+    int timeout_ms
 );
 
 int ipc_recv(
@@ -129,7 +130,8 @@ int ipc_send_msg(
     const void* data,
     size_t len,
     const uint64_t* caps,
-    size_t cap_count
+    size_t cap_count,
+    int timeout_ms
 );
 
 int ipc_recv_msg(
@@ -148,7 +150,8 @@ int ipc_send_vector(
     struct ipc_iovec* vectors,
     size_t vec_count,
     const uint64_t* caps,
-    size_t cap_count
+    size_t cap_count,
+    int timeout_ms
 );
 
 int ipc_peek(uint64_t chan_cap, size_t* required_data_len, size_t* required_cap_count);

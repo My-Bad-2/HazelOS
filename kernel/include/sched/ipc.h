@@ -10,6 +10,9 @@
 
 #define IPC_MAX_MSG_REGS 4  // 4 registers * 8 bytes = 32 bytes
 
+#define IPC_MAX_QUEUE_BYTES (64ul * 1024)  // 64 KB max data per channel
+#define IPC_MAX_QUEUE_MSGS  128            // Max 128 discrete messages
+
 struct process;
 struct thread;
 
@@ -59,6 +62,12 @@ struct ipc_endpoint {
 
     struct dlist_head msg_queue;
     struct dlist_head blocked_receivers;
+
+    struct dlist_head blocked_senders;
+    size_t current_queue_bytes;
+    size_t current_msg_count;
+    size_t max_queue_bytes;
+    size_t max_msg_count;
 };
 
 struct thread_ipc_state {

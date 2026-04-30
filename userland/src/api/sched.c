@@ -1,8 +1,7 @@
-#include "api/syscalls.h"
-
 #include <stddef.h>
 #include <stdint.h>
 
+#include "api/syscalls.h"
 #include "syscall.h"
 
 #define TIMER_FLAG_PERIODIC (1 << 0)

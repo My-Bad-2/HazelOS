@@ -9,15 +9,7 @@
 #include "syscall.h"
 
 int ipc_channel_create(uint64_t* cap1_out, uint64_t* cap2_out) {
-    uint64_t caps[2] = {0, 0};
-    int ret          = (int)syscall(SYS_IPC_ENDPOINT_CREATE, (long)caps, (long)(caps + 1));
-
-    if (ret == 0) {
-        if (cap1_out) *cap1_out = caps[0];
-        if (cap2_out) *cap2_out = caps[1];
-    }
-
-    return ret;
+    return (int)syscall(SYS_IPC_ENDPOINT_CREATE, (long)cap1_out, (long)cap2_out);
 }
 
 int ipc_port_create(uint64_t* port_cap_out) {
@@ -72,7 +64,7 @@ int ipc_send_urgent(uint64_t chan_cap, const void* data, size_t len) {
         .flags     = IPC_FLAG_URGENT
     };
 
-    return (int)syscall(SYS_IPC_CHANNEL_WRITE, (long)chan_cap, (long)&msg);
+    return (int)syscall(SYS_IPC_CHANNEL_WRITE, (long)chan_cap, (long)&msg, -1);
 }
 
 int ipc_send(
@@ -80,7 +72,8 @@ int ipc_send(
     const void* data,
     size_t len,
     const uint64_t* caps,
-    size_t num_caps
+    size_t num_caps,
+    int timeout_ms
 ) {
     struct cap_disp disp_caps[num_caps > 0 ? num_caps : 1];
 
@@ -93,7 +86,7 @@ int ipc_send(
     struct ipc_msg msg =
         {.data = (void*)data, .data_len = len, .caps = disp_caps, .cap_count = num_caps};
 
-    return (int)syscall(SYS_IPC_CHANNEL_WRITE, (long)chan_cap, (long)&msg);
+    return (int)syscall(SYS_IPC_CHANNEL_WRITE, (long)chan_cap, (long)&msg, timeout_ms);
 }
 
 int ipc_recv(
@@ -191,9 +184,10 @@ int ipc_send_msg(
     const void* data,
     size_t len,
     const uint64_t* caps,
-    size_t cap_count
+    size_t cap_count,
+    int timeout_ms
 ) {
-    return ipc_send(chan_cap, data, len, caps, cap_count);
+    return ipc_send(chan_cap, data, len, caps, cap_count, timeout_ms);
 }
 
 int ipc_recv_msg(
@@ -232,7 +226,8 @@ int ipc_send_vector(
     struct ipc_iovec* vectors,
     size_t vec_count,
     const uint64_t* caps,
-    size_t cap_count
+    size_t cap_count,
+    int timeout_ms
 ) {
     struct cap_disp disp_caps[cap_count > 0 ? cap_count : 1];
     for (size_t i = 0; i < cap_count; i++) {
@@ -249,7 +244,7 @@ int ipc_send_vector(
         .flags     = IPC_FLAG_IOVEC
     };
 
-    return (int)syscall(SYS_IPC_CHANNEL_WRITE, (long)chan_cap, (long)&msg);
+    return (int)syscall(SYS_IPC_CHANNEL_WRITE, (long)chan_cap, (long)&msg, timeout_ms);
 }
 
 int ipc_peek(uint64_t chan_cap, size_t* required_data_len, size_t* required_cap_count) {

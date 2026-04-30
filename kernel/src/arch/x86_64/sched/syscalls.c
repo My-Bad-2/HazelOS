@@ -27,8 +27,18 @@ void arch_syscalls_init(void) {
 
 static inline int access_ok(const void* addr, size_t len) {
     const uintptr_t uaddr = (uintptr_t)addr;
-    if (uaddr >= get_kernel_space_start_limit() || (uaddr + len >= get_kernel_space_end_limit()))
-        return false;
+    if (len == 0) return true;
+
+    uintptr_t start_limit = get_kernel_space_start_limit();
+    uintptr_t user_end    = get_user_space_end_limit();
+
+    if (uaddr >= start_limit) return false;
+
+    // Detect overflow of uaddr + len and ensure the range stays within user space.
+    uintptr_t end = uaddr + len;
+    if (end < uaddr) return false;
+    if (end > user_end) return false;
+
     return true;
 }
 
@@ -43,7 +53,7 @@ int copy_from_user(void* dest, const void* src, size_t len) {
 }
 
 int copy_to_user(void* dest, const void* src, size_t len) {
-    if (unlikely(!access_ok(src, len))) return ERR_INVALID;
+    if (unlikely(!access_ok(dest, len))) return ERR_INVALID;
 
     stac();
     memcpy(dest, src, len);
