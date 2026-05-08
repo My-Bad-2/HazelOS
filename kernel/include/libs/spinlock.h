@@ -8,6 +8,26 @@
 extern "C" {
 #endif
 
+#define lock_acquire(l) \
+    _Generic((l), spinlock_t*: acquire_spinlock, qspinlock_t*: acquire_qspinlock)(l)
+
+#define lock_release(l) \
+    _Generic((l), spinlock_t*: release_spinlock, qspinlock_t*: release_qspinlock)(l)
+
+#define lock_try_acquire(l) \
+    _Generic((l), \
+    spinlock_t*:   test_spinlock, \
+    qspinlock_t*:  try_acquire_qspinlock \
+)(l)
+
+#define lock_acquire_irq(l) \
+    _Generic((l), spinlock_t*: acquire_interrupt_lock, qspinlock_t*: acquire_qinterrupt_lock)(l)
+
+#define lock_release_irq(l, state)                                                             \
+    _Generic((l), spinlock_t*: release_interrupt_lock, qspinlock_t*: release_qinterrupt_lock)( \
+        l,                                                                                     \
+        state                                                                                  \
+    )
 typedef struct {
     atomic_size_t next;
     atomic_size_t owner;
