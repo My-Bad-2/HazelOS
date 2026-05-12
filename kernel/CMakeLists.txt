@@ -35,8 +35,6 @@ target_include_directories(kernel_objs PRIVATE ${KERNEL_INCLUDE_DIR})
 target_compile_definitions(kernel_objs PUBLIC UACPI_SIZED_FREES=1 UACPI_BAREBONES_MODE=1)
 target_compile_definitions(kernel_objs PRIVATE ${${_hazel_kernel_namespace}_CX_DEFINES})
 
-target_link_libraries(kernel_objs PRIVATE llvm-libc)
-
 target_apply_compile_settings(
     TARGET kernel_objs
     LANG "C;ASM"
@@ -69,7 +67,6 @@ target_apply_compile_settings(
 function(define_kernel_link_step target_name symbol_source)
     add_executable(${target_name} $<TARGET_OBJECTS:kernel_objs> ${symbol_source})
     target_include_directories(${target_name} PRIVATE ${KERNEL_INCLUDE_DIR})
-    target_link_libraries(${target_name} llvm-libc ${CRT_LIBRARY_PATH}/libclang_rt.builtins.a)
 
     target_apply_linker_settings(
         TARGET ${target_name}

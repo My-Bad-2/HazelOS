@@ -105,7 +105,6 @@ include(cmake/emulator/Qemu.cmake)
 include(cmake/deps/CPM.cmake)
 include(cmake/deps/Limine.cmake)
 include(cmake/deps/Ovmf.cmake)
-include(cmake/deps/Klibc.cmake)
 include(cmake/deps/Uacpi.cmake)
 
 include(cmake/analyze/ClangTidy.cmake)
@@ -119,10 +118,6 @@ project_assure_out_of_source_builds()
 
 setup_ovmf()
 setup_uacpi()
-
-if(${PROJECT_NAME}_USE_LLVM_LIBC)
-    setup_prebuilt_klibc()
-endif()
 
 message(STATUS "Freestnd hdrs at ${FREESTND_HDRS_DIR}")
 

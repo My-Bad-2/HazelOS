@@ -66,7 +66,7 @@ if(DEFINED ${PROJECT_NAME}_C_STD_FLAG AND NOT "${${PROJECT_NAME}_C_STD_FLAG}" ST
     list(APPEND ${PROJECT_NAME}_C_FLAGS "${${PROJECT_NAME}_C_STD_FLAG}")
 endif()
 
-set(${PROJECT_NAME}_KERNEL_CX_FLAGS -mgeneral-regs-only -mno-red-zone)
+set(${PROJECT_NAME}_KERNEL_CX_FLAGS)
 
 set(${PROJECT_NAME}_USERLAND_CX_FLAGS)
 
@@ -96,6 +96,8 @@ if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
 
     list(
         APPEND ${PROJECT_NAME}_KERNEL_CX_FLAGS
+        -mgeneral-regs-only
+        -mno-red-zone
         -mno-mmx
         -mno-sse
         -mno-sse2
@@ -104,6 +106,15 @@ if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
         -mcmodel=kernel
         -mstack-alignment=8
     )
+
+    list(
+        APPEND ${PROJECT_NAME}_CX_DEFINES
+        KSTACK_SIZE=0x2000
+        USTACK_SIZE=0x4000
+        CACHE_LINE_SIZE=64
+    )
+elseif(${PROJECT_NAME}_ARCHITECTURE STREQUAL "aarch64")
+    list(APPEND ${PROJECT_NAME}_CX_FLAGS -march=armv8-a -mabi=lp64)
 
     list(
         APPEND ${PROJECT_NAME}_CX_DEFINES

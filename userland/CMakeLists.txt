@@ -4,7 +4,10 @@ hazel_component_project(NAME HazelUserland OUT_SUPERPROJECT_VAR HAZEL_USERLAND_S
 
 set(_hazel_userland_namespace "${HAZEL_USERLAND_SUPERPROJECT}")
 
-set(USERLAND_CX_FLAGS -mavx -mavx2)
+set(USERLAND_CX_FLAGS)
+if(${_hazel_userland_namespace}_ARCHITECTURE STREQUAL "x86_64")
+    list(APPEND USERLAND_CX_FLAGS -mavx -mavx2)
+endif()
 
 set(USERLAND_LINK_SCRIPT
     ${CMAKE_SOURCE_DIR}/misc/linker/${${_hazel_userland_namespace}_ARCHITECTURE}-userland.ld
@@ -29,7 +32,6 @@ add_executable(userland ${USERLAND_SOURCES} ${UACPI_SOURCES})
 set_target_properties(userland PROPERTIES OUTPUT_NAME "init.elf")
 
 target_include_directories(userland PRIVATE ${USERLAND_INCLUDE_DIR})
-target_link_libraries(userland llvm-libc ${CRT_LIBRARY_PATH}/libclang_rt.builtins.a)
 target_compile_definitions(userland PRIVATE ${${_hazel_userland_namespace}_CX_DEFINES})
 
 target_apply_compile_settings(

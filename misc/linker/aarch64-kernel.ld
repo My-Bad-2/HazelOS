@@ -1,6 +1,6 @@
-/* Tell the linker that we want an x86_64 ELF64 output file */
-OUTPUT_FORMAT("elf64-x86-64", "elf64-x86-64", "elf64-x86-64")
-OUTPUT_ARCH(i386:x86-64)
+/* Tell the linker that we want an AArch64 ELF64 output file */
+OUTPUT_FORMAT("elf64-littleaarch64", "elf64-littleaarch64", "elf64-littleaarch64")
+OUTPUT_ARCH(aarch64)
 
 ENTRY(_start)
 
@@ -46,7 +46,7 @@ SECTIONS
         *(.srodata .srodata.*)
         *(.gcc_except_table .gcc_except_table.*)
 
-        /* C++ init/fini arrays. */
+        /* C++ init/fini arrays (sorted by priority). */
         . = ALIGN(8);
         __preinit_array_start = .;
         KEEP(*(.preinit_array))

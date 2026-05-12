@@ -26,6 +26,17 @@ function(_hazel_qemu_binary_candidates out_var architecture)
     set(${out_var} "${_hazel_candidates}" PARENT_SCOPE)
 endfunction()
 
+function(_hazel_qemu_normalize_arch out_var architecture)
+    string(TOLOWER "${architecture}" _hazel_arch)
+    if(_hazel_arch STREQUAL "amd64")
+        set(_hazel_arch "x86_64")
+    elseif(_hazel_arch STREQUAL "arm64")
+        set(_hazel_arch "aarch64")
+    endif()
+
+    set(${out_var} "${_hazel_arch}" PARENT_SCOPE)
+endfunction()
+
 function(_hazel_qemu_arch_machine_flags out_var architecture)
     string(TOLOWER "${architecture}" _hazel_qemu_arch)
     set(_hazel_flags "")
@@ -71,11 +82,22 @@ function(_hazel_qemu_default_common_flags out_var architecture)
 endfunction()
 
 function(_hazel_qemu_default_accel_flags out_var architecture)
-    string(TOLOWER "${architecture}" _hazel_qemu_arch)
+    _hazel_qemu_normalize_arch(_hazel_qemu_arch "${architecture}")
+    _hazel_qemu_normalize_arch(_hazel_host_arch "${CMAKE_HOST_SYSTEM_PROCESSOR}")
     set(_hazel_flags "")
 
-    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
-        if(_hazel_qemu_arch STREQUAL "x86_64" OR _hazel_qemu_arch STREQUAL "amd64")
+    if(
+        NOT "${_hazel_host_arch}" STREQUAL ""
+        AND NOT "${_hazel_qemu_arch}" STREQUAL ""
+        AND NOT "${_hazel_host_arch}" STREQUAL "${_hazel_qemu_arch}"
+    )
+        set(_hazel_flags -accel tcg -cpu max -device ramfb)
+        message(
+            STATUS
+            "QEMU host arch '${_hazel_host_arch}' differs from target '${_hazel_qemu_arch}'; using TCG."
+        )
+    elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+        if(_hazel_qemu_arch STREQUAL "x86_64")
             set(_hazel_flags -enable-kvm -cpu max,+invtsc)
         else()
             set(_hazel_flags -enable-kvm)
@@ -102,10 +124,10 @@ function(_hazel_qemu_default_debug_flags out_var log_file)
 endfunction()
 
 function(_hazel_qemu_default_firmware_flags out_var architecture)
-    string(TOLOWER "${architecture}" _hazel_qemu_arch)
+    _hazel_qemu_normalize_arch(_hazel_qemu_arch "${architecture}")
     set(_hazel_flags "")
 
-    if(_hazel_qemu_arch STREQUAL "x86_64" OR _hazel_qemu_arch STREQUAL "amd64")
+    if(_hazel_qemu_arch STREQUAL "x86_64" OR _hazel_qemu_arch STREQUAL "aarch64")
         if(
             DEFINED OVMF_CODE_BINARY_PATH
             AND DEFINED OVMF_VARS_BINARY_PATH
