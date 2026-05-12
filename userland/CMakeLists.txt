@@ -30,6 +30,7 @@ set_target_properties(userland PROPERTIES OUTPUT_NAME "init.elf")
 
 target_include_directories(userland PRIVATE ${USERLAND_INCLUDE_DIR})
 target_link_libraries(userland llvm-libc ${CRT_LIBRARY_PATH}/libclang_rt.builtins.a)
+target_compile_definitions(userland PRIVATE ${${_hazel_userland_namespace}_CX_DEFINES})
 
 target_apply_compile_settings(
     TARGET userland
@@ -38,13 +39,31 @@ target_apply_compile_settings(
         ${${_hazel_userland_namespace}_CX_FLAGS}
         ${${_hazel_userland_namespace}_USERLAND_CX_FLAGS}
         ${USERLAND_CX_FLAGS}
-        ${${_hazel_userland_namespace}_CX_DEFINES}
         ${${_hazel_userland_namespace}_CX_WARNING_FLAGS}
+)
+
+target_apply_compile_settings(
+    TARGET userland
+    LANG "C"
+    FLAGS
+        ${${_hazel_userland_namespace}_C_FLAGS}
+)
+
+target_apply_compile_settings(
+    TARGET userland
+    LANG "CXX"
+    FLAGS
+        ${${_hazel_userland_namespace}_CX_FLAGS}
+        ${${_hazel_userland_namespace}_CXX_FLAGS}
+        ${${_hazel_userland_namespace}_USERLAND_CX_FLAGS}
+        ${USERLAND_CX_FLAGS}
+        ${${_hazel_userland_namespace}_CX_WARNING_FLAGS}
+        ${${_hazel_userland_namespace}_CXX_WARNING_FLAGS}
 )
 
 target_apply_linker_settings(
     TARGET userland
-    LANG "C"
+    LANG "C;CXX"
     SCRIPT ${USERLAND_LINK_SCRIPT}
     FLAGS ${${_hazel_userland_namespace}_LINK_FLAGS}
 )

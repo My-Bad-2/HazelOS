@@ -78,8 +78,6 @@ project(
     LANGUAGES C CXX ASM
 )
 
-# set(CMAKE_C_STANDARD ${${PROJECT_NAME}_C_STD})
-# set(CMAKE_CXX_STANDARD ${${PROJECT_NAME}_CXX_STD})
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(cmake/misc/ProjectOptions.cmake)
@@ -87,6 +85,7 @@ include(cmake/compiler/Compiler.cmake)
 
 project_apply_default_options()
 project_validate_compiler_support()
+project_configure_language_standards()
 
 include(cmake/compiler/Flags.cmake)
 include(cmake/compiler/Cache.cmake)
@@ -107,7 +106,6 @@ include(cmake/deps/CPM.cmake)
 include(cmake/deps/Limine.cmake)
 include(cmake/deps/Ovmf.cmake)
 include(cmake/deps/Klibc.cmake)
-# include(cmake/deps/FreestndCxxHdrs.cmake)
 include(cmake/deps/Uacpi.cmake)
 
 include(cmake/analyze/ClangTidy.cmake)
@@ -159,7 +157,6 @@ if(NOT TARGET ${HAZEL_USERLAND_TARGET})
 endif()
 
 setup_limine()
-
 project_enable_doxygen()
 
 build_iso(

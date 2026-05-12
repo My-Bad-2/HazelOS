@@ -29,16 +29,17 @@ def generate_symbol_table(nm_path, elf_path, output_c_path):
             symbols.append((int(addr_str, 16), name))
 
     with open(output_c_path, "w") as f:
-        f.write('#include "libs/symbols.h"\n')
-        f.write("#include <stddef.h>\n\n")
-        f.write("const kernel_symbol_t kernel_symbols[] = {\n")
+        ...
+        # f.write('#include "libs/symbols.h"\n')
+        # f.write("#include <stddef.h>\n\n")
+        # f.write("const kernel_symbol_t kernel_symbols[] = {\n")
 
-        for addr, name in symbols:
-            safe_name = name.replace('"', '\\"')
-            f.write(f'    {{ 0x{addr:x}, "{safe_name}" }},\n')
-
-        f.write("};\n\n")
-        f.write(f"const size_t kernel_symbol_count = {len(symbols)};\n")
+        # for addr, name in symbols:
+            # safe_name = name.replace('"', '\\"')
+            # f.write(f'    {{ 0x{addr:x}, "{safe_name}" }},\n')
+ 
+        # f.write("};\n\n")
+        # f.write(f"const size_t kernel_symbol_count = {len(symbols)};\n")
 
 
 if __name__ == "__main__":

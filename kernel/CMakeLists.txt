@@ -33,6 +33,7 @@ add_library(kernel_objs OBJECT ${KERNEL_SOURCES} ${UACPI_SOURCES})
 
 target_include_directories(kernel_objs PRIVATE ${KERNEL_INCLUDE_DIR})
 target_compile_definitions(kernel_objs PUBLIC UACPI_SIZED_FREES=1 UACPI_BAREBONES_MODE=1)
+target_compile_definitions(kernel_objs PRIVATE ${${_hazel_kernel_namespace}_CX_DEFINES})
 
 target_link_libraries(kernel_objs PRIVATE llvm-libc)
 
@@ -43,8 +44,26 @@ target_apply_compile_settings(
         ${${_hazel_kernel_namespace}_CX_FLAGS}
         ${${_hazel_kernel_namespace}_KERNEL_CX_FLAGS}
         ${KERNEL_CX_FLAGS}
-        ${${_hazel_kernel_namespace}_CX_DEFINES}
         ${${_hazel_kernel_namespace}_CX_WARNING_FLAGS}
+)
+
+target_apply_compile_settings(
+    TARGET kernel_objs
+    LANG "C"
+    FLAGS
+        ${${_hazel_kernel_namespace}_C_FLAGS}
+)
+
+target_apply_compile_settings(
+    TARGET kernel_objs
+    LANG "CXX"
+    FLAGS
+        ${${_hazel_kernel_namespace}_CX_FLAGS}
+        ${${_hazel_kernel_namespace}_CXX_FLAGS}
+        ${${_hazel_kernel_namespace}_KERNEL_CX_FLAGS}
+        ${KERNEL_CX_FLAGS}
+        ${${_hazel_kernel_namespace}_CX_WARNING_FLAGS}
+        ${${_hazel_kernel_namespace}_CXX_WARNING_FLAGS}
 )
 
 function(define_kernel_link_step target_name symbol_source)
@@ -54,7 +73,7 @@ function(define_kernel_link_step target_name symbol_source)
 
     target_apply_linker_settings(
         TARGET ${target_name}
-        LANG "C"
+        LANG "C;CXX"
         SCRIPT ${KERNEL_LINK_SCRIPT}
         FLAGS ${${_hazel_kernel_namespace}_LINK_FLAGS}
     )

@@ -108,7 +108,11 @@ function(target_apply_compile_settings)
             elseif(LANG_ITr STREQUAL "CXX")
                 check_cxx_compiler_flag("${FLAG}" ${CHECK_VAR})
             else()
-                check_c_compiler_flag("${FLAG}" ${CHECK_VAR})
+                if(COMMAND check_asm_compiler_flag)
+                    check_asm_compiler_flag("${FLAG}" ${CHECK_VAR})
+                else()
+                    check_c_compiler_flag("${FLAG}" ${CHECK_VAR})
+                endif()
             endif()
 
             # This ensures -std=c23 is NOT passed to C++ files, and -fno-rtti is NOT passed to C files.

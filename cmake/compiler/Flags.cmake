@@ -54,20 +54,32 @@ set(${PROJECT_NAME}_CX_FLAGS
     # "-nostdinc"
     -nostdlib
     -fno-stack-protector
-    -fstrict-vtable-pointers
     -ffunction-sections
     -fdata-sections
     -fno-common
     -funsigned-char
     -static
-    -std=gnu2y
 )
+
+set(${PROJECT_NAME}_C_FLAGS)
+if(DEFINED ${PROJECT_NAME}_C_STD_FLAG AND NOT "${${PROJECT_NAME}_C_STD_FLAG}" STREQUAL "")
+    list(APPEND ${PROJECT_NAME}_C_FLAGS "${${PROJECT_NAME}_C_STD_FLAG}")
+endif()
 
 set(${PROJECT_NAME}_KERNEL_CX_FLAGS -mgeneral-regs-only -mno-red-zone)
 
 set(${PROJECT_NAME}_USERLAND_CX_FLAGS)
 
-set(${PROJECT_NAME}_CXX_FLAGS -fno-rtti -fno-exceptions -fsized-deallocation -fcheck-new)
+set(${PROJECT_NAME}_CXX_FLAGS
+    -fno-rtti
+    -fno-exceptions
+    -fsized-deallocation
+    -fcheck-new
+    -fstrict-vtable-pointers
+)
+if(DEFINED ${PROJECT_NAME}_CXX_STD_FLAG AND NOT "${${PROJECT_NAME}_CXX_STD_FLAG}" STREQUAL "")
+    list(APPEND ${PROJECT_NAME}_CXX_FLAGS "${${PROJECT_NAME}_CXX_STD_FLAG}")
+endif()
 
 set(${PROJECT_NAME}_LINK_FLAGS
     -ffreestanding
@@ -77,7 +89,7 @@ set(${PROJECT_NAME}_LINK_FLAGS
     -Wl,-zmax-page-size=0x1000
 )
 
-set(${PROJECT_NAME}_CX_DEFINES -DLIMINE_API_REVISION=${${PROJECT_NAME}_LIMINE_API_REV})
+set(${PROJECT_NAME}_CX_DEFINES LIMINE_API_REVISION=${${PROJECT_NAME}_LIMINE_API_REV})
 
 if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
     list(APPEND ${PROJECT_NAME}_CX_FLAGS -march=x86-64 -mabi=sysv)
@@ -95,9 +107,9 @@ if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
 
     list(
         APPEND ${PROJECT_NAME}_CX_DEFINES
-        -DKSTACK_SIZE=0x2000
-        -DUSTACK_SIZE=0x4000
-        -DCACHE_LINE_SIZE=64
+        KSTACK_SIZE=0x2000
+        USTACK_SIZE=0x4000
+        CACHE_LINE_SIZE=64
     )
 else()
     message(
@@ -109,14 +121,25 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
     list(APPEND ${PROJECT_NAME}_LINK_FLAGS -Wl,--strip-debug)
 
-    list(APPEND ${PROJECT_NAME}_CX_DEFINES -DLOG_LEVEL_THRESHOLD=LOG_INFO -DKERNEL_DEBUG=0 -DCONFIG_FRAME_POINTER=0)
+    list(
+        APPEND ${PROJECT_NAME}_CX_DEFINES
+        LOG_LEVEL_THRESHOLD=LOG_INFO
+        KERNEL_DEBUG=0
+        CONFIG_FRAME_POINTER=0
+    )
 else()
-    list(APPEND ${PROJECT_NAME}_CX_DEFINES -DKERNEL_DEBUG=1 -DLOG_LEVEL_THRESHOLD=LOG_TRACE -DCONFIG_FRAME_POINTER=1)
+    list(
+        APPEND ${PROJECT_NAME}_CX_DEFINES
+        KERNEL_DEBUG=1
+        LOG_LEVEL_THRESHOLD=LOG_TRACE
+        CONFIG_FRAME_POINTER=1
+    )
 endif()
 
 list(REMOVE_DUPLICATES ${PROJECT_NAME}_CX_WARNING_FLAGS)
 list(REMOVE_DUPLICATES ${PROJECT_NAME}_CXX_WARNING_FLAGS)
 list(REMOVE_DUPLICATES ${PROJECT_NAME}_CX_FLAGS)
+list(REMOVE_DUPLICATES ${PROJECT_NAME}_C_FLAGS)
 list(REMOVE_DUPLICATES ${PROJECT_NAME}_KERNEL_CX_FLAGS)
 list(REMOVE_DUPLICATES ${PROJECT_NAME}_USERLAND_CX_FLAGS)
 list(REMOVE_DUPLICATES ${PROJECT_NAME}_CXX_FLAGS)
