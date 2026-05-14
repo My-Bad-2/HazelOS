@@ -36,6 +36,7 @@ target_compile_definitions(kernel_objs PRIVATE ${${_hazel_kernel_namespace}_CX_D
 
 target_link_libraries(kernel_objs PRIVATE
     freestnd_libs::${${_hazel_kernel_namespace}_ARCHITECTURE}
+    common
 )
 
 target_apply_compile_settings(

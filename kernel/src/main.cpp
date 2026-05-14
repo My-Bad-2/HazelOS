@@ -1,4 +1,3 @@
-#include <cstddef>
 #include <stddef.h>
 
 extern "C" void _start() {

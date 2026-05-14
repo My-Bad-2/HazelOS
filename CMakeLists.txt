@@ -127,6 +127,7 @@ set(HAZEL_SUPERPROJECT_NAME "${PROJECT_NAME}")
 set(HAZEL_SUPERPROJECT_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
 set(HAZEL_SUPERPROJECT_BINARY_DIR "${CMAKE_BINARY_DIR}")
 
+add_subdirectory(common)
 add_subdirectory(kernel)
 add_subdirectory(misc/limine)
 add_subdirectory(userland)
