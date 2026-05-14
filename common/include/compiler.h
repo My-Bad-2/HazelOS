@@ -1,5 +1,5 @@
-#ifndef KERNEL_COMPILER_H
-#define KERNEL_COMPILER_H 1
+#ifndef COMMON_COMPILER_H
+#define COMMON_COMPILER_H 1
 
 #include <stddef.h>
 
@@ -44,6 +44,7 @@ __BEGIN_DECLS
 #define __used  [[gnu::used]]
 #define __cold  [[gnu::cold]]
 #define __hot   [[gnu::hot]]
+#define __naked [[gnu::naked]]
 
 #define __section(sec)  [[gnu::section(#sec)]]
 #define __alias(symbol) [[gnu::alias(#symbol)]]
@@ -189,4 +190,4 @@ typedef ptrdiff_t ssize_t;
 
 __END_DECLS
 
-#endif  // KERNEL_COMPILER_H
+#endif  // COMMON_COMPILER_H

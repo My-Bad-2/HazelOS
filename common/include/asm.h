@@ -1,11 +1,11 @@
-#ifndef KERNEL_ASM_H
-#define KERNEL_ASM_H 1
-
-#include "arch_asm.h"
+#ifndef COMMON_ASM_H
+#define COMMON_ASM_H 1
 
 // clang-format off
 
 #ifdef __ASSEMBLER__
+
+#include "arch_asm.h"
 
 #define ALIGN_PAGE  .balign PAGE_SIZE
 #define ALIGN_CACHE .balign L1_CACHE_BYTES

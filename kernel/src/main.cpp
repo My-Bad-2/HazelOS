@@ -1,5 +1,7 @@
 #include <stddef.h>
 
-extern "C" void _start() {
+#include "core/boot.hpp"
+
+void kernel::kernel_main() {
   while (true);
 }

@@ -45,8 +45,6 @@ function(_hazel_qemu_arch_machine_flags out_var architecture)
         list(APPEND _hazel_flags -M q35,smm=off)
     elseif(_hazel_qemu_arch STREQUAL "aarch64" OR _hazel_qemu_arch STREQUAL "arm64")
         list(APPEND _hazel_flags -M virt)
-    elseif(_hazel_qemu_arch STREQUAL "riscv64")
-        list(APPEND _hazel_flags -M virt)
     endif()
 
     set(${out_var} "${_hazel_flags}" PARENT_SCOPE)
@@ -91,7 +89,7 @@ function(_hazel_qemu_default_accel_flags out_var architecture)
         AND NOT "${_hazel_qemu_arch}" STREQUAL ""
         AND NOT "${_hazel_host_arch}" STREQUAL "${_hazel_qemu_arch}"
     )
-        set(_hazel_flags -accel tcg -cpu max -device ramfb)
+        set(_hazel_flags -accel tcg -cpu cortex-a53 -device ramfb)
         message(
             STATUS
             "QEMU host arch '${_hazel_host_arch}' differs from target '${_hazel_qemu_arch}'; using TCG."
