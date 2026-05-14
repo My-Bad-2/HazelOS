@@ -23,7 +23,7 @@ set(KERNEL_INCLUDE_DIR
 collect_sources_filtered(
     VAR KERNEL_SOURCES
     ROOT ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ARCH_DIR arch
+    ARCH_DIR hal
     CURRENT_ARCH ${${_hazel_kernel_namespace}_ARCHITECTURE}
     DEBUG OFF
 )

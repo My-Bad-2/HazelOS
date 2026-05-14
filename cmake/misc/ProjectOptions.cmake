@@ -178,7 +178,7 @@ function(project_configure_language_standards)
     endif()
 
     if(_hazel_cxx_std MATCHES "^[0-9]+$")
-        if(_hazel_cxx_std LESS_EQUAL 23)
+        if(_hazel_cxx_std LESS_EQUAL 26)
             set(CMAKE_CXX_STANDARD "${_hazel_cxx_std}" CACHE STRING "CXX standard" FORCE)
             set(CMAKE_CXX_STANDARD_REQUIRED ON)
             set(CMAKE_CXX_EXTENSIONS ON)

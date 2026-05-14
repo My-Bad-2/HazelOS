@@ -2,8 +2,8 @@
 #include <stdint.h>
 
 typedef struct {
-    uint64_t addr;
-    const char* name;
+  uint64_t addr;
+  const char* name;
 } kernel_symbol_t;
 
 const kernel_symbol_t kernel_symbols[] = {{0, ""}};

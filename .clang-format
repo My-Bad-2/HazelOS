@@ -19,8 +19,8 @@ ForEachMacros:
 
 # General Formatting
 ColumnLimit: 100
-IndentWidth: 4
-TabWidth: 4
+IndentWidth: 2
+TabWidth: 2
 UseTab: Never
 AlignConsecutiveMacros: true
 AlignConsecutiveAssignments: true
@@ -35,3 +35,7 @@ AllowShortFunctionsOnASingleLine: Empty
 KeepEmptyLinesAtTheStartOfBlocks: false
 AlignAfterOpenBracket: BlockIndent
 SpaceBeforeParens: ControlStatementsExceptForEachMacros
+
+---
+Language: ObjC
+BasedOnStyle: LLVM
