@@ -1,0 +1,37 @@
+Language: Cpp
+BasedOnStyle: Google
+
+# Include Sorting
+SortIncludes: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: "^<.*"
+    Priority: 1
+  - Regex: '^".*internal/.*'
+    Priority: 3
+  - Regex: '^".*'
+    Priority: 2
+
+# For each macros
+ForEachMacros:
+  - 'list_for_each'
+  - 'list_for_each_safe'
+
+# General Formatting
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AlignConsecutiveMacros: true
+AlignConsecutiveAssignments: true
+AlignConsecutiveBitFields: true
+PointerAlignment: Left
+NamespaceIndentation: None
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortFunctionsOnASingleLine: Empty
+KeepEmptyLinesAtTheStartOfBlocks: false
+AlignAfterOpenBracket: BlockIndent
+SpaceBeforeParens: ControlStatementsExceptForEachMacros
