@@ -1,0 +1,3 @@
+set(LIMINE_CONF ${CMAKE_CURRENT_SOURCE_DIR}/limine.conf)
+
+file(COPY ${LIMINE_CONF} DESTINATION ${${PROJECT_NAME}_ISO_DIR}/boot/limine)
