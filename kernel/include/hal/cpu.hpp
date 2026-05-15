@@ -10,7 +10,8 @@ namespace cpu {
 /**
  * Toggle hardware interrupts.
  *
- * Set @param interrupts to true to enable interrupts, otherwise false to disable.
+ * Set @param interrupts to true to enable interrupts, otherwise false to
+ * disable.
  */
 void toggle_interrupts(bool interrupts);
 

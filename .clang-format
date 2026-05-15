@@ -18,7 +18,7 @@ ForEachMacros:
   - 'list_for_each_safe'
 
 # General Formatting
-ColumnLimit: 100
+ColumnLimit: 80
 IndentWidth: 2
 TabWidth: 2
 UseTab: Never

@@ -13,7 +13,8 @@ __used __section(.limine_requests) volatile uint64_t limine_base_revision[] =
 __used __section(.limine_requests_start) volatile uint64_t start_marker[] =
     LIMINE_REQUESTS_START_MARKER;
 
-__used __section(.limine_requests_end) volatile uint64_t end_marker[] = LIMINE_REQUESTS_END_MARKER;
+__used __section(.limine_requests_end) volatile uint64_t end_marker[] =
+    LIMINE_REQUESTS_END_MARKER;
 
 void verify_boot() {
   hal::cpu::disable_interrupts();
@@ -26,7 +27,9 @@ void verify_boot() {
 
 std::byte boot_stack[KSTACK_SIZE];
 
-__used __section(.limine_requests) volatile limine_entry_point_request kernel_entry_point = {
+__used __section(
+        .limine_requests
+) volatile limine_entry_point_request kernel_entry_point = {
     .id       = LIMINE_ENTRY_POINT_REQUEST_ID,
     .revision = 0,
     .response = nullptr,

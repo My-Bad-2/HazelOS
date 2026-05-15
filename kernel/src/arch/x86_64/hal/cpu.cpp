@@ -9,13 +9,25 @@ void set_stack_pointer(void* stack, std::size_t size, void (*func)()) {
   auto stack_top = reinterpret_cast<std::uintptr_t>(stack) + size;
   stack_top &= ~0xful;
   asm volatile(
-      "mov %%rsp, %%r12\n\t"  // Save current stack pointer to a callee-saved register (r12)
+      "mov %%rsp, %%r12\n\t"  // Save current stack pointer to a callee-saved
+                              // register (r12)
       "mov %0, %%rsp\n\t"     // Set rsp to new stack_top
       "call *%1\n\t"          // Call the target function
       "mov %%r12, %%rsp\n\t"  // Restore the original stack pointer
       ::"r"(stack_top),
       "r"(func)
-      : "r12", "memory", "cc", "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"
+      : "r12",
+        "memory",
+        "cc",
+        "rax",
+        "rcx",
+        "rdx",
+        "rsi",
+        "rdi",
+        "r8",
+        "r9",
+        "r10",
+        "r11"
   );
 }
 
