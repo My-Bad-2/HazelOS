@@ -1,5 +1,7 @@
 #include "core/boot.hpp"
+#include "core/log_sink.hpp"
+#include "hal/cpu.hpp"
 
 void kernel::kernel_main() {
-  while (true);
+  hal::cpu::halt(false);
 }

@@ -19,7 +19,7 @@ __used __section(.limine_requests_end) volatile uint64_t end_marker[] =
 void verify_boot() {
   hal::cpu::disable_interrupts();
   if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision))
-    while (true);
+    hal::cpu::halt(false);
 
   hal::cpu::set_stack_pointer(boot_stack, KSTACK_SIZE, kernel_main);
 }
@@ -34,6 +34,12 @@ __used __section(
     .revision = 0,
     .response = nullptr,
     .entry    = verify_boot,
+};
+
+__used __section(.limine_requests) volatile limine_hhdm_request hhdm_request = {
+    .id       = LIMINE_HHDM_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
 };
 }  // namespace boot
 }  // namespace kernel

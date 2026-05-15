@@ -9,6 +9,7 @@ namespace kernel {
 namespace boot {
 extern std::byte boot_stack[];
 extern volatile limine_entry_point_request kernel_entry_point;
+extern volatile limine_hhdm_request hhdm_request;
 }  // namespace boot
 
 void kernel_main();

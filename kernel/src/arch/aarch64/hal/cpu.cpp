@@ -7,7 +7,7 @@ namespace hal {
 namespace cpu {
 void set_stack_pointer(void* stack, std::size_t size, void (*func)()) {
   auto stack_top = reinterpret_cast<std::uintptr_t>(stack) + size;
-  stack_top &= ~0xfu;
+  stack_top &= ~std::uintptr_t(0xf);
 
   asm volatile(
       "mov x19, sp\n\t"  // Save current SP to callee-saved register x19
@@ -51,6 +51,16 @@ void restore_interrupt_state(std::uint64_t state) noexcept {
 
 bool are_interrupts_enabled() noexcept {
   return (save_interrupt_state() & (1ul << 7)) == 0;
+}
+
+void pause() noexcept {
+  asm volatile("yield" ::: "memory");
+}
+
+void halt(bool interrupts) noexcept {
+  if (interrupts) enable_interrupts();
+
+  while (true) asm volatile("wfi" ::: "memory");
 }
 }  // namespace cpu
 }  // namespace hal

@@ -96,13 +96,11 @@ if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
 
     list(
         APPEND ${PROJECT_NAME}_KERNEL_CX_FLAGS
-        -mgeneral-regs-only
+        -mno-implicit-float
         -mno-red-zone
         -mno-mmx
         -mno-sse
         -mno-sse2
-        -mno-80387
-        -mno-x87
         -mcmodel=kernel
         -mstack-alignment=8
     )

@@ -27,6 +27,7 @@ __BEGIN_DECLS
 #define __fallthrough         [[fallthrough]]
 #define __deprecated          [[deprecated]]
 #define __deprecated_msg(msg) [[deprecated(msg)]]
+#define __nodiscard           [[nodiscard]]
 
 #define __always_inline [[gnu::always_inline]] inline
 #define __noinline      [[gnu::noinline]]
@@ -81,6 +82,8 @@ __BEGIN_DECLS
   } while (0)
 #endif
 
+#ifndef __cplusplus
+
 #define __ctz_generic(val)                                                                                                                                                                \
   _Generic((val), unsigned int: __builtin_ctz, int: __builtin_ctz, unsigned long: __builtin_ctzl, long: __builtin_ctzl, unsigned long long: __builtin_ctzll, long long: __builtin_ctzll)( \
       val                                                                                                                                                                                 \
@@ -104,8 +107,8 @@ __BEGIN_DECLS
 /**
  * ctz - Count Trailing Zeros
  *
- * Returns the number of trailing 0-bits in x, starting at the least significant bit.
- * Returns bit-width of type if x is 0.
+ * Returns the number of trailing 0-bits in x, starting at the least significant
+ * bit. Returns bit-width of type if x is 0.
  */
 #if __has_builtin(__builtin_ctz)
 #define ctz(x)                                           \
@@ -120,8 +123,8 @@ __BEGIN_DECLS
 /**
  * clz - Count Leading Zeros
  *
- * Returns the number of leading 0-bits in x, starting at the most significant bit.
- * Teturns bit-width of type x if 0.
+ * Returns the number of leading 0-bits in x, starting at the most significant
+ * bit. Teturns bit-width of type x if 0.
  */
 #if __has_builtin(__builtin_clz)
 #define clz(x)                                           \
@@ -136,7 +139,8 @@ __BEGIN_DECLS
 /**
  * ffs - Find First Set
  *
- * Returns one plus the index of the least significant 1-bit of x, or 0 if x is zero.
+ * Returns one plus the index of the least significant 1-bit of x, or 0 if x is
+ * zero.
  */
 #if __has_builtin(__builtin_ffs)
 #define ffs(x)              \
@@ -153,7 +157,7 @@ __BEGIN_DECLS
  *
  * Returns the number of 1-bits set in x.
  */
-#if __has_builtin(__builtin_popcount)
+#if __has_builtin(__builtin_popcount) && !defined(popcount)
 #define popcount(x)         \
   ({                        \
     __typeof__(x) _x = (x); \
@@ -162,6 +166,8 @@ __BEGIN_DECLS
 #else
 #define popcount(x) /* Fallback implementation */
 #endif
+
+#endif // __cplusplus
 
 #if __has_builtin(__builtin_add_overflow)
 #define add_overflow(a, b, res) __builtin_add_overflow((a), (b), (res))

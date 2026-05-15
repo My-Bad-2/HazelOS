@@ -1,6 +1,7 @@
 #include "hal/cpu.hpp"
 
 #include <cstdint>
+#include <immintrin.h>
 
 namespace kernel {
 namespace hal {
@@ -51,6 +52,16 @@ void restore_interrupt_state(std::uint64_t state) noexcept {
 
 bool are_interrupts_enabled() noexcept {
   return (save_interrupt_state() & (1ul << 9)) != 0;
+}
+
+void pause() noexcept {
+  _mm_pause();
+}
+
+void halt(bool interrupts) noexcept {
+  if (interrupts) enable_interrupts();
+
+  while (true) asm volatile("hlt" ::: "memory");
 }
 }  // namespace cpu
 }  // namespace hal

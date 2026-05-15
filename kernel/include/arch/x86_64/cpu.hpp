@@ -1,5 +1,5 @@
-#ifndef KERNEL_ARCH_X86_64_CPU_HPP
-#define KERNEL_ARCH_X86_64_CPU_HPP 1
+#ifndef KERNEL_ARCH_CPU_HPP
+#define KERNEL_ARCH_CPU_HPP 1
 
 #include <concepts>
 #include <cstdint>
@@ -43,4 +43,4 @@ inline void port_write(PortNumber auto port, Tp val) {
 }  // namespace x86_64
 }  // namespace kernel
 
-#endif  // KERNEL_ARCH_X86_64_CPU_HPP
+#endif  // KERNEL_ARCH_CPU_HPP

@@ -89,7 +89,7 @@ function(_hazel_qemu_default_accel_flags out_var architecture)
         AND NOT "${_hazel_qemu_arch}" STREQUAL ""
         AND NOT "${_hazel_host_arch}" STREQUAL "${_hazel_qemu_arch}"
     )
-        set(_hazel_flags -accel tcg -cpu cortex-a53 -device ramfb)
+        set(_hazel_flags -accel tcg -cpu cortex-a72 -device ramfb)
         message(
             STATUS
             "QEMU host arch '${_hazel_host_arch}' differs from target '${_hazel_qemu_arch}'; using TCG."
@@ -239,7 +239,7 @@ function(add_qemu_targets)
     add_custom_target(
         ${_hazel_run_target}
         COMMAND
-            "${_hazel_qemu_cmd}" -cdrom "${ARG_ISO_FILE}" ${_hazel_firmware_flags}
+            "${_hazel_qemu_cmd}" -cdrom "${ARG_ISO_FILE}" -d int -D ${CMAKE_CURRENT_BINARY_DIR}/log-2.txt ${_hazel_firmware_flags}
             ${_hazel_common_flags} ${_hazel_accel_flags}
         DEPENDS "${ARG_ISO_FILE}"
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"

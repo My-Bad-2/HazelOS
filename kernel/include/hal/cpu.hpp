@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "compiler.h"
+
 namespace kernel {
 namespace hal {
 namespace cpu {
@@ -25,6 +27,9 @@ void enable_interrupts() noexcept;
 std::uint64_t save_interrupt_state() noexcept;
 void restore_interrupt_state(std::uint64_t state) noexcept;
 bool are_interrupts_enabled() noexcept;
+
+void pause() noexcept;
+__noreturn void halt(bool interrupts) noexcept;
 }  // namespace cpu
 }  // namespace hal
 }  // namespace kernel
