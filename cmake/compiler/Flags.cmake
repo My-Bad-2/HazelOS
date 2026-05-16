@@ -112,7 +112,14 @@ if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
         CACHE_LINE_SIZE=64
     )
 elseif(${PROJECT_NAME}_ARCHITECTURE STREQUAL "aarch64")
-    list(APPEND ${PROJECT_NAME}_CX_FLAGS -march=armv8-a -mabi=lp64)
+    list(APPEND ${PROJECT_NAME}_CX_FLAGS
+        -march=armv8-a+nosimd+nofp
+        -mabi=lp64
+        -fno-vectorize
+        -fno-slp-vectorize
+        -mgeneral-regs-only
+        -mno-implicit-float
+    )
 
     list(
         APPEND ${PROJECT_NAME}_CX_DEFINES

@@ -3,7 +3,7 @@ set(CMAKE_SYSTEM_VERSION "Generic")
 
 set(CMAKE_SYSTEM "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_VERSION}")
 
-set(TRIPLE aarch64-none-elf)
+set(TRIPLE aarch64-arm-none-elf)
 
 set(CMAKE_C_COMPILER clang)
 set(CMAKE_C_COMPILER_TARGET ${TRIPLE})

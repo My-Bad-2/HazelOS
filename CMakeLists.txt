@@ -107,6 +107,8 @@ include(cmake/deps/Limine.cmake)
 include(cmake/deps/Ovmf.cmake)
 include(cmake/deps/Uacpi.cmake)
 include(cmake/deps/FreestndLibs.cmake)
+include(cmake/deps/Flanterm.cmake)
+include(cmake/deps/Klibc.cmake)
 
 include(cmake/analyze/ClangTidy.cmake)
 include(cmake/format/ClangFormat.cmake)
@@ -120,6 +122,8 @@ project_assure_out_of_source_builds()
 setup_ovmf()
 setup_uacpi()
 setup_freestnd_cxx_headers()
+setup_flanterm()
+setup_klibc()
 
 include(${uacpi_SOURCE_DIR}/uacpi.cmake)
 

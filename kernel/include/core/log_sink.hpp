@@ -1,44 +1,38 @@
-#ifndef KERNEL_CORE_LOG_SINK_HPP
-#define KERNEL_CORE_LOG_SINK_HPP 1
+#ifndef KERNEL_CORE_LOG_HPP
+#define KERNEL_CORE_LOG_HPP 1
 
+#include <cstdint>
 #include <string_view>
 
+#include "compiler.h"
+
 namespace kernel {
-namespace core {
+namespace log {
+enum class Level : std::uint8_t { Trace, Debug, Info, Warning, Error, Fatal };
+
 class LogSink {
  public:
-  LogSink(const LogSink&)            = delete;
-  LogSink& operator=(const LogSink&) = delete;
-  LogSink(LogSink&&)                 = delete;
-  LogSink& operator=(LogSink&&)      = delete;
-
-  void write(std::string_view str) noexcept {
-    for (const char ch : str) {
-      if (ch == '\n') transmit('\r');
-      transmit(ch);
-    }
-  }
-
-  void write(const char* str) noexcept {
-    write(std::string_view{str});
-  }
-
-  void flush() noexcept {
-    flush_fifo();
-  }
-
   virtual ~LogSink() = default;
+
+  virtual void write(std::string_view str) noexcept = 0;
+
+  virtual void flush() noexcept = 0;
+
+  void set_level(Level min_level) noexcept {
+    m_min_level = min_level;
+  }
+
+  __nodiscard Level get_level() const noexcept {
+    return m_min_level;
+  }
 
  protected:
   LogSink() = default;
 
  private:
-  // Transmit a single raw byte to the hardware
-  virtual void transmit(char ch) noexcept = 0;
-  // Block until the pipeline is completely empty
-  virtual void flush_fifo() noexcept = 0;
+  Level m_min_level{Level::Trace};
 };
-}  // namespace core
+}  // namespace log
 }  // namespace kernel
 
 #endif

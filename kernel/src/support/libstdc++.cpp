@@ -1,12 +1,13 @@
 #include <cstddef>
+
+namespace {
+int errno = 0;
+}
+
 extern "C" {
 void free(void*) {}
 
-std::size_t strlen(const char* str) {
-  std::size_t i = 0;
-  while (str[i] != '\0') {
-    i++;
-  }
-  return i;
+int* __llvm_libc_errno() {
+  return &errno;
 }
 }

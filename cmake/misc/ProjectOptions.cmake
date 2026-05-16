@@ -44,7 +44,7 @@ function(project_apply_default_options)
         )
     endif()
 
-    set(_hazel_architectures "x86_64" "aarch64")
+    set(_hazel_architectures "x86_64")
     if(NOT DEFINED ${PROJECT_NAME}_ARCHITECTURE OR "${${PROJECT_NAME}_ARCHITECTURE}" STREQUAL "")
         message(STATUS "Setting Kernel Architecture to 'x86_64' as none was specified.")
         set(_hazel_architecture "x86_64")

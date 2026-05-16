@@ -50,6 +50,9 @@ __BEGIN_DECLS
 #define __section(sec)  [[gnu::section(#sec)]]
 #define __alias(symbol) [[gnu::alias(#symbol)]]
 
+#define __likely   [[gnu::likely]]
+#define __unlikely [[gnu::unlikely]]
+
 #define barrier()     __asm__ __volatile__("" : : : "memory")
 #define unreachable() __builtin_unreachable()
 
@@ -167,7 +170,7 @@ __BEGIN_DECLS
 #define popcount(x) /* Fallback implementation */
 #endif
 
-#endif // __cplusplus
+#endif  // __cplusplus
 
 #if __has_builtin(__builtin_add_overflow)
 #define add_overflow(a, b, res) __builtin_add_overflow((a), (b), (res))

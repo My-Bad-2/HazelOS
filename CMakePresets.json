@@ -35,14 +35,6 @@
             }
         },
         {
-            "name": "arm64",
-            "hidden": true,
-            "description": "aarch64 Build config",
-            "cacheVariables": {
-                "PARAM_PROJECT_ARCHITECTURE": "aarch64"
-            }
-        },
-        {
             "name": "Debug",
             "hidden": true,
             "description": "Enable Debug build",
@@ -85,18 +77,6 @@
             "hidden": true,
             "generator": "Unix Makefiles",
             "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-gcc.cmake"
-        },
-        {
-            "name": "Clang-aarch64",
-            "hidden": true,
-            "generator": "Unix Makefiles",
-            "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-clang.cmake"
-        },
-        {
-            "name": "GCC-aarch64",
-            "hidden": true,
-            "generator": "Unix Makefiles",
-            "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-gcc.cmake"
         },
         {
             "name": "x86_64-clang",
@@ -177,86 +157,6 @@
                 "GCC",
                 "MinSizeRelease"
             ]
-        },
-        {
-            "name": "aarch64-clang",
-            "description": "Build aarch64 kernel using Clang with RelWithDebInfo",
-            "inherits": [
-                "Base",
-                "arm64",
-                "Clang-aarch64",
-                "ReleaseWithDebug"
-            ]
-        },
-        {
-            "name": "aarch64-clang-debug",
-            "description": "Build aarch64 kernel using Clang with Debug",
-            "inherits": [
-                "Base",
-                "arm64",
-                "Clang-aarch64",
-                "Debug"
-            ]
-        },
-        {
-            "name": "aarch64-clang-release",
-            "description": "Build aarch64 kernel using Clang with Release",
-            "inherits": [
-                "Base",
-                "arm64",
-                "Clang-aarch64",
-                "Release"
-            ]
-        },
-        {
-            "name": "aarch64-clang-minsize",
-            "description": "Build aarch64 kernel using Clang with MinSizeRel",
-            "inherits": [
-                "Base",
-                "arm64",
-                "Clang-aarch64",
-                "MinSizeRelease"
-            ]
-        },
-        {
-            "name": "aarch64-gcc",
-            "description": "Build aarch64 kernel using gcc cross compiler with RelWithDebInfo",
-            "inherits": [
-                "Base",
-                "arm64",
-                "GCC-aarch64",
-                "ReleaseWithDebug"
-            ]
-        },
-        {
-            "name": "aarch64-gcc-debug",
-            "description": "Build aarch64 kernel using gcc cross compiler with Debug",
-            "inherits": [
-                "Base",
-                "arm64",
-                "GCC-aarch64",
-                "Debug"
-            ]
-        },
-        {
-            "name": "aarch64-gcc-release",
-            "description": "Build aarch64 kernel using gcc cross compiler with Release",
-            "inherits": [
-                "Base",
-                "arm64",
-                "GCC-aarch64",
-                "Release"
-            ]
-        },
-        {
-            "name": "aarch64-gcc-minsize",
-            "description": "Build aarch64 kernel using gcc cross compiler with MinSizeRel",
-            "inherits": [
-                "Base",
-                "arm64",
-                "GCC-aarch64",
-                "MinSizeRelease"
-            ]
         }
     ],
     "buildPresets": [
@@ -291,38 +191,6 @@
         {
             "name": "x86_64-gcc-release",
             "configurePreset": "x86_64-gcc-release"
-        },
-        {
-            "name": "aarch64-clang",
-            "configurePreset": "aarch64-clang"
-        },
-        {
-            "name": "aarch64-clang-debug",
-            "configurePreset": "aarch64-clang-debug"
-        },
-        {
-            "name": "aarch64-clang-minsize",
-            "configurePreset": "aarch64-clang-minsize"
-        },
-        {
-            "name": "aarch64-clang-release",
-            "configurePreset": "aarch64-clang-release"
-        },
-        {
-            "name": "aarch64-gcc",
-            "configurePreset": "aarch64-gcc"
-        },
-        {
-            "name": "aarch64-gcc-debug",
-            "configurePreset": "aarch64-gcc-debug"
-        },
-        {
-            "name": "aarch64-gcc-minsize",
-            "configurePreset": "aarch64-gcc-minsize"
-        },
-        {
-            "name": "aarch64-gcc-release",
-            "configurePreset": "aarch64-gcc-release"
         }
     ]
 }

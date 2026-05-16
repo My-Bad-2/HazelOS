@@ -3,6 +3,7 @@
 #include "compiler.h"
 #include "external/limine.h"
 #include "hal/cpu.hpp"
+#include "support/cxxabi.hpp"
 
 namespace kernel {
 namespace boot {
@@ -17,11 +18,13 @@ __used __section(.limine_requests_end) volatile uint64_t end_marker[] =
     LIMINE_REQUESTS_END_MARKER;
 
 void verify_boot() {
+  support::call_global_ctor();
   hal::cpu::disable_interrupts();
   if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision))
     hal::cpu::halt(false);
 
   hal::cpu::set_stack_pointer(boot_stack, KSTACK_SIZE, kernel_main);
+  support::call_global_dtor();
 }
 }  // namespace
 
@@ -38,6 +41,14 @@ __used __section(
 
 __used __section(.limine_requests) volatile limine_hhdm_request hhdm_request = {
     .id       = LIMINE_HHDM_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+};
+
+__used __section(
+        .limine_requests
+) volatile limine_framebuffer_request framebuffer_request = {
+    .id       = LIMINE_FRAMEBUFFER_REQUEST_ID,
     .revision = 0,
     .response = nullptr,
 };

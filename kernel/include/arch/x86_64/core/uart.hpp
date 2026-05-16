@@ -27,12 +27,15 @@ enum class RegisterOffset : std::uint8_t {
 };
 }  // namespace uart
 
-class UartSink final : public core::LogSink {
+class UartSink final : public log::LogSink {
  public:
   explicit UartSink(std::uint16_t base_port = 0x3f8) noexcept
       : m_base_port(base_port) {}
 
   void initialize() noexcept;
+
+  void write(std::string_view str) noexcept override;
+  void flush() noexcept override;
 
  private:
   std::uint16_t m_base_port;
@@ -48,9 +51,6 @@ class UartSink final : public core::LogSink {
     while ((read_register(uart::RegisterOffset::LineStatus) & Flag) == 0)
       hal::cpu::pause();
   }
-
-  void transmit(char ch) noexcept override;
-  void flush_fifo() noexcept override;
 };
 }  // namespace x86_64
 }  // namespace kernel

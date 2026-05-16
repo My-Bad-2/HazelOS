@@ -1,13 +1,15 @@
 include_guard()
 
 set(HAZEL_DEP_KLIBC_REPOSITORY
-    "https://github.com/My-Bad-2/baremetal-libc.git"
+    "git@github.com:My-Bad-2/baremetal-llvm-libc.git"
     CACHE STRING
     "Baremetal libc repository URL"
 )
 set(HAZEL_DEP_KLIBC_TAG "main" CACHE STRING "Baremetal libc git tag")
 
-function(setup_prebuilt_klibc)
+set(LIBC_ARCHITECTURE ${${PROJECT_NAME}_ARCHITECTURE})
+
+function(setup_klibc)
     hazel_cpm_add_package(
         NAME
         klibc

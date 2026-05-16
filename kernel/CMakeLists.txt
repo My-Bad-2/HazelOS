@@ -18,6 +18,7 @@ set(KERNEL_INCLUDE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/arch/${${_hazel_kernel_namespace}_ARCHITECTURE}"
     ${UACPI_INCLUDES}
+    ${FLANTERM_INCLUDES}
 )
 
 collect_sources_filtered(
@@ -28,7 +29,7 @@ collect_sources_filtered(
     DEBUG OFF
 )
 
-add_library(kernel_objs OBJECT ${KERNEL_SOURCES} ${UACPI_SOURCES})
+add_library(kernel_objs OBJECT ${KERNEL_SOURCES} ${UACPI_SOURCES} ${FLANTERM_SOURCES})
 
 target_include_directories(kernel_objs PRIVATE ${KERNEL_INCLUDE_DIR})
 target_compile_definitions(kernel_objs PUBLIC UACPI_SIZED_FREES=1 UACPI_BAREBONES_MODE=1)
@@ -37,6 +38,7 @@ target_compile_definitions(kernel_objs PRIVATE ${${_hazel_kernel_namespace}_CX_D
 target_link_libraries(kernel_objs PRIVATE
     freestnd_libs::${${_hazel_kernel_namespace}_ARCHITECTURE}
     common
+    llvm-libc::llvm-libc
 )
 
 target_apply_compile_settings(
@@ -74,6 +76,7 @@ function(define_kernel_link_step target_name symbol_source)
 
     target_link_libraries(${target_name} PRIVATE
         freestnd_libs::${${_hazel_kernel_namespace}_ARCHITECTURE}
+        llvm-libc::llvm-libc
     )
 
     set_target_properties(${target_name} PROPERTIES CXX_SCAN_FOR_MODULES ON)

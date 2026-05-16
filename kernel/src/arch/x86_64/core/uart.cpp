@@ -80,13 +80,15 @@ std::uint8_t UartSink::read_register(
   );
 }
 
-void UartSink::transmit(char ch) noexcept {
-  wait_for_status<LineStatus::TransmitBufferEmpty>();
-  write_register(uart::RegisterOffset::Data, static_cast<uint8_t>(ch));
+void UartSink::flush() noexcept {
+  wait_for_status<LineStatus::TransmitterIdle>();
 }
 
-void UartSink::flush_fifo() noexcept {
-  wait_for_status<LineStatus::TransmitterIdle>();
+void UartSink::write(std::string_view str) noexcept {
+  for (const auto ch : str) {
+    wait_for_status<LineStatus::TransmitBufferEmpty>();
+    write_register(uart::RegisterOffset::Data, static_cast<uint8_t>(ch));
+  }
 }
 
 void UartSink::initialize() noexcept {

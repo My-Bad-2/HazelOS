@@ -40,13 +40,12 @@ SECTIONS
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
-    .rodata : {
+.rodata : {
         __rodata_start = .;
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
         *(.gcc_except_table .gcc_except_table.*)
 
-        /* C++ init/fini arrays. */
         . = ALIGN(8);
         __preinit_array_start = .;
         KEEP(*(.preinit_array))
@@ -56,26 +55,19 @@ SECTIONS
         __init_array_start = .;
         KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
         KEEP(*(.init_array))
+        /* Map legacy ctors directly into the init_array */
+        KEEP(*(SORT_BY_INIT_PRIORITY(.ctors.*)))
+        KEEP(*(.ctors))
         __init_array_end = .;
 
         . = ALIGN(8);
         __fini_array_start = .;
         KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*)))
         KEEP(*(.fini_array))
-        __fini_array_end = .;
-
-        /* Legacy ctor/dtor lists. */
-        . = ALIGN(8);
-        __ctors_start = .;
-        KEEP(*(.ctors))
-        KEEP(*(.ctors.*))
-        __ctors_end = .;
-
-        . = ALIGN(8);
-        __dtors_start = .;
+        /* Map legacy dtors directly into the fini_array */
+        KEEP(*(SORT_BY_INIT_PRIORITY(.dtors.*)))
         KEEP(*(.dtors))
-        KEEP(*(.dtors.*))
-        __dtors_end = .;
+        __fini_array_end = .;
 
         __rodata_end = .;
     } :rodata
