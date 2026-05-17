@@ -52,6 +52,14 @@ __used __section(
         .limine_requests
 ) volatile limine_framebuffer_request framebuffer_request = {
     .id       = LIMINE_FRAMEBUFFER_REQUEST_ID,
+    .revision = 1,
+    .response = nullptr,
+};
+
+__used __section(
+        .limine_requests
+) volatile limine_memmap_request memmap_request = {
+    .id       = LIMINE_MEMMAP_REQUEST_ID,
     .revision = 0,
     .response = nullptr,
 };

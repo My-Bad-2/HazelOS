@@ -79,6 +79,8 @@ __nodiscard inline U from_higher_half(Type val) noexcept {
   if (!is_higher_half(raw_addr)) return details::from_uintptr<U>(raw_addr);
   return details::from_uintptr<U>(raw_addr - boot::get_hhdm_offset());
 }
+
+void initialize();
 }  // namespace memory
 }  // namespace kernel
 

@@ -56,7 +56,7 @@ class VirtAddr {
     return VirtAddr{libs::maths::align_down(m_addr, Alignment)};
   }
 
-  __nodiscard constexpr PhysAddr to_phys() const noexcept;
+  __nodiscard PhysAddr to_phys() const noexcept;
 
   __nodiscard constexpr VirtAddr offset(std::size_t bytes) const noexcept {
     return VirtAddr{m_addr + bytes};

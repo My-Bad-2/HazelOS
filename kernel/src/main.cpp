@@ -5,6 +5,8 @@
 #include "hal/cpu.hpp"
 #include "hal/hal.hpp"
 #include "libs/maths.hpp"
+#include "memory/memory.hpp"
+#include "memory/pmm.hpp"
 
 namespace kernel {
 namespace {
@@ -19,6 +21,12 @@ void kernel_main() {
 
   log::LogManager::set_config(log::LogConfig{});
   const log::Logger test{"TEST"};
+
+  memory::initialize();
+
+  auto ptr = memory::PhysicalManager::alloc_pages(1);
+
+  test.info("ptr = 0x%lx\n", ptr.raw());
 
   using namespace libs::maths::literals;
 

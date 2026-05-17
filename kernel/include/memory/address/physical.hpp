@@ -8,6 +8,8 @@
 #include "compiler.h"
 #include "memory/memory.hpp"
 
+#define MEMMAP_BOOT_ALLOCATED 2804
+
 namespace kernel {
 namespace memory {
 class VirtAddr;
@@ -17,7 +19,7 @@ class PhysAddr {
   std::uintptr_t m_addr;
 
  public:
-  constexpr PhysAddr() noexcept : m_addr(0) {}
+  constexpr PhysAddr() noexcept : m_addr(~0ul) {}
   constexpr explicit PhysAddr(std::uintptr_t addr) noexcept : m_addr(addr) {}
 
   __nodiscard constexpr std::uintptr_t raw() const noexcept {
@@ -25,11 +27,12 @@ class PhysAddr {
   }
 
   __nodiscard constexpr bool is_null() const noexcept {
-    return m_addr == 0;
+    // UINT64_MAX is an impossible physical address
+    return m_addr == ~0ul;
   }
 
   constexpr explicit operator bool() const noexcept {
-    return m_addr != 0;
+    return m_addr != ~0ul;
   }
 
   template <std::size_t Alignment = PAGE_SIZE_SMALL>
@@ -51,7 +54,7 @@ class PhysAddr {
     return PhysAddr{m_addr + bytes};
   }
 
-  __nodiscard constexpr VirtAddr to_virt() const noexcept;
+  __nodiscard VirtAddr to_virt() const noexcept;
 
   constexpr PhysAddr operator+(std::size_t offset) const noexcept {
     return PhysAddr{m_addr + offset};

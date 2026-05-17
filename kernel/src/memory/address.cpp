@@ -4,13 +4,13 @@
 
 namespace kernel {
 namespace memory {
-constexpr VirtAddr PhysAddr::to_virt() const noexcept {
+VirtAddr PhysAddr::to_virt() const noexcept {
   if (is_null()) return VirtAddr{0};
   return VirtAddr{to_higher_half(m_addr)};
 }
 
-constexpr PhysAddr VirtAddr::to_phys() const noexcept {
-  if (is_null()) return PhysAddr{0};
+PhysAddr VirtAddr::to_phys() const noexcept {
+  if (is_null()) return PhysAddr{~0ul};
   return PhysAddr{from_higher_half(m_addr)};
 }
 }  // namespace memory

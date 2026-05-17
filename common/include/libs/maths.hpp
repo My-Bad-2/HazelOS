@@ -144,7 +144,7 @@ namespace literals {
 __nodiscard consteval unsigned long operator ""_KiB(
     unsigned long long num
 ) {
-  return num << 10ul;
+  return num << 10;
 }
 
 __nodiscard consteval unsigned long operator ""_MiB(
