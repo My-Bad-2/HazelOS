@@ -52,6 +52,7 @@ __BEGIN_DECLS
 
 #define __likely   [[gnu::likely]]
 #define __unlikely [[gnu::unlikely]]
+#define __assume(x) [[assume((x))]]
 
 #define barrier()     __asm__ __volatile__("" : : : "memory")
 #define unreachable() __builtin_unreachable()
@@ -59,15 +60,6 @@ __BEGIN_DECLS
 #define __printf(fmt_idx, arg_idx) [[gnu::format(printf, fmt_idx, arg_idx)]]
 #define __scanf(fmt_idx, arg_idx)  [[gnu::format(scanf, fmt_idx, arg_idx)]]
 #define __nonnull(...)             [[gnu::nonnull(__VA_ARGS__)]]
-
-#if __has_builtin(__builtin_assume)
-#define assume(cond) __builtin_assume(cond)
-#else
-#define assume(cond)                      \
-  do {                                    \
-    if (!(cond)) __builtin_unreachable(); \
-  } while (0)
-#endif
 
 #if __has_builtin(__builtin_expect)
 #define likely(x)   __builtin_expect(!!(x), 1)

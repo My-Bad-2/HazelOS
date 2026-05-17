@@ -8,6 +8,9 @@
 namespace kernel {
 namespace boot {
 namespace {
+std::byte boot_stack[KSTACK_SIZE];
+std::uintptr_t hhdm_offset = 0;
+
 __used __section(.limine_requests) volatile uint64_t limine_base_revision[] =
     LIMINE_BASE_REVISION(LIMINE_API_REVISION);
 
@@ -23,12 +26,12 @@ void verify_boot() {
   if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision))
     hal::cpu::halt(false);
 
+  hhdm_offset = hhdm_request.response->offset;
+
   hal::cpu::set_stack_pointer(boot_stack, KSTACK_SIZE, kernel_main);
   support::call_global_dtor();
 }
 }  // namespace
-
-std::byte boot_stack[KSTACK_SIZE];
 
 __used __section(
         .limine_requests
@@ -52,5 +55,9 @@ __used __section(
     .revision = 0,
     .response = nullptr,
 };
+
+std::uintptr_t get_hhdm_offset() noexcept {
+  return hhdm_offset;
+}
 }  // namespace boot
 }  // namespace kernel

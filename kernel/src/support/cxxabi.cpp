@@ -4,7 +4,6 @@
 
 #include "compiler.h"
 #include "core/logger.hpp"
-#include "hal/cpu.hpp"
 
 namespace kernel {
 namespace support {
