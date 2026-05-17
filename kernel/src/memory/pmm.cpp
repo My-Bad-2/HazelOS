@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <string.h>
 
-#include "external/limine.h"
 #include "memory/address/physical.hpp"
 #include "memory/address/virtual.hpp"
 #include "memory/memory.hpp"
@@ -13,6 +12,30 @@ namespace kernel {
 namespace memory {
 void PhysicalManager::initialize(limine_memmap_response* mmap) noexcept {
   s_mmap = mmap;
+
+  using namespace libs::maths::literals;
+
+  constexpr std::size_t SAFE_MEM_THRESHOLD = 1_MiB;
+
+  for (std::size_t i = 0; i < mmap->entry_count; ++i) {
+    limine_memmap_entry* entry = mmap->entries[i];
+
+    if (entry->type == LIMINE_MEMMAP_USABLE &&
+        entry->base < SAFE_MEM_THRESHOLD) {
+      const std::uintptr_t region_end = entry->base + entry->length;
+
+      if (region_end <= SAFE_MEM_THRESHOLD) {
+        // The entire region is inside the 1MB zone. Let's just forget about it.
+        entry->type = LIMINE_MEMMAP_RESERVED;
+      } else {
+        // Region starts in the 1MB zone but extends beyond it. So, we slice off
+        // the bottom part.
+        const std::uintptr_t overlap = SAFE_MEM_THRESHOLD - entry->base;
+        entry->base                  = SAFE_MEM_THRESHOLD;
+        entry->length -= overlap;
+      }
+    }
+  }
 }
 
 PhysAddr PhysicalManager::alloc_pages(std::size_t count) noexcept {

@@ -19,7 +19,7 @@ class PhysAddr {
   std::uintptr_t m_addr;
 
  public:
-  constexpr PhysAddr() noexcept : m_addr(~0ul) {}
+  constexpr PhysAddr() noexcept : m_addr(0) {}
   constexpr explicit PhysAddr(std::uintptr_t addr) noexcept : m_addr(addr) {}
 
   __nodiscard constexpr std::uintptr_t raw() const noexcept {
@@ -28,11 +28,11 @@ class PhysAddr {
 
   __nodiscard constexpr bool is_null() const noexcept {
     // UINT64_MAX is an impossible physical address
-    return m_addr == ~0ul;
+    return m_addr == 0;
   }
 
   constexpr explicit operator bool() const noexcept {
-    return m_addr != ~0ul;
+    return m_addr != 0;
   }
 
   template <std::size_t Alignment = PAGE_SIZE_SMALL>

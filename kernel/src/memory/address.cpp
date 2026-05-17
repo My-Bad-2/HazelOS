@@ -10,7 +10,7 @@ VirtAddr PhysAddr::to_virt() const noexcept {
 }
 
 PhysAddr VirtAddr::to_phys() const noexcept {
-  if (is_null()) return PhysAddr{~0ul};
+  if (is_null()) return PhysAddr{0};
   return PhysAddr{from_higher_half(m_addr)};
 }
 }  // namespace memory
