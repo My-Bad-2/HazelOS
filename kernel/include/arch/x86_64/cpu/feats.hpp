@@ -3,6 +3,8 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
+#include <string_view>
 
 #include "compiler.h"
 
@@ -223,41 +225,73 @@ enum class CpuFeature : std::uint16_t {
   COUNT = 256
 };
 
+enum class CacheType : std::uint8_t { Null, Data, Instruction, Unified };
+
+enum class TopologyLevelType : std::uint8_t {
+  Invalid = 0,
+  Smt,      // Hyper-thread
+  Core,     // Phys core
+  Module,   // P-core / e-core clusters
+  Tile,     // Silicon Tile
+  Die,      // Silicon Die
+  DieGrp,   // Die Group,
+  Package,  // Physical Socket
+};
+
+enum class CpuVendor : std::uint8_t { Unknown = 0, Intel, AMD };
+
+struct CacheInfo {
+  CacheType type{CacheType::Null};
+  std::uint8_t level{0};
+  std::uint32_t size_bytes{0};
+  std::uint32_t ways_of_associativity{0};
+  std::uint32_t line_size{0};
+  std::uint32_t sets{0};
+  bool is_fully_inclusive{false};
+};
+
+struct TopologyLevel {
+  TopologyLevelType type{TopologyLevelType::Invalid};
+  std::uint8_t shift_mask{0};
+  std::uint32_t logical_processors{0};
+};
+
+struct AddressLimits {
+  std::uint8_t physical_bits{0};  // e.g. 39, 48, 52
+  std::uint8_t virtual_bits{0};   // e.g., 48, 57
+};
+
+struct Frequencies {
+  std::uint32_t base_mhz{0};
+  std::uint32_t max_mhz;
+  std::uint32_t bus_mhz;
+};
+
 class ProcessorState {
- public:
-  struct AddressLimits {
-    std::uint8_t physical_bits{0};  // e.g. 39, 48, 52
-    std::uint8_t virtual_bits{0};   // e.g., 48, 57
-  };
-
-  struct Topology {
-    std::uint32_t legacy_apic_id{0};          // 8-bit ID (Max 255)
-    std::uint32_t x2apic_id{0};               // 32-bit ID
-    std::uint32_t max_logical_processors{0};  // no of logical threads
-    std::uint32_t clflush_line_size{0};       // Cache line size in bytes
-  };
-
-  struct Frequencies {
-    std::uint32_t base_mhz{0};
-    std::uint32_t max_mhz;
-    std::uint32_t bus_mhz;
-  };
-
  private:
   static constexpr std::size_t FEATURE_COUNT =
       static_cast<std::size_t>(CpuFeature::COUNT);
   static constexpr std::size_t BITSET_WORDS = (FEATURE_COUNT + 63) / 64;
 
   std::array<std::uint64_t, BITSET_WORDS> m_feature_bitset{false};
+
   std::array<char, 13> m_vendor_string{0};
   std::array<char, 49> m_brand_string{0};
   std::size_t m_brand_len{0};
+
   std::uint32_t m_max_basic_leaf{0};
   std::uint32_t m_max_extended_leaf{0};
+  CpuVendor m_vendor{CpuVendor::Unknown};
+  std::uint32_t m_x2apic_id{0};
 
   AddressLimits m_address_limits{};
-  Topology m_topology{};
   Frequencies m_frequencies{};
+
+  std::array<CacheInfo, 8> m_caches{};
+  std::size_t m_cache_count{0};
+
+  std::array<TopologyLevel, 8> m_topology_levels{};
+  std::size_t m_topology_level_count{0};
 
   __nodiscard static inline CpuidRegs
   call_cpuid(std::uint32_t leaf, std::uint32_t subleaf) noexcept {
@@ -287,30 +321,87 @@ class ProcessorState {
 
   __nodiscard static constexpr FeatureCoordinate get_feature_coordinate(
       std::size_t index
-  ) noexcept;
+  ) noexcept {
+    // Every 32 features correspond to a new CPUID register block
+    const std::size_t block = index / 32;
+    const std::uint8_t bit  = static_cast<std::uint8_t>(index % 32);
 
-  void sanitize_brand_string() noexcept;
+    switch (block) {
+      case 0:
+        return {0x1, 0, TargetRegister::EDX, bit};
+      case 1:
+        return {0x1, 0, TargetRegister::ECX, bit};
+      case 2:
+        return {0x7, 0, TargetRegister::EBX, bit};
+      case 3:
+        return {0x7, 0, TargetRegister::ECX, bit};
+      case 4:
+        return {0x7, 0, TargetRegister::EDX, bit};
+      case 5:
+        return {0x7, 1, TargetRegister::EAX, bit};
+      case 6:
+        return {0x80000001, 0, TargetRegister::EDX, bit};
+      case 7:
+        return {0x80000001, 0, TargetRegister::ECX, bit};
+      default:
+        return {0, 0, TargetRegister::EAX, 0};
+    }
+  }
 
-  void gather_address_limits() noexcept;
-  void gather_basic_topology() noexcept;
-  void gather_frequencies() noexcept;
+  void fetch_vendor_and_max_leafs() noexcept;
+  void fetch_brand_string() noexcept;
+  void fetch_features() noexcept;
+  void fetch_address_limits() noexcept;
+  void fetch_extended_topology() noexcept;
+  void fetch_cache_hierarchy() noexcept;
+  void fetch_frequencies() noexcept;
 
  public:
   ProcessorState() = default;
 
-  void initialize() noexcept;
+  void initialize() noexcept {
+    fetch_vendor_and_max_leafs();
+    fetch_brand_string();
+    fetch_features();
+
+    fetch_address_limits();
+    fetch_extended_topology();
+    fetch_cache_hierarchy();
+    fetch_frequencies();
+  }
+
   __nodiscard bool has_feature(CpuFeature feature) const noexcept;
+
+  __nodiscard CpuVendor vendor_id() const noexcept {
+    return m_vendor;
+  }
+  
+  __nodiscard std::string_view vendor_string() const noexcept {
+    return {m_vendor_string.data(), 12};
+  }
+  
+  __nodiscard std::string_view brand_string() const noexcept {
+    return {m_brand_string.data(), m_brand_len};
+  }
 
   __nodiscard const AddressLimits& limits() const noexcept {
     return m_address_limits;
   }
-
-  __nodiscard const Topology& topology() const noexcept {
-    return m_topology;
+  
+  __nodiscard const Frequencies& frequencies() const noexcept {
+    return m_frequencies;
+  }
+  
+  __nodiscard std::uint32_t x2apic_id() const noexcept {
+    return m_x2apic_id;
   }
 
-  __nodiscard const Frequencies frequencies() const noexcept {
-    return m_frequencies;
+  __nodiscard std::span<const CacheInfo> caches() const noexcept {
+    return {m_caches.data(), m_cache_count};
+  }
+
+  __nodiscard std::span<const TopologyLevel> topology_levels() const noexcept {
+    return {m_topology_levels.data(), m_topology_level_count};
   }
 };
 
