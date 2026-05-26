@@ -50,8 +50,8 @@ __BEGIN_DECLS
 #define __section(sec)  [[gnu::section(#sec)]]
 #define __alias(symbol) [[gnu::alias(#symbol)]]
 
-#define __likely   [[gnu::likely]]
-#define __unlikely [[gnu::unlikely]]
+#define __likely    [[gnu::likely]]
+#define __unlikely  [[gnu::unlikely]]
 #define __assume(x) [[assume((x))]]
 
 #define barrier()     __asm__ __volatile__("" : : : "memory")
@@ -182,9 +182,18 @@ __BEGIN_DECLS
 #define mul_overflow(a, b, res) /* Fallback implementation */
 #endif
 
+#if __has_builtin(__builtin_alloca)
+#define alloca(a) __builtin_alloca((a))
+#endif
+
 #if defined(__SIZEOF_INT128__)
+#if defined(__GNUC__)
 typedef __int128 int128_t;
 typedef unsigned __int128 uint128_t;
+#elif defined(__cplusplus)
+using int128_t  = __int128;
+using uint128_t = unsigned __int128;
+#endif
 #endif
 
 typedef ptrdiff_t ssize_t;

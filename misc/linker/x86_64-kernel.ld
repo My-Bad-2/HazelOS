@@ -9,6 +9,7 @@ PHDRS
     requests  PT_LOAD FLAGS((1 << 1) | (1 << 2)); /* Write + Read */
     text      PT_LOAD FLAGS((1 << 0) | (1 << 2)); /* Execute + Read */
     rodata    PT_LOAD FLAGS((1 << 2));            /* Read only */
+    dynamic   PT_DYNAMIC FLAGS((1 << 2));         /* Read only */
     data      PT_LOAD FLAGS((1 << 1) | (1 << 2)); /* Write + Read */
 }
 
@@ -16,8 +17,9 @@ SECTIONS
 {
     /* Kernel virtual base. */
     . = 0xffffffff80000000;
+    __image_base = .;
 
-    .limine_requests : {
+    .limine_requests : ALIGN(CONSTANT(MAXPAGESIZE)) {
         KEEP(*(.limine_requests_start))
         KEEP(*(.limine_requests))
         KEEP(*(.limine_requests_end))
@@ -26,7 +28,7 @@ SECTIONS
     /* Align to page boundary. */
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
-    .text : {
+    .text : ALIGN(CONSTANT(MAXPAGESIZE)) {
         __text_start = .;
         PROVIDE(__isr_text_start = .);
         *(.text.isr)
@@ -40,7 +42,7 @@ SECTIONS
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
-.rodata : {
+    .rodata : ALIGN(CONSTANT(MAXPAGESIZE)) {
         __rodata_start = .;
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
@@ -72,14 +74,31 @@ SECTIONS
         __rodata_end = .;
     } :rodata
 
-    .eh_frame : {
-        KEEP(*(.eh_frame*))
+    /* Keep dynamic relocations for KASLR/PIE loading. */
+    .dynamic : ALIGN(CONSTANT(MAXPAGESIZE)) {
+        __dynamic_start = .;
+        KEEP(*(.dynamic))
+        __dynamic_end = .;
+    } :rodata :dynamic
+
+    .rela.dyn : ALIGN(CONSTANT(MAXPAGESIZE)) {
+        __rela_dyn_start = .;
+        KEEP(*(.rela.dyn))
+        KEEP(*(.rela.*))
+        __rela_dyn_end = .;
+    } :rodata
+
+    .rel.dyn : ALIGN(CONSTANT(MAXPAGESIZE)) {
+        __rel_dyn_start = .;
+        KEEP(*(.rel.dyn))
+        KEEP(*(.rel.*))
+        __rel_dyn_end = .;
     } :rodata
 
     /* Align to page boundary. */
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
-    .data : {
+    .data : ALIGN(CONSTANT(MAXPAGESIZE)) {
         __data_start = .;
         *(.data .data.*)
         *(.sdata .sdata.*)
@@ -89,7 +108,7 @@ SECTIONS
         __data_end = .;
     } :data
 
-    .bss : {
+    .bss : ALIGN(CONSTANT(MAXPAGESIZE)) {
         . = ALIGN(16);
         __bss_start = .;
         *(.bss .bss.*)
@@ -98,9 +117,12 @@ SECTIONS
         __bss_end = .;
     } :data
 
+    __image_end = .;
+
     /* Drop non-loadable metadata. */
     /DISCARD/ : {
         *(.note .note.*)
         *(.comment)
+        *(.eh_frame*)
     }
 }

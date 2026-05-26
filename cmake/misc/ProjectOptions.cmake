@@ -103,6 +103,33 @@ function(project_apply_default_options)
         )
     endif()
 
+    if(NOT DEFINED ${PROJECT_NAME}_MAX_CPUS OR "${${PROJECT_NAME}_MAX_CPUS}" STREQUAL "")
+        set(_hazel_max_cpus "256")
+    else()
+        set(_hazel_max_cpus "${${PROJECT_NAME}_MAX_CPUS}")
+    endif()
+
+    if(NOT "${_hazel_max_cpus}" MATCHES "^[0-9]+$")
+        message(
+            FATAL_ERROR
+            "Invalid ${PROJECT_NAME}_MAX_CPUS '${_hazel_max_cpus}'. Must be an integer in [1, 4294967295]."
+        )
+    endif()
+
+    if(_hazel_max_cpus LESS 1 OR _hazel_max_cpus GREATER 4294967295)
+        message(
+            FATAL_ERROR
+            "Invalid ${PROJECT_NAME}_MAX_CPUS '${_hazel_max_cpus}'. Must be an integer in [1, 4294967295]."
+        )
+    endif()
+
+    set(${PROJECT_NAME}_MAX_CPUS
+        "${_hazel_max_cpus}"
+        CACHE STRING
+        "Maximum supported CPU count (uint32_t)"
+        FORCE
+    )
+
     if(NOT DEFINED ${PROJECT_NAME}_QEMU_VNC)
         set(_hazel_qemu_vnc OFF)
     else()
@@ -113,6 +140,19 @@ function(project_apply_default_options)
         "${_hazel_qemu_vnc}"
         CACHE BOOL
         "Enable QEMU VNC remote access"
+        FORCE
+    )
+
+    if(NOT DEFINED ${PROJECT_NAME}_ENABLE_KASLR)
+        set(_hazel_enable_kaslr ON)
+    else()
+        set(_hazel_enable_kaslr "${${PROJECT_NAME}_ENABLE_KASLR}")
+    endif()
+
+    set(${PROJECT_NAME}_ENABLE_KASLR
+        "${_hazel_enable_kaslr}"
+        CACHE BOOL
+        "Enable kernel KASLR (PIE)"
         FORCE
     )
 endfunction()

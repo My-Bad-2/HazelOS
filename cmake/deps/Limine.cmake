@@ -5,7 +5,7 @@ set(HAZEL_DEP_LIMINE_RELEASE_BASE_URL
     CACHE STRING
     "Limine release base URL"
 )
-set(HAZEL_DEP_LIMINE_TAG "v12.2.0" CACHE STRING "Limine release tag")
+set(HAZEL_DEP_LIMINE_TAG "v12.3.1" CACHE STRING "Limine release tag")
 set(HAZEL_DEP_LIMINE_ASSET
     ""
     CACHE STRING

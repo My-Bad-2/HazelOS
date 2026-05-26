@@ -375,11 +375,11 @@ class ProcessorState {
   __nodiscard CpuVendor vendor_id() const noexcept {
     return m_vendor;
   }
-  
+
   __nodiscard std::string_view vendor_string() const noexcept {
     return {m_vendor_string.data(), 12};
   }
-  
+
   __nodiscard std::string_view brand_string() const noexcept {
     return {m_brand_string.data(), m_brand_len};
   }
@@ -387,11 +387,11 @@ class ProcessorState {
   __nodiscard const AddressLimits& limits() const noexcept {
     return m_address_limits;
   }
-  
+
   __nodiscard const Frequencies& frequencies() const noexcept {
     return m_frequencies;
   }
-  
+
   __nodiscard std::uint32_t x2apic_id() const noexcept {
     return m_x2apic_id;
   }
@@ -405,7 +405,7 @@ class ProcessorState {
   }
 };
 
-inline ProcessorState g_bsp_state;
+ProcessorState& get_current_state() noexcept;
 }  // namespace cpu
 }  // namespace x86_64
 }  // namespace kernel

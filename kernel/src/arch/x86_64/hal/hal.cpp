@@ -12,7 +12,7 @@ x86_64::UartSink uart;
 }
 
 void early_init() noexcept {
-  x86_64::cpu::g_bsp_state.initialize();
+  x86_64::cpu::get_current_state().initialize();
 
   uart.initialize();
   uart.set_level(log::Level::Error);

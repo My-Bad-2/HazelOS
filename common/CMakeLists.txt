@@ -5,7 +5,12 @@ hazel_component_project(NAME HazelCommon OUT_SUPERPROJECT_VAR HAZEL_COMMON_SUPER
 
 set(_hazel_common_namespace "${HAZEL_COMMON_SUPERPROJECT}")
 
-set(COMMON_CX_FLAGS "-fno-pic" "-fno-pie")
+set(COMMON_CX_FLAGS)
+if(${${_hazel_common_namespace}_ENABLE_KASLR})
+	list(APPEND COMMON_CX_FLAGS -fpie)
+else()
+	list(APPEND COMMON_CX_FLAGS -fno-pic -fno-pie)
+endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
 else()
 	list(APPEND COMMON_CX_FLAGS "-fno-omit-frame-pointer")

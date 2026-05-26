@@ -26,7 +26,7 @@ void kernel_main() {
 
   auto ptr = memory::PhysicalManager::alloc_pages(1);
 
-  test.info("ptr = 0x%lx\n", ptr.raw());
+  test.info("ptr = 0x%lx", ptr.raw());
 
   using namespace libs::maths::literals;
 

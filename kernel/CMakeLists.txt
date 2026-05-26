@@ -4,7 +4,17 @@ hazel_component_project(NAME HazelKernel OUT_SUPERPROJECT_VAR HAZEL_KERNEL_SUPER
 
 set(_hazel_kernel_namespace "${HAZEL_KERNEL_SUPERPROJECT}")
 
-set(KERNEL_CX_FLAGS "-fno-pic" "-fno-pie")
+set(KERNEL_CX_FLAGS)
+if(${${_hazel_kernel_namespace}_ENABLE_KASLR})
+    list(APPEND KERNEL_CX_FLAGS -fpie)
+else()
+    list(APPEND KERNEL_CX_FLAGS -fno-pic -fno-pie)
+endif()
+
+set(KERNEL_LINK_FLAGS ${${_hazel_kernel_namespace}_LINK_FLAGS})
+if(${${_hazel_kernel_namespace}_ENABLE_KASLR})
+    list(APPEND KERNEL_LINK_FLAGS -Wl,-pie)
+endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
 else()
@@ -85,7 +95,7 @@ function(define_kernel_link_step target_name symbol_source)
         TARGET ${target_name}
         LANG "C;CXX"
         SCRIPT ${KERNEL_LINK_SCRIPT}
-        FLAGS ${${_hazel_kernel_namespace}_LINK_FLAGS}
+        FLAGS ${KERNEL_LINK_FLAGS}
     )
 endfunction()
 

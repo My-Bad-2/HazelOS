@@ -1,12 +1,17 @@
+#include "cpu/feats.hpp"
+
 #include <cstdint>
 #include <string_view>
 
-#include "cpu/feats.hpp"
 #include "libs/maths.hpp"
 
 namespace kernel {
 namespace x86_64 {
 namespace cpu {
+namespace {
+ProcessorState bsp_state;
+}
+
 bool ProcessorState::has_feature(CpuFeature feature) const noexcept {
   const auto index = static_cast<std::size_t>(feature);
   if (index >= static_cast<std::size_t>(CpuFeature::COUNT)) return false;
@@ -183,6 +188,10 @@ void ProcessorState::fetch_frequencies() noexcept {
     m_frequencies.max_mhz  = regs.ebx & 0xffff;
     m_frequencies.bus_mhz  = regs.ecx & 0xffff;
   }
+}
+
+ProcessorState& get_current_state() noexcept {
+  return bsp_state;
 }
 }  // namespace cpu
 }  // namespace x86_64

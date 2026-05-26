@@ -8,7 +8,7 @@
 namespace kernel {
 namespace boot {
 namespace {
-std::byte boot_stack[KSTACK_SIZE];
+static std::byte boot_stack[KSTACK_SIZE];
 std::uintptr_t hhdm_offset = 0;
 
 __used __section(.limine_requests) volatile uint64_t limine_base_revision[] =
@@ -60,6 +60,14 @@ __used __section(
         .limine_requests
 ) volatile limine_memmap_request memmap_request = {
     .id       = LIMINE_MEMMAP_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+};
+
+__used __section(
+        .limine_requests
+) volatile limine_executable_address_request kernel_addr_request = {
+    .id       = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID,
     .revision = 0,
     .response = nullptr,
 };

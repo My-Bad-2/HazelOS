@@ -9,6 +9,7 @@ PHDRS
     requests  PT_LOAD FLAGS((1 << 1) | (1 << 2)); /* Write + Read */
     text      PT_LOAD FLAGS((1 << 0) | (1 << 2)); /* Execute + Read */
     rodata    PT_LOAD FLAGS((1 << 2));            /* Read only */
+    dynamic   PT_DYNAMIC FLAGS((1 << 2));         /* Read only */
     data      PT_LOAD FLAGS((1 << 1) | (1 << 2)); /* Write + Read */
 }
 
@@ -16,6 +17,7 @@ SECTIONS
 {
     /* Kernel virtual base. */
     . = 0xffffffff80000000;
+    __image_base = .;
 
     .limine_requests : {
         KEEP(*(.limine_requests_start))
@@ -84,6 +86,27 @@ SECTIONS
         KEEP(*(.eh_frame*))
     } :rodata
 
+    /* Keep dynamic relocations for KASLR/PIE loading. */
+    .dynamic : {
+        __dynamic_start = .;
+        KEEP(*(.dynamic))
+        __dynamic_end = .;
+    } :rodata :dynamic
+
+    .rela.dyn : {
+        __rela_dyn_start = .;
+        KEEP(*(.rela.dyn))
+        KEEP(*(.rela.*))
+        __rela_dyn_end = .;
+    } :rodata
+
+    .rel.dyn : {
+        __rel_dyn_start = .;
+        KEEP(*(.rel.dyn))
+        KEEP(*(.rel.*))
+        __rel_dyn_end = .;
+    } :rodata
+
     /* Align to page boundary. */
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
@@ -105,6 +128,8 @@ SECTIONS
         *(COMMON)
         __bss_end = .;
     } :data
+
+    __image_end = .;
 
     /* Drop non-loadable metadata. */
     /DISCARD/ : {
