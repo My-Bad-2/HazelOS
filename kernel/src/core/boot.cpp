@@ -72,6 +72,15 @@ __used __section(
     .response = nullptr,
 };
 
+__used __section(.limine_requests) volatile limine_mp_request smp_request{
+    .id       = LIMINE_MP_REQUEST_ID,
+    .revision = 1,
+    .response = nullptr,
+#ifdef __x86_64__
+    .flags = LIMINE_MP_RESPONSE_X86_64_X2APIC,
+#endif
+};
+
 std::uintptr_t get_hhdm_offset() noexcept {
   return hhdm_offset;
 }

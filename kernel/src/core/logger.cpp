@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "core/log_manager.hpp"
+#include "guards.hpp"
 #include "hal/cpu.hpp"
 
 namespace kernel {
@@ -13,6 +14,8 @@ void Logger::format_and_dispatch(
     const char* fmt,
     std::va_list args
 ) const noexcept {
+  const common::LockGuard _{m_lock};
+
   char buffer[256];
 
   const int length = vsnprintf(buffer, sizeof(buffer), fmt, args);

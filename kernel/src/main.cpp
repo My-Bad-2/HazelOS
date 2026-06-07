@@ -4,6 +4,7 @@
 #include "core/logger.hpp"
 #include "hal/cpu.hpp"
 #include "hal/hal.hpp"
+#include "hal/smp.hpp"
 #include "libs/maths.hpp"
 #include "memory/memory.hpp"
 #include "memory/pmm.hpp"
@@ -23,6 +24,7 @@ void kernel_main() {
   const log::Logger test{"TEST"};
 
   memory::initialize();
+  hal::smp::initialize();
 
   auto ptr = memory::PhysicalManager::alloc_pages(1);
 

@@ -5,6 +5,7 @@
 
 #include "core/boot.hpp"
 #include "flanterm_backends/fb.h"
+#include "guards.hpp"
 
 namespace kernel {
 namespace log {
@@ -44,10 +45,13 @@ void FlantermSink::initialize() noexcept {
 
 void FlantermSink::write(std::string_view str) noexcept {
   if (!m_ctx) return;
+
+  const common::LockGuard _(m_lock);
   flanterm_write(m_ctx, str.data(), str.length());
 }
 
 void FlantermSink::flush() noexcept {
+  const common::LockGuard _(m_lock);
   flanterm_flush(m_ctx);
 }
 }  // namespace log

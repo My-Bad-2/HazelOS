@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string_view>
 
+#include "hal/smp.hpp"
+
 namespace kernel {
 namespace log {
 std::string_view LogManager::level_to_color(Level level) noexcept {
@@ -30,7 +32,7 @@ std::uint64_t LogManager::get_uptime_ms() noexcept {
 }
 
 std::uint32_t LogManager::get_cpu_id() noexcept {
-  return 0;
+  return hal::smp::get_current_core_id();
 }
 
 bool LogManager::add_sink(LogSink* sink) noexcept {

@@ -1,3 +1,4 @@
+#include <type_traits>
 #ifndef KERNEL_ARCH_X86_64_CPU_REGISTERS_HPP
 #define KERNEL_ARCH_X86_64_CPU_REGISTERS_HPP 1
 
@@ -190,6 +191,60 @@ invalidate_page(InvpcidType type, const InvpcidDescriptor& desc) noexcept {
 
 inline void flush_cache() noexcept {
   asm volatile("wbinvd" ::: "memory");
+}
+
+template <typename T>
+  requires(std::is_integral_v<T> || std::is_pointer_v<T>)
+__nodiscard inline T read_gs(std::size_t offset) noexcept {
+  T value;
+
+  if constexpr (sizeof(T) == 1)
+    asm volatile("movb %%gs:%1, %0"
+                 : "=q"(value)
+                 : "m"(*reinterpret_cast<volatile std::uint8_t*>(offset)));
+  else if constexpr (sizeof(T) == 2)
+    asm volatile("movw %%gs:%1, %0"
+                 : "=r"(value)
+                 : "m"(*reinterpret_cast<volatile std::uint16_t*>(offset)));
+  else if constexpr (sizeof(T) == 4)
+    asm volatile("movl %%gs:%1, %0"
+                 : "=r"(value)
+                 : "m"(*reinterpret_cast<volatile std::uint32_t*>(offset)));
+  else if constexpr (sizeof(T) == 8)
+    asm volatile("movq %%gs:%1, %0"
+                 : "=r"(value)
+                 : "m"(*reinterpret_cast<volatile std::uint64_t*>(offset)));
+  else
+    static_assert(sizeof(T) == 0, "Unsupported read size for GS segment");
+
+  return value;
+}
+
+template <typename T>
+  requires(std::is_integral_v<T> || std::is_pointer_v<T>)
+inline void write_gs(std::size_t offset, T value) noexcept {
+  if constexpr (sizeof(T) == 1)
+    asm volatile("movb %1, %%gs:%0"
+                 : "=m"(*reinterpret_cast<volatile std::uint8_t*>(offset))
+                 : "qi"(value)
+                 : "memory");
+  else if constexpr (sizeof(T) == 2)
+    asm volatile("movw %1, %%gs:%0"
+                 : "=m"(*reinterpret_cast<volatile std::uint16_t*>(offset))
+                 : "ri"(value)
+                 : "memory");
+  else if constexpr (sizeof(T) == 4)
+    asm volatile("movl %1, %%gs:%0"
+                 : "=m"(*reinterpret_cast<volatile std::uint32_t*>(offset))
+                 : "ri"(value)
+                 : "memory");
+  else if constexpr (sizeof(T) == 8)
+    asm volatile("movq %1, %%gs:%0"
+                 : "=m"(*reinterpret_cast<volatile std::uint64_t*>(offset))
+                 : "ri"(value)
+                 : "memory");
+  else
+    static_assert(sizeof(T) == 0, "Unsupported write size for GS segment");
 }
 }  // namespace cpu
 }  // namespace x86_64

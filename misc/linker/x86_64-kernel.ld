@@ -20,9 +20,13 @@ SECTIONS
     __image_base = .;
 
     .limine_requests : ALIGN(CONSTANT(MAXPAGESIZE)) {
+        __limine_requests_start = .;
+
         KEEP(*(.limine_requests_start))
         KEEP(*(.limine_requests))
         KEEP(*(.limine_requests_end))
+
+        __limine_requests_end = .;
     } :requests
 
     /* Align to page boundary. */

@@ -104,7 +104,7 @@ function(project_apply_default_options)
     endif()
 
     if(NOT DEFINED ${PROJECT_NAME}_MAX_CPUS OR "${${PROJECT_NAME}_MAX_CPUS}" STREQUAL "")
-        set(_hazel_max_cpus "256")
+        set(_hazel_max_cpus "32")
     else()
         set(_hazel_max_cpus "${${PROJECT_NAME}_MAX_CPUS}")
     endif()

@@ -16,6 +16,7 @@
 #include "memory/vm/flags.hpp"
 
 extern "C" {
+extern const std::uint8_t __limine_requests_start[], __limine_requests_end[];
 extern const std::uint8_t __text_start[], __text_end[];
 extern const std::uint8_t __rodata_start[], __rodata_end[];
 extern const std::uint8_t __data_start[], __data_end[];
@@ -191,6 +192,9 @@ void VirtualManager::map_kernel(
     IPageTableAllocator& alloc
 ) noexcept {
   const KernelSegment segments[] = {
+      {__limine_requests_start,
+       __limine_requests_end,
+       VmFlags::Read | VmFlags::Write},
       {__text_start, __text_end, VmFlags::Read | VmFlags::Execute},
       {__rodata_start, __rodata_end, VmFlags::Read},
       {__data_start, __data_end, VmFlags::Read | VmFlags::Write},

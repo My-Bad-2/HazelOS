@@ -6,6 +6,7 @@
 
 #include "core/logger.hpp"
 #include "cpu/feats.hpp"
+#include "hal/smp.hpp"
 #include "memory/address/physical.hpp"
 #include "memory/address/virtual.hpp"
 #include "memory/paging/flags.hpp"
@@ -347,7 +348,7 @@ void AddressSpace::dispatch_tlb_shootdown_context() noexcept {
 }
 
 void AddressSpace::handle_shootdown_context_ipi() noexcept {
-  const std::uint32_t core_id = 0;
+  const std::uint32_t core_id = hal::smp::get_current_core_id();
   const auto [pcid, epoch]    = m_pcid_cache[core_id];
 
   if (epoch != get_current_asid_manager().get_epoch()) return;
@@ -355,7 +356,7 @@ void AddressSpace::handle_shootdown_context_ipi() noexcept {
 }
 
 void AddressSpace::handle_shootdown_ipi(VirtAddr virt) noexcept {
-  const std::uint32_t core_id = 0;
+  const std::uint32_t core_id = hal::smp::get_current_core_id();
   const auto [pcid, epoch]    = m_pcid_cache[core_id];
 
   if (epoch != get_current_asid_manager().get_epoch()) return;
@@ -370,7 +371,7 @@ void AddressSpace::destroy(IPageTableAllocator& alloc) noexcept {
 
 void AddressSpace::load() noexcept {
   // Replace it with current core id function
-  const std::uint32_t core_id = 0;
+  const std::uint32_t core_id = hal::smp::get_current_core_id();
   mark_active(core_id);
 
   AsidManager& manager = get_current_asid_manager();
