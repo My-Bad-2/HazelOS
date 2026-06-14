@@ -6,7 +6,6 @@
 #include "compiler.h"
 #include "core/log_sink.hpp"
 #include "hal/cpu.hpp"
-#include "locks.hpp"
 
 namespace kernel {
 namespace x86_64 {
@@ -40,7 +39,6 @@ class UartSink final : public log::LogSink {
 
  private:
   std::uint16_t m_base_port;
-  MCSLock m_lock;
 
   __nodiscard std::uint8_t read_register(
       uart::RegisterOffset offset

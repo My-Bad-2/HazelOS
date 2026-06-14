@@ -4,36 +4,26 @@
 #include "core/logger.hpp"
 #include "hal/cpu.hpp"
 #include "hal/hal.hpp"
-#include "hal/smp.hpp"
-#include "libs/maths.hpp"
 #include "memory/memory.hpp"
 #include "memory/pmm.hpp"
 
 namespace kernel {
 namespace {
 log::FlantermSink flanterm;
-}
+log::Logger test{"MAIN"};
+}  // namespace
 
 void kernel_main() {
-  hal::early_init();
+  log::LogManager::set_config(log::LogConfig{});
 
   flanterm.initialize();
   log::LogManager::add_sink(&flanterm);
-
-  log::LogManager::set_config(log::LogConfig{});
-  const log::Logger test{"TEST"};
+  hal::early_init();
 
   memory::initialize();
-  hal::smp::initialize();
+  hal::initialize();
 
   auto ptr = memory::PhysicalManager::alloc_pages(1);
-
-  test.info("ptr = 0x%lx", ptr.raw());
-
-  using namespace libs::maths::literals;
-
-  auto a = 1.5_KiB;
-  test.info("a = %lu", a);
 
   test.info("Hello, World!");
 

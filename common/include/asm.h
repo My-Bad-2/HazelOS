@@ -54,6 +54,10 @@ name:                               \
   .type name, @object; \
 name:
 
+#define SYM_DATA_LOCAL(name) \
+  .type name, @object;       \
+name:
+
 #define EXTERN_FUNC(x) .extern x
 
 /**

@@ -1,7 +1,9 @@
 #ifndef KERNEL_ARCH_X86_64_CPU_SMP_HPP
 #define KERNEL_ARCH_X86_64_CPU_SMP_HPP 1
 
+#include <cstdint>
 #include <new>
+#include <type_traits>
 
 #include "cpu/feats.hpp"
 #include "cpu/registers.hpp"
@@ -10,37 +12,101 @@
 namespace kernel {
 namespace hal {
 namespace smp {
-class alignas(std::hardware_constructive_interference_size) PerCpuState final {
- private:
-  PerCpuState* const m_self;
-  CoreState m_core;
+struct alignas(std::hardware_constructive_interference_size) PerCpuState final {
+  PerCpuState* const self;
+  CoreHotState hot;
 
-  const ApicId m_apic_id;
-  x86_64::cpu::ProcessorState m_state;
+  alignas(
+      std::hardware_constructive_interference_size
+  ) x86_64::cpu::ProcessorState processor_state;
 
- public:
-  constexpr PerCpuState(CpuId id, NumaId numa, ApicId apic) noexcept
-      : m_self(this), m_core(id, numa), m_apic_id(apic) {}
+  CoreColdState cold;
 
-  __nodiscard CoreState& core_state() noexcept {
-    return m_core;
+  constexpr PerCpuState(
+      CpuId id,
+      NumaId numa,
+      ApicId apic,
+      std::uintptr_t stack
+  ) noexcept
+      : self(this), hot(id, numa, apic, stack) {}
+
+  PerCpuState(const PerCpuState&)            = delete;
+  PerCpuState& operator=(const PerCpuState&) = delete;
+
+  __nodiscard PreemptCount preempt_count() const noexcept {
+    return PreemptCount{hot.preemption_count.load(std::memory_order_relaxed)};
   }
 
-  __nodiscard constexpr x86_64::cpu::ProcessorState&
-  processor_state() noexcept {
-    return m_state;
+  constexpr void set_preempt_count(std::uint32_t count) noexcept {
+    hot.preemption_count = count;
   }
 
-  __nodiscard constexpr ApicId apic_id() const noexcept {
-    return m_apic_id;
+  void preempt_disable() noexcept {
+    hot.preemption_count.fetch_add(
+        PreemptOffset::THREAD,
+        std::memory_order_acquire
+    );
   }
 
-  __nodiscard constexpr const PerCpuState* self() const noexcept {
-    return m_self;
+  void preempt_enable() noexcept {
+    hot.preemption_count.fetch_sub(
+        PreemptOffset::THREAD,
+        std::memory_order_release
+    );
   }
+
+  void enter_hard_irq() noexcept {
+    hot.preemption_count.fetch_add(
+        PreemptOffset::HARD_IRQ,
+        std::memory_order_acquire
+    );
+  }
+
+  void exit_hard_irq() noexcept {
+    hot.preemption_count.fetch_sub(
+        PreemptOffset::HARD_IRQ,
+        std::memory_order_release
+    );
+  }
+
+  void enter_soft_irq() noexcept {
+    hot.preemption_count.fetch_add(
+        PreemptOffset::SOFT_IRQ,
+        std::memory_order_acquire
+    );
+  }
+
+  void exit_soft_irq() noexcept {
+    hot.preemption_count.fetch_sub(
+        PreemptOffset::SOFT_IRQ,
+        std::memory_order_release
+    );
+  }
+
+  void enter_nmi() noexcept {
+    hot.preemption_count.fetch_add(
+        PreemptOffset::NMI,
+        std::memory_order_acquire
+    );
+  }
+
+  void exit_nmi() noexcept {
+    hot.preemption_count.fetch_sub(
+        PreemptOffset::NMI,
+        std::memory_order_release
+    );
+  }
+
+  void send_ipi(IpiMessage msg) noexcept;
+  void process_ipis() noexcept;
 };
 
+static_assert(std::is_standard_layout_v<PerCpuState>);
+static_assert(offsetof(PerCpuState, self) == 0);
+static_assert(offsetof(PerCpuState, hot) == 8);
+
 void initialize_cpu_hw(PerCpuState* cpu) noexcept;
+void early_bsp_initialize() noexcept;
 }  // namespace smp
 }  // namespace hal
 }  // namespace kernel

@@ -103,8 +103,9 @@ union EFER {
 };
 
 template <typename T>
-concept IsMsr = requires {
+concept IsMsr = requires(T t) {
   { T::MSR_ID } -> std::convertible_to<std::uint32_t>;
+  { t.raw } -> std::same_as<std::uint64_t&>;
 };
 
 template <typename Reg>

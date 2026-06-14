@@ -3,7 +3,7 @@
 #include "core/log_manager.hpp"
 #include "core/log_sink.hpp"
 #include "core/uart.hpp"
-#include "cpu/feats.hpp"
+#include "cpu/smp.hpp"
 
 namespace kernel {
 namespace hal {
@@ -12,12 +12,11 @@ x86_64::UartSink uart;
 }
 
 void early_init() noexcept {
-  x86_64::cpu::get_current_state().initialize();
-
   uart.initialize();
   uart.set_level(log::Level::Error);
 
   log::LogManager::add_sink(&uart);
+  hal::smp::early_bsp_initialize();
 }
 }  // namespace hal
 }  // namespace kernel

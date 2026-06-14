@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <utility>
 
+#include "cpu/smp.hpp"
 #include "hal/cpu.hpp"
 #include "hal/smp.hpp"
 
@@ -34,8 +35,8 @@ constexpr std::uint32_t get_nesting_lvl(hal::smp::PreemptCount preempt_count) {
 
 void MCSLock::lock() {
   using namespace hal::smp;
-  const CoreState& core           = get_core_state();
-  const std::uint32_t core_id     = std::to_underlying(core.id());
+  const PerCpuState& core         = get_cpu_state();
+  const std::uint32_t core_id     = std::to_underlying(core.hot.id);
   const std::uint32_t nesting_lvl = get_nesting_lvl(core.preempt_count());
 
   const std::uint32_t curr_idx = encode_node_indx(core_id, nesting_lvl);
@@ -65,8 +66,8 @@ void MCSLock::lock() {
 
 void MCSLock::unlock() {
   using namespace hal::smp;
-  const CoreState& core           = get_core_state();
-  const std::uint32_t core_id     = std::to_underlying(core.id());
+  const PerCpuState& core         = get_cpu_state();
+  const std::uint32_t core_id     = std::to_underlying(core.hot.id);
   const std::uint32_t nesting_lvl = get_nesting_lvl(core.preempt_count());
 
   const std::uint32_t curr_idx = encode_node_indx(core_id, nesting_lvl);

@@ -56,6 +56,7 @@ Checks: >
   # Avoid Trailing Return Types
   -modernize-use-trailing-return-type,
   -clang-diagnostic-cast-qual
+  -misc-non-private-member-variables-in-classes
 
 # Treat warnings as errors to enforce quality in CI/CD
 WarningsAsErrors: 'bugprone-*,linuxkernel-*,clang-analyzer-*,performance-*'

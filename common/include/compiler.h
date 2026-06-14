@@ -54,8 +54,10 @@ __BEGIN_DECLS
 #define __unlikely  [[gnu::unlikely]]
 #define __assume(x) [[assume((x))]]
 
-#define barrier()     __asm__ __volatile__("" : : : "memory")
+#define barrier() __asm__ __volatile__("" : : : "memory")
+#ifndef __cplusplus
 #define unreachable() __builtin_unreachable()
+#endif
 
 #define __printf(fmt_idx, arg_idx) [[gnu::format(printf, fmt_idx, arg_idx)]]
 #define __scanf(fmt_idx, arg_idx)  [[gnu::format(scanf, fmt_idx, arg_idx)]]

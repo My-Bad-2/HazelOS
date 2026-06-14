@@ -1,6 +1,8 @@
+#include <new>
 #ifndef KERNEL_HAL_SMP_HPP
 #define KERNEL_HAL_SMP_HPP 1
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 
@@ -21,6 +23,18 @@ constexpr std::uint32_t HARD_IRQ = 1 << 16;
 constexpr std::uint32_t NMI      = 1 << 20;
 constexpr std::uint32_t RESCHED  = 1u << 31;
 }  // namespace PreemptOffset
+
+enum class IpiCommand : std::uint8_t {
+  NONE = 0,
+  TLB_SHOOTDOWN,
+  RESCHEDULE,
+  PANIC_SYNC,
+};
+
+struct IpiMessage {
+  IpiCommand command;
+  std::uint64_t payload;
+};
 
 union PreemptCount {
   uint32_t raw;
@@ -57,97 +71,38 @@ union PreemptCount {
   }
 };
 
-struct CoreState {
- private:
-  friend class PerCpuState;
-  const CpuId m_id;
-  const NumaId m_numa_node;
+struct CoreHotState {
+  const CpuId id;
+  const NumaId numa_node;
+  const ApicId apic_id;
+  std::atomic<std::uint32_t> preemption_count{0};
 
-  memory::AsidManager m_asid;
-  std::atomic<std::uint32_t> m_preempt_count;
+  std::uintptr_t stack_top{0};
+  memory::AsidManager asid;
 
- public:
-  constexpr CoreState(CpuId id, NumaId numa) noexcept
-      : m_id(id), m_numa_node(numa) {}
+  constexpr CoreHotState(
+      CpuId i,
+      NumaId n,
+      ApicId a,
+      std::uintptr_t stack
+  ) noexcept
+      : id(i), numa_node(n), apic_id(a), stack_top(stack) {}
+};
 
-  CoreState()                            = delete;
-  CoreState(const CoreState&)            = delete;
-  CoreState& operator=(const CoreState&) = delete;
+struct alignas(std::hardware_constructive_interference_size) CoreColdState {
+  std::atomic<std::uint32_t> ipi_head{0};
+  alignas(
+      std::hardware_constructive_interference_size
+  ) std::atomic<std::uint32_t> ipi_tail{0};
 
-  __nodiscard constexpr CpuId id() const noexcept {
-    return m_id;
-  }
-
-  __nodiscard constexpr NumaId numa() const noexcept {
-    return m_numa_node;
-  }
-
-  __nodiscard constexpr memory::AsidManager& manager() noexcept {
-    return m_asid;
-  }
-
-  __nodiscard PreemptCount preempt_count(
-      std::memory_order order = std::memory_order_relaxed
-  ) const noexcept {
-    return PreemptCount{m_preempt_count.load(order)};
-  }
-
-  constexpr void set_preempt_count(std::uint32_t count) noexcept {
-    m_preempt_count = count;
-  }
-
-  void preempt_disable() noexcept {
-    m_preempt_count.fetch_add(PreemptOffset::THREAD, std::memory_order_acquire);
-  }
-
-  void preempt_enable() noexcept {
-    m_preempt_count.fetch_sub(PreemptOffset::THREAD, std::memory_order_release);
-  }
-
-  void enter_hard_irq() noexcept {
-    m_preempt_count.fetch_add(
-        PreemptOffset::HARD_IRQ,
-        std::memory_order_acquire
-    );
-  }
-
-  void exit_hard_irq() noexcept {
-    m_preempt_count.fetch_sub(
-        PreemptOffset::HARD_IRQ,
-        std::memory_order_release
-    );
-  }
-
-  void enter_soft_irq() noexcept {
-    m_preempt_count.fetch_add(
-        PreemptOffset::SOFT_IRQ,
-        std::memory_order_acquire
-    );
-  }
-
-  void exit_soft_irq() noexcept {
-    m_preempt_count.fetch_sub(
-        PreemptOffset::SOFT_IRQ,
-        std::memory_order_release
-    );
-  }
-
-  void enter_nmi() noexcept {
-    m_preempt_count.fetch_add(PreemptOffset::NMI, std::memory_order_acquire);
-  }
-
-  void exit_nmit() noexcept {
-    m_preempt_count.fetch_sub(PreemptOffset::NMI, std::memory_order_release);
-  }
+  std::array<IpiMessage, 16> ipi_mailbox{};
 };
 
 class PerCpuState;
 
 void initialize() noexcept;
-bool is_initialized() noexcept;
 
 PerCpuState& get_cpu_state() noexcept;
-smp::CoreState& get_core_state() noexcept;
 std::uint32_t get_current_core_id() noexcept;
 }  // namespace smp
 }  // namespace hal

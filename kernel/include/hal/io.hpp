@@ -2,18 +2,11 @@
 #define KERNEL_HAL_IO_HPP 1
 
 #include <atomic>
-#include <concepts>
 #include <cstdint>
 
 namespace kernel {
 namespace hal {
 namespace io {
-template <typename T>
-concept MmioType =
-    std::same_as<T, std::uint8_t> || std::same_as<T, std::uint16_t> ||
-    std::same_as<T, std::uint32_t> ||
-    (std::same_as<T, std::uint64_t> && sizeof(void*) == 8);
-
 template <typename T>
   requires(sizeof(T) <= sizeof(std::uint64_t))
 inline void mmio_write(volatile T* addr, T val) {

@@ -5,7 +5,7 @@ set(HAZEL_DEP_UACPI_REPOSITORY
     CACHE STRING
     "uACPI repository URL"
 )
-set(HAZEL_DEP_UACPI_TAG "4.0.0" CACHE STRING "uACPI git tag")
+set(HAZEL_DEP_UACPI_TAG "5.0.0" CACHE STRING "uACPI git tag")
 
 function(setup_uacpi)
     hazel_cpm_add_package(

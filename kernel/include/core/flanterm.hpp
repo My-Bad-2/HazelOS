@@ -3,7 +3,6 @@
 
 #include "core/log_sink.hpp"
 #include "flanterm.h"
-#include "locks.hpp"
 
 namespace kernel {
 namespace log {
@@ -17,7 +16,6 @@ class FlantermSink final : public LogSink {
 
  private:
   struct flanterm_context* m_ctx{nullptr};
-  MCSLock m_lock;
 };
 }  // namespace log
 }  // namespace kernel

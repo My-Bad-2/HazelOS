@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string_view>
 
+#include "cpu/smp.hpp"
 #include "libs/maths.hpp"
 
 namespace kernel {
@@ -184,6 +185,10 @@ void ProcessorState::fetch_frequencies() noexcept {
     m_frequencies.max_mhz  = regs.ebx & 0xffff;
     m_frequencies.bus_mhz  = regs.ecx & 0xffff;
   }
+}
+
+ProcessorState& get_current_state() noexcept {
+  return hal::smp::get_cpu_state().processor_state;
 }
 }  // namespace cpu
 }  // namespace x86_64

@@ -5,7 +5,6 @@
 
 #include "compiler.h"
 #include "core/log_sink.hpp"
-#include "locks.hpp"
 
 namespace kernel {
 namespace log {
@@ -13,7 +12,6 @@ class Logger {
  private:
   const char* m_subsystem_name;
   Level m_min_level;
-  mutable MCSLock m_lock;
 
   void format_and_dispatch(
       Level level,
@@ -35,7 +33,7 @@ class Logger {
   __printf(2, 3) void trace(const char* fmt, ...) const noexcept;
   __printf(2, 3) void debug(const char* fmt, ...) const noexcept;
   __printf(2, 3) void info(const char* fmt, ...) const noexcept;
-  __printf(2, 3) void wrn(const char* fmt, ...) const noexcept;
+  __printf(2, 3) void warn(const char* fmt, ...) const noexcept;
   __printf(2, 3) void error(const char* fmt, ...) const noexcept;
   __printf(2, 3) void fatal(const char* fmt, ...) const noexcept;
 };

@@ -3,7 +3,6 @@
 #include <cstdint>
 
 #include "cpu.hpp"
-#include "guards.hpp"
 
 namespace kernel {
 namespace x86_64 {
@@ -86,7 +85,6 @@ void UartSink::flush() noexcept {
 }
 
 void UartSink::write(std::string_view str) noexcept {
-  const common::LockGuard _(m_lock);
   for (const auto ch : str) {
     wait_for_status<LineStatus::TransmitBufferEmpty>();
     write_register(uart::RegisterOffset::Data, static_cast<uint8_t>(ch));

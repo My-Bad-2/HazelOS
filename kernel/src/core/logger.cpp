@@ -6,15 +6,20 @@
 #include "core/log_manager.hpp"
 #include "guards.hpp"
 #include "hal/cpu.hpp"
+#include "locks.hpp"
 
 namespace kernel {
 namespace log {
+namespace {
+MCSLock g_lock;
+}
+
 void Logger::format_and_dispatch(
     Level level,
     const char* fmt,
     std::va_list args
 ) const noexcept {
-  const common::LockGuard _{m_lock};
+  const common::LockGuard _{g_lock};
 
   char buffer[256];
 
@@ -63,6 +68,14 @@ void Logger::error(const char* fmt, ...) const noexcept {
   std::va_list args;
   va_start(args, fmt);
   format_and_dispatch(Level::Error, fmt, args);
+  va_end(args);
+}
+
+void Logger::warn(const char* fmt, ...) const noexcept {
+  if (m_min_level > Level::Warning) return;
+  std::va_list args;
+  va_start(args, fmt);
+  format_and_dispatch(Level::Warning, fmt, args);
   va_end(args);
 }
 

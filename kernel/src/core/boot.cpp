@@ -81,6 +81,12 @@ __used __section(.limine_requests) volatile limine_mp_request smp_request{
 #endif
 };
 
+__used __section(.limine_requests) volatile limine_rsdp_request rsdp_request{
+    .id       = LIMINE_RSDP_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+};
+
 std::uintptr_t get_hhdm_offset() noexcept {
   return hhdm_offset;
 }
