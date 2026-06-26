@@ -1,7 +1,7 @@
-#include <expected>
 #ifndef KERNEL_INCLUDE_HAL_ACPI_HPP
 #define KERNEL_INCLUDE_HAL_ACPI_HPP 1
 
+#include <expected>
 #include <string_view>
 
 #include "hal/acpi/parser.hpp"

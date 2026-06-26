@@ -1,9 +1,9 @@
-#include <type_traits>
 #ifndef KERNEL_ARCH_X86_64_CPU_REGISTERS_HPP
 #define KERNEL_ARCH_X86_64_CPU_REGISTERS_HPP 1
 
 #include <concepts>
 #include <cstdint>
+#include <type_traits>
 
 #include "compiler.h"
 
@@ -83,6 +83,15 @@ union CR4 {
   } bits;
 };
 
+union CR8 {
+  std::uint64_t raw;
+
+  struct {
+    std::uint64_t priority : 4;
+    std::uint64_t reserved : 60;
+  } bits;
+};
+
 union EFER {
   std::uint64_t raw;
   struct {
@@ -100,12 +109,13 @@ union EFER {
   } bits;
 
   static constexpr std::uint32_t MSR_ID = 0xC0000080;
+
+  explicit EFER(std::uint64_t val) : raw(val) {}
 };
 
 template <typename T>
 concept IsMsr = requires(T t) {
   { T::MSR_ID } -> std::convertible_to<std::uint32_t>;
-  { t.raw } -> std::same_as<std::uint64_t&>;
 };
 
 template <typename Reg>
@@ -150,19 +160,37 @@ inline void write(CR4 value) noexcept {
   asm volatile("mov %0, %%cr4" ::"r"(value.raw) : "memory");
 }
 
+template <>
+__nodiscard inline CR8 read<CR8>() noexcept {
+  std::uint64_t val;
+  asm volatile("mov %%cr8, %0" : "=r"(val)::"memory");
+  return {.raw = val};
+}
+
+template <>
+inline void write(CR8 value) noexcept {
+  asm volatile("mov %0, %%cr8" ::"r"(value.raw) : "memory");
+}
+
 template <IsMsr Reg>
 __nodiscard inline Reg read() noexcept {
   std::uint32_t low, high;
-  asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(Reg::MSR_ID) : "memory");
-  return {.raw = (static_cast<std::uint64_t>(high) << 32) | low};
+  asm volatile("rdmsr"
+               : "=a"(low), "=d"(high)
+               : "c"(static_cast<std::uint32_t>(Reg::MSR_ID))
+               : "memory");
+  return Reg{(static_cast<std::uint64_t>(high) << 32) | low};
 }
 
 template <IsMsr Reg>
 inline void write(Reg value) noexcept {
-  const std::uint32_t low  = value.raw & 0xffffffff;
-  const std::uint32_t high = value.raw >> 32;
+  const std::uint32_t low  = static_cast<std::uint32_t>(value.raw);
+  const std::uint32_t high = static_cast<std::uint32_t>(value.raw >> 32);
 
-  asm volatile("wrmsr" ::"a"(low), "d"(high), "c"(Reg::MSR_ID) : "memory");
+  asm volatile("wrmsr" ::"a"(low),
+               "d"(high),
+               "c"(static_cast<std::uint32_t>(Reg::MSR_ID))
+               : "memory");
 }
 
 inline void invalidate_page(std::uintptr_t virt_addr) noexcept {

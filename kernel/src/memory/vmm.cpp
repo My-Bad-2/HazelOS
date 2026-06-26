@@ -219,5 +219,19 @@ void VirtualManager::map_kernel(
     );
   }
 }
+
+bool VirtualManager::map_mmio(VirtAddr virt, PhysAddr phys) noexcept {
+  BootTableAllocator alloc;
+
+  return RegionMapper::map(
+      *kernel_space,
+      virt,
+      phys,
+      PAGE_SIZE_SMALL,
+      VmFlags::Read | VmFlags::Write | VmFlags::Global,
+      CacheMode::UncacheableStrong,
+      alloc
+  );
+}
 }  // namespace memory
 }  // namespace kernel

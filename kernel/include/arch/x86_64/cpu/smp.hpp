@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "cpu/feats.hpp"
+#include "cpu/lapic.hpp"
 #include "cpu/registers.hpp"
 #include "hal/smp.hpp"
 
@@ -19,6 +20,8 @@ struct alignas(std::hardware_constructive_interference_size) PerCpuState final {
   alignas(
       std::hardware_constructive_interference_size
   ) x86_64::cpu::ProcessorState processor_state;
+
+  x86_64::cpu::lapic::LocalApic lapic;
 
   CoreColdState cold;
 
@@ -106,6 +109,7 @@ static_assert(offsetof(PerCpuState, self) == 0);
 static_assert(offsetof(PerCpuState, hot) == 8);
 
 void initialize_cpu_hw(PerCpuState* cpu) noexcept;
+void initialize_cpu_arch(PerCpuState* cpu) noexcept;
 void early_bsp_initialize() noexcept;
 }  // namespace smp
 }  // namespace hal

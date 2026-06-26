@@ -95,4 +95,16 @@ void MCSLock::unlock() {
   curr_state.store(0, std::memory_order_relaxed);
   get_node_state(next_idx).fetch_and(~1u, std::memory_order_release);
 }
+
+void SpinLock::lock() noexcept {
+  while (m_locked.exchange(true, std::memory_order_acquire)) hal::cpu::pause();
+}
+
+void SpinLock::unlock() noexcept {
+  m_locked.store(false, std::memory_order_release);
+}
+
+bool SpinLock::try_lock() noexcept {
+  return !m_locked.exchange(true, std::memory_order_acquire);
+}
 }  // namespace kernel

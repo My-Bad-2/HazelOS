@@ -50,8 +50,8 @@ __BEGIN_DECLS
 #define __section(sec)  [[gnu::section(#sec)]]
 #define __alias(symbol) [[gnu::alias(#symbol)]]
 
-#define __likely    [[gnu::likely]]
-#define __unlikely  [[gnu::unlikely]]
+#define __likely    [[likely]]
+#define __unlikely  [[unlikely]]
 #define __assume(x) [[assume((x))]]
 
 #define barrier() __asm__ __volatile__("" : : : "memory")

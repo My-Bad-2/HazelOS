@@ -39,57 +39,49 @@ collect_sources_filtered(
     DEBUG OFF
 )
 
-add_library(kernel_objs OBJECT ${KERNEL_SOURCES} ${UACPI_SOURCES} ${FLANTERM_SOURCES})
+function(define_kernel_link_step target_name symbol_source)
+    add_executable(${target_name} ${KERNEL_SOURCES} ${UACPI_SOURCES} ${FLANTERM_SOURCES})
+    target_include_directories(${target_name} PRIVATE ${KERNEL_INCLUDE_DIR})
 
-target_include_directories(kernel_objs PRIVATE ${KERNEL_INCLUDE_DIR})
-target_compile_definitions(kernel_objs PUBLIC UACPI_SIZED_FREES=1 UACPI_BAREBONES_MODE=1)
-target_compile_definitions(kernel_objs PRIVATE ${${_hazel_kernel_namespace}_CX_DEFINES})
+    target_compile_definitions(${target_name} PUBLIC UACPI_SIZED_FREES=1 UACPI_BAREBONES_MODE=1)
+    target_compile_definitions(${target_name} PRIVATE ${${_hazel_kernel_namespace}_CX_DEFINES})
 
-target_link_libraries(kernel_objs PRIVATE
-    freestnd_libs::${${_hazel_kernel_namespace}_ARCHITECTURE}
-    common
-    llvm-libc::llvm-libc
-)
+    target_link_libraries(${target_name} PRIVATE
+        freestnd_libs::${${_hazel_kernel_namespace}_ARCHITECTURE}
+        common
+        llvm-libc::llvm-libc
+    )
 
-target_apply_compile_settings(
-    TARGET kernel_objs
+    set_target_properties(${target_name} PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+
+    target_apply_compile_settings(
+    TARGET ${target_name}
     LANG "C;ASM"
     FLAGS
         ${${_hazel_kernel_namespace}_CX_FLAGS}
         ${${_hazel_kernel_namespace}_KERNEL_CX_FLAGS}
         ${KERNEL_CX_FLAGS}
         ${${_hazel_kernel_namespace}_CX_WARNING_FLAGS}
-)
-
-target_apply_compile_settings(
-    TARGET kernel_objs
-    LANG "C"
-    FLAGS
-        ${${_hazel_kernel_namespace}_C_FLAGS}
-)
-
-target_apply_compile_settings(
-    TARGET kernel_objs
-    LANG "CXX"
-    FLAGS
-        ${${_hazel_kernel_namespace}_CX_FLAGS}
-        ${${_hazel_kernel_namespace}_CXX_FLAGS}
-        ${${_hazel_kernel_namespace}_KERNEL_CX_FLAGS}
-        ${KERNEL_CX_FLAGS}
-        ${${_hazel_kernel_namespace}_CX_WARNING_FLAGS}
-        ${${_hazel_kernel_namespace}_CXX_WARNING_FLAGS}
-)
-
-function(define_kernel_link_step target_name symbol_source)
-    add_executable(${target_name} $<TARGET_OBJECTS:kernel_objs> ${symbol_source})
-    target_include_directories(${target_name} PRIVATE ${KERNEL_INCLUDE_DIR})
-
-    target_link_libraries(${target_name} PRIVATE
-        freestnd_libs::${${_hazel_kernel_namespace}_ARCHITECTURE}
-        llvm-libc::llvm-libc
     )
 
-    set_target_properties(${target_name} PROPERTIES CXX_SCAN_FOR_MODULES ON)
+    target_apply_compile_settings(
+        TARGET ${target_name}
+        LANG "C"
+        FLAGS
+            ${${_hazel_kernel_namespace}_C_FLAGS}
+    )
+
+    target_apply_compile_settings(
+        TARGET ${target_name}
+        LANG "CXX"
+        FLAGS
+            ${${_hazel_kernel_namespace}_CX_FLAGS}
+            ${${_hazel_kernel_namespace}_CXX_FLAGS}
+            ${${_hazel_kernel_namespace}_KERNEL_CX_FLAGS}
+            ${KERNEL_CX_FLAGS}
+            ${${_hazel_kernel_namespace}_CX_WARNING_FLAGS}
+            ${${_hazel_kernel_namespace}_CXX_WARNING_FLAGS}
+    )
 
     target_apply_linker_settings(
         TARGET ${target_name}
@@ -99,33 +91,7 @@ function(define_kernel_link_step target_name symbol_source)
     )
 endfunction()
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-    define_kernel_link_step(kernel_step1 misc/dummy_symbols.c)
-
-    add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/symbols_pass1.c
-        COMMAND
-            python3 ${CMAKE_SOURCE_DIR}/misc/scripts/map_to_c.py ${CMAKE_NM}
-            $<TARGET_FILE:kernel_step1> ${CMAKE_CURRENT_BINARY_DIR}/symbols_pass1.c
-        DEPENDS kernel_step1 ${CMAKE_SOURCE_DIR}/misc/scripts/map_to_c.py
-        COMMENT "Generating Pass 1 symbols (fixing size drift)..."
-    )
-
-    define_kernel_link_step(kernel_step2 ${CMAKE_CURRENT_BINARY_DIR}/symbols_pass1.c)
-
-    add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/symbols_final.c
-        COMMAND
-            python3 ${CMAKE_SOURCE_DIR}/misc/scripts/map_to_c.py ${CMAKE_NM}
-            $<TARGET_FILE:kernel_step2> ${CMAKE_CURRENT_BINARY_DIR}/symbols_final.c
-        DEPENDS kernel_step2 ${CMAKE_SOURCE_DIR}/misc/scripts/map_to_c.py
-        COMMENT "Generating Final symbols (byte-perfect convergence)..."
-    )
-
-    define_kernel_link_step(kernel_final ${CMAKE_CURRENT_BINARY_DIR}/symbols_final.c)
-else()
-    define_kernel_link_step(kernel_final "")
-endif()
+define_kernel_link_step(kernel_final "")
 
 set_target_properties(kernel_final PROPERTIES OUTPUT_NAME "${_hazel_kernel_namespace}.elf")
 

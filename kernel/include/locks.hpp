@@ -25,6 +25,16 @@ class MCSLock {
   void lock();
   void unlock();
 };
+
+class SpinLock {
+ private:
+  std::atomic<bool> m_locked{false};
+
+ public:
+  void lock() noexcept;
+  void unlock() noexcept;
+  bool try_lock() noexcept;
+};
 }  // namespace kernel
 
 #endif

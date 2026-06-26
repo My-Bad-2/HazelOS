@@ -48,6 +48,8 @@ class VirtualManager {
  public:
   static void initialize(limine_memmap_response* response) noexcept;
 
+  static bool map_mmio(VirtAddr virt, PhysAddr phys) noexcept;
+
  private:
   static void map_hhdm(
       AddressSpace& space,

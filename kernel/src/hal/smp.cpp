@@ -21,6 +21,7 @@ namespace smp {
 namespace {
 log::Logger smp_logger{"SMP", log::Level::Debug};
 std::atomic<bool> initialized{false};
+std::uintptr_t apic_base_addr{0};
 
 constinit std::array<PerCpuState*, MAX_CPU_COUNT> per_cpu_state = {};
 
@@ -33,9 +34,10 @@ __noreturn void ap_entry_point(limine_mp_info* info) {
   initialize_cpu_hw(cpu);
   memory::kernel_space->load();
 
+  initialize_cpu_arch(cpu);
+
   memory::arch::initialize_cpu();
   memory::arch::initialize_pat();
-  cpu->processor_state.initialize();
   cpu->hot.asid.initialize(memory::arch::flush_all_pcids);
 
   smp_logger.info("APIC %u online and waiting", cpu->hot.apic_id);
@@ -108,7 +110,9 @@ void initialize() noexcept {
       info->goto_address = ap_entry_point;
     } else {
       initialize_cpu_hw(cpu_state);
-      cpu_state->processor_state.initialize();
+      initialize_cpu_arch(cpu_state);
+      cpu_state->hot.asid.initialize(memory::arch::flush_all_pcids);
+
       smp_logger.info(
           "BSP (APIC %u) successfully migrated to the new state.",
           info->lapic_id

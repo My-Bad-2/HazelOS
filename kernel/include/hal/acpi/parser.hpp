@@ -1,4 +1,3 @@
-#include <utility>
 #ifndef KERNEL_INCLUDE_HAL_ACPI_PARSER_HPP
 #define KERNEL_INCLUDE_HAL_ACPI_PARSER_HPP 1
 
@@ -6,6 +5,7 @@
 #include <expected>
 #include <iterator>
 #include <type_traits>
+#include <utility>
 
 #include "compiler.h"
 #include "uacpi/tables.h"
