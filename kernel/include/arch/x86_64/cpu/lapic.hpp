@@ -59,11 +59,8 @@ class LocalApic {
  public:
   LocalApic() = default;
 
-  std::expected<void, ApicError> initialize(
-      std::uint8_t spurious_vec,
-      bool enable_x2apic,
-      std::uintptr_t mmio_base = 0xfee00000
-  ) noexcept;
+  std::expected<void, ApicError>
+  initialize(std::uint8_t spurious_vec, bool enable_x2apic) noexcept;
 
   void send_eoi() const noexcept;
 

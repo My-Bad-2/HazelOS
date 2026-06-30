@@ -21,8 +21,7 @@ void Logger::format_and_dispatch(
 ) const noexcept {
   const common::LockGuard _{g_lock};
 
-  char buffer[256];
-
+  static char buffer[1024];
   const int length = vsnprintf(buffer, sizeof(buffer), fmt, args);
 
   if (length > 0) {

@@ -56,6 +56,7 @@ void early_bsp_initialize() noexcept {
       CpuId{0},
       NumaId{0},
       ApicId{0},
+      0,
       0
   );
 
@@ -88,6 +89,19 @@ void initialize() noexcept {
 
     const memory::VirtAddr stack = stack_raw.to_virt();
 
+    const memory::PhysAddr panic_stack_raw =
+        memory::PhysicalManager::alloc_zeroed_pages(
+            KSTACK_SIZE / memory::PAGE_SIZE_SMALL
+        );
+
+    if (unlikely(panic_stack_raw.is_null()))
+      smp_logger.fatal(
+          "Failed to allocate panic stack for CPU %u! Halting init.",
+          info->lapic_id
+      );
+
+    const memory::VirtAddr panic_stack = stack_raw.to_virt();
+
     const memory::PhysAddr state_phys =
         memory::PhysicalManager::alloc_zeroed_pages(1);
     if (unlikely(state_phys.is_null()))
@@ -100,7 +114,8 @@ void initialize() noexcept {
         CpuId{i},
         NumaId{0},
         ApicId{info->lapic_id},
-        stack.raw() + KSTACK_SIZE
+        stack.raw() + KSTACK_SIZE,
+        panic_stack.raw() + KSTACK_SIZE
     );
 
     per_cpu_state[i]     = cpu_state;

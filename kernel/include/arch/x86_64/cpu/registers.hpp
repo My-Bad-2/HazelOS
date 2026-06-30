@@ -79,7 +79,9 @@ union CR4 {
     std::uint64_t cet        : 1;
     std::uint64_t pks        : 1;
     std::uint64_t uintr      : 1;
-    std::uint64_t reserved_2 : 38;
+    std::uint64_t reserved2  : 6;
+    std::uint64_t fred       : 1;
+    std::uint64_t reserved_2 : 31;
   } bits;
 };
 
@@ -111,6 +113,28 @@ union EFER {
   static constexpr std::uint32_t MSR_ID = 0xC0000080;
 
   explicit EFER(std::uint64_t val) : raw(val) {}
+};
+
+union STAR {
+  std::uint64_t raw;
+  struct {
+    std::uint64_t target_eip_32 : 32;
+    std::uint64_t syscall_cs_ss : 16;
+    std::uint64_t sysret_cs_ss  : 16;
+  } bits;
+
+  static constexpr std::uint32_t MSR_ID = 0xC0000081;
+  explicit STAR(std::uint64_t val = 0) : raw(val) {}
+};
+
+union LSTAR {
+  std::uint64_t raw;
+  struct {
+    std::uint64_t target_rip : 64;
+  } bits;
+
+  static constexpr std::uint32_t MSR_ID = 0xC0000082;
+  explicit LSTAR(std::uint64_t val = 0) : raw(val) {}
 };
 
 template <typename T>

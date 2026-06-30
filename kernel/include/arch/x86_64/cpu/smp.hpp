@@ -1,3 +1,4 @@
+#include "cpu/gdt.hpp"
 #ifndef KERNEL_ARCH_X86_64_CPU_SMP_HPP
 #define KERNEL_ARCH_X86_64_CPU_SMP_HPP 1
 
@@ -24,14 +25,16 @@ struct alignas(std::hardware_constructive_interference_size) PerCpuState final {
   x86_64::cpu::lapic::LocalApic lapic;
 
   CoreColdState cold;
+  x86_64::cpu::gdt::DescriptorTable gdt;
 
   constexpr PerCpuState(
       CpuId id,
       NumaId numa,
       ApicId apic,
-      std::uintptr_t stack
+      std::uintptr_t stack,
+      std::uintptr_t panic_stack
   ) noexcept
-      : self(this), hot(id, numa, apic, stack) {}
+      : self(this), hot(id, numa, apic, stack, panic_stack), gdt() {}
 
   PerCpuState(const PerCpuState&)            = delete;
   PerCpuState& operator=(const PerCpuState&) = delete;

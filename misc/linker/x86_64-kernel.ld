@@ -34,15 +34,28 @@ SECTIONS
 
     .text : ALIGN(CONSTANT(MAXPAGESIZE)) {
         __text_start = .;
-        PROVIDE(__isr_text_start = .);
-        *(.text.isr)
-        PROVIDE(__isr_text_end = .);
+        fred_entry_page = .;
+        KEEP(*(.text.fred_entry))
+        KEEP(*(.text.idt_entry))
 
         *(.text .text.*)
         *(.init .init.*)
         *(.fini .fini.*)
         __text_end = .;
     } :text
+
+    . = ALIGN(8);
+    .altinstructions : {
+        __alt_instructions_start = .;
+        KEEP(*(.altinstructions))
+        __alt_instructions_end = .;
+    }
+
+    .altinstr_replacement : {
+        __altinstr_replacement_start = .;
+        KEEP(*(.altinstr_replacement))
+        __altinstr_replacement_end = .;
+    }
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 

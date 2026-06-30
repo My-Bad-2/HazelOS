@@ -2,6 +2,7 @@
 
 #include "core/log_manager.hpp"
 #include "core/log_sink.hpp"
+#include "core/patcher.hpp"
 #include "core/uart.hpp"
 #include "cpu/smp.hpp"
 
@@ -17,6 +18,7 @@ void early_init() noexcept {
 
   log::LogManager::add_sink(&uart);
   hal::smp::early_bsp_initialize();
+  x86_64::AlternativePatcher::apply_patches();
 }
 }  // namespace hal
 }  // namespace kernel

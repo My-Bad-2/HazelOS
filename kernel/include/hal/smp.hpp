@@ -78,15 +78,21 @@ struct CoreHotState {
   std::atomic<std::uint32_t> preemption_count{0};
 
   std::uintptr_t stack_top{0};
+  std::uintptr_t panic_stack_top{0};
   memory::AsidManager asid;
 
   constexpr CoreHotState(
       CpuId i,
       NumaId n,
       ApicId a,
-      std::uintptr_t stack
+      std::uintptr_t stack,
+      std::uintptr_t panic_stack
   ) noexcept
-      : id(i), numa_node(n), apic_id(a), stack_top(stack) {}
+      : id(i),
+        numa_node(n),
+        apic_id(a),
+        stack_top(stack),
+        panic_stack_top(panic_stack) {}
 };
 
 struct alignas(std::hardware_constructive_interference_size) CoreColdState {

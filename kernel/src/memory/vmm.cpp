@@ -21,6 +21,9 @@ extern const std::uint8_t __text_start[], __text_end[];
 extern const std::uint8_t __rodata_start[], __rodata_end[];
 extern const std::uint8_t __data_start[], __data_end[];
 extern const std::uint8_t __bss_start[], __bss_end[];
+extern const std::uint8_t __alt_instructions_start[], __alt_instructions_end[];
+extern const std::uint8_t __altinstr_replacement_start[],
+    __altinstr_replacement_end[];
 }
 
 namespace kernel {

@@ -4,6 +4,7 @@
 #include <expected>
 
 #include "compiler.h"
+#include "cpu/interrupts/common.hpp"
 #include "cpu/lapic/regs.hpp"
 #include "cpu/registers.hpp"
 #include "hal/cpu.hpp"
@@ -18,26 +19,29 @@ namespace {
 constexpr std::uint64_t LAPIC_BASE_VIRT = 0xffffffffffffe000ul;
 }  // namespace
 
-std::expected<void, ApicError> LocalApic::initialize(
-    std::uint8_t spurious_vec,
-    bool enable_x2apic,
-    std::uintptr_t mmio_base
-) noexcept {
-  if (spurious_vec < 32)
+std::expected<void, ApicError>
+LocalApic::initialize(std::uint8_t spurious_vec, bool enable_x2apic) noexcept {
+  if (spurious_vec < interrupts::InterruptVectors::USER_BASE)
     __unlikely return std::unexpected(ApicError::InvalidVector);
-
-  memory::VirtualManager::map_mmio(
-      memory::VirtAddr(LAPIC_BASE_VIRT),
-      memory::PhysAddr(mmio_base)
-  );
-
-  m_is_x2apic  = enable_x2apic;
-  m_xapic_base = LAPIC_BASE_VIRT;
 
   auto base = x86_64::cpu::read<ApicBaseMsr>();
   base.enable_global();
   if (m_is_x2apic) base.enable_x2apic();
   x86_64::cpu::write(base);
+
+  if (!enable_x2apic)
+    static auto once = [&]() {
+      std::uintptr_t lapic_base = base.get_base();
+      memory::VirtualManager::map_mmio(
+          memory::VirtAddr(LAPIC_BASE_VIRT),
+          memory::PhysAddr(lapic_base)
+      );
+
+      return true;
+    }();
+
+  m_is_x2apic  = enable_x2apic;
+  m_xapic_base = LAPIC_BASE_VIRT;
 
   constexpr std::uint32_t SUPPORTS_EOI_BROADCAST_SUPPRESSION = (1 << 24);
 
@@ -67,7 +71,8 @@ std::expected<void, ApicError> LocalApic::arm_periodic(
     std::uint32_t ticks,
     TimerDivide div
 ) noexcept {
-  if (vector < 32) __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE)
+    __unlikely return std::unexpected(ApicError::InvalidVector);
 
   std::uint32_t lvt = LvtConfig{}
                           .vector(vector)
@@ -86,7 +91,8 @@ std::expected<void, ApicError> LocalApic::arm_tsc_deadline(
     std::uint8_t vector,
     std::uint64_t absolute_tsc
 ) noexcept {
-  if (vector < 32) __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE)
+    __unlikely return std::unexpected(ApicError::InvalidVector);
 
   std::uint32_t lvt = LvtConfig{}
                           .vector(vector)
@@ -183,7 +189,8 @@ void LocalApic::setup_nmi(bool on_lint1) noexcept {
 std::expected<void, ApicError> LocalApic::setup_profiler(
     std::uint8_t vector
 ) noexcept {
-  if (vector < 32) __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE)
+    __unlikely return std::unexpected(ApicError::InvalidVector);
 
   std::uint32_t lvt = LvtConfig{}.vector(vector).mask(false).raw();
   write(LVT_PMC{lvt});
@@ -195,7 +202,8 @@ std::expected<void, ApicError> LocalApic::setup_cmci(
     std::uint8_t vector
 ) noexcept {
   if (m_max_lvt_entries < 6) return std::unexpected(ApicError::HardwareFault);
-  if (vector < 32) __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE)
+    __unlikely return std::unexpected(ApicError::InvalidVector);
 
   std::uint32_t lvt = LvtConfig{}.vector(vector).mask(false).raw();
   write(LVT_CMCI{lvt});
@@ -204,7 +212,8 @@ std::expected<void, ApicError> LocalApic::setup_cmci(
 
 std::expected<void, ApicError>
 LocalApic::broadcast_ipi(std::uint8_t vector, bool include_self) noexcept {
-  if (vector < 32) __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE)
+    __unlikely return std::unexpected(ApicError::InvalidVector);
 
   auto broadcast = IcrConfig{}
                        .vector(vector)

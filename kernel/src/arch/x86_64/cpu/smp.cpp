@@ -3,11 +3,12 @@
 #include <cstdint>
 #include <utility>
 
-#include "compiler.h"
 #include "core/logger.hpp"
 #include "cpu/feats.hpp"
+#include "cpu/interrupts.hpp"
+#include "cpu/interrupts/common.hpp"
+#include "cpu/interrupts/idt.hpp"
 #include "cpu/registers.hpp"
-#include "hal/acpi.hpp"
 #include "hal/smp.hpp"
 
 namespace kernel {
@@ -28,33 +29,35 @@ union KernelGSBase {
   static constexpr std::uint32_t MSR_ID = 0xc0000102;
 };
 
-PerCpuState bsp_state(CpuId{0}, NumaId{0}, ApicId{0}, 0);
 log::Logger smp_log_arch{"SMP"};
 
-std::uintptr_t fetch_apic_address() noexcept {
-  auto res = acpi::get_table<acpi::tables::Madt>("APIC");
+extern "C" const std::uintptr_t isr_stub_table[256];
+extern "C" void* fred_entry_page;
 
-  if (!res.has_value()) smp_log_arch.fatal("Unable to fetch MADT Table!");
+void populate_idt(x86_64::cpu::interrupts::idt::Table<256>& table) noexcept {
+  using namespace x86_64::cpu::interrupts;
+  constexpr std::uint16_t KERNEL_CS = 0x08;
 
-  auto& madt_accessor      = res.value();
-  std::uint64_t lapic_addr = madt_accessor->local_apic_address;
+  for (std::size_t i = 0; i < 256; ++i) {
+    auto handler = reinterpret_cast<void (*)()>(isr_stub_table[i]);
 
-  for (const auto& entry : madt_accessor->subtables()) {
-    if (entry.length < sizeof(acpi::SubtableHeader)) __unlikely break;
-
-    if (entry.type == std::to_underlying(
-                          acpi::tables::MadtType::LOCAL_APIC_ADDRESS_OVERRIDE
-                      )) {
-      auto* override_record =
-          reinterpret_cast<const acpi::tables::MadtLocalApicOverride*>(&entry);
-
-      lapic_addr = override_record->local_apic_address;
-      break;
+    if ((i == InterruptVectors::NMI) || (i == InterruptVectors::DOUBLE_FAULT) ||
+        (i == InterruptVectors::MACHINE_CHECK)) {
+      table.set_handler(
+          i,
+          handler,
+          KERNEL_CS,
+          idt::GateType::Interrupt,
+          PrivilegeLevel::RING0,
+          idt::IstIndex::IST1
+      );
+    } else {
+      table.set_handler(i, handler, KERNEL_CS);
     }
   }
-
-  return lapic_addr;
 }
+
+x86_64::cpu::interrupts::idt::Table<256> global_idt;
 }  // namespace
 
 void initialize_cpu_hw(PerCpuState* cpu) noexcept {
@@ -66,15 +69,44 @@ void initialize_cpu_hw(PerCpuState* cpu) noexcept {
 }
 
 void initialize_cpu_arch(PerCpuState* cpu) noexcept {
-  static std::uintptr_t lapic_address = 0;
-  if (lapic_address == 0) lapic_address = fetch_apic_address();
+  using namespace x86_64::cpu::interrupts;
 
   cpu->processor_state.initialize();
+  cpu->gdt.load(cpu->hot.stack_top, cpu->hot.panic_stack_top);
+
+  static bool once = []() {
+    populate_idt(global_idt);
+    return true;
+  }();
+
+  fred::FRED_STKLVLS stklvls{0};
+
+  stklvls.bits.nmi           = 1;
+  stklvls.bits.double_fault  = 1;
+  stklvls.bits.machine_check = 1;
+
+  EventConfig config{fred_entry_page, stklvls, global_idt};
+
+  auto delivery_res = DeliveryManager::initialize(config);
+
+  if (!delivery_res)
+    smp_log_arch.fatal(
+        "Failed to initialize Interrupts! Code: %u",
+        delivery_res.error()
+    );
+
+  smp_log_arch.info(
+      "Active Interrupt Mode: %s",
+      (delivery_res.value() == ActiveMode::FRED) ? "FRED" : "IDT"
+  );
 
   bool has_x2apic =
       cpu->processor_state.has_feature(x86_64::cpu::CpuFeature::X2APIC);
 
-  auto res = cpu->lapic.initialize(255, has_x2apic, lapic_address);
+  auto res = cpu->lapic.initialize(
+      x86_64::cpu::interrupts::InterruptVectors::APIC_SPURIOUS_INT,
+      has_x2apic
+  );
 
   if (!res.has_value())
     smp_log_arch.fatal("LAPIC initialization failed! Code: %u", res.error());

@@ -82,6 +82,16 @@
   .cfi_adjust_cfa_offset -\value
 .endm
 
+.macro SAVE_REG reg, offset
+  movq %\reg, \offset(%rsp)
+  .cfi_rel_offset \reg, \offset
+.endm
+
+.macro RESTORE_REG reg, offset
+  movq \offset(%rsp), %\reg
+  .cfi_restore \reg
+.endm
+
 .macro PUSHA_64
   push_reg %rax; push_reg %rbx; push_reg %rcx; push_reg %rdx
   push_reg %rsi; push_reg %rdi; push_reg %rbp; push_reg %r8
@@ -94,6 +104,48 @@
   pop_reg %r11; pop_reg %r10; pop_reg %r9;  pop_reg %r8
   pop_reg %rbp; pop_reg %rdi; pop_reg %rsi; pop_reg %rdx
   pop_reg %rcx; pop_reg %rbx; pop_reg %rax
+.endm
+
+.macro PUSHA_64_MOVQ
+  subq $120, %rsp
+  .cfi_adjust_cfa_offset 120
+  
+  SAVE_REG r15, 112
+  SAVE_REG r14, 104
+  SAVE_REG r13, 96
+  SAVE_REG r12, 88
+  SAVE_REG r11, 80
+  SAVE_REG r10, 72
+  SAVE_REG r9,  64
+  SAVE_REG r8,  56
+  SAVE_REG rbp, 48
+  SAVE_REG rdi, 40
+  SAVE_REG rsi, 32
+  SAVE_REG rdx, 24
+  SAVE_REG rcx, 16
+  SAVE_REG rbx, 8
+  SAVE_REG rax, 0
+.endm
+
+.macro POPA_64_MOVQ
+  RESTORE_REG r15, 112
+  RESTORE_REG r14, 104
+  RESTORE_REG r13, 96
+  RESTORE_REG r12, 88
+  RESTORE_REG r11, 80
+  RESTORE_REG r10, 72
+  RESTORE_REG r9,  64
+  RESTORE_REG r8,  56
+  RESTORE_REG rbp, 48
+  RESTORE_REG rdi, 40
+  RESTORE_REG rsi, 32
+  RESTORE_REG rdx, 24
+  RESTORE_REG rcx, 16
+  RESTORE_REG rbx, 8
+  RESTORE_REG rax, 0
+  
+  addq $120, %rsp
+  .cfi_adjust_cfa_offset -120
 .endm
 
 .macro FRAME_BEGIN
