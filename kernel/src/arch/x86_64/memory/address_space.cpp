@@ -1,12 +1,15 @@
 #include "memory/address_space.hpp"
 
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <utility>
 
 #include "core/logger.hpp"
 #include "cpu/feats.hpp"
 #include "hal/smp.hpp"
+#include "hal/smp/dispatcher.hpp"
+#include "hal/smp/ipi.hpp"
 #include "memory/address/physical.hpp"
 #include "memory/address/virtual.hpp"
 #include "memory/paging/flags.hpp"
@@ -302,24 +305,46 @@ void AddressSpace::dispatch_tlb_shootdown(VirtAddr virt) noexcept {
   const std::size_t word_idx       = current_core / 64;
   const std::uint64_t bit          = 1ul << (current_core % 64);
 
-  const std::uint64_t local_active =
-      m_active_cpus[word_idx].load(std::memory_order_relaxed);
-  if (local_active) arch::flush_local_page(virt);
+  if (m_active_cpus[word_idx].load(std::memory_order_relaxed) & bit)
+    arch::flush_local_page(virt);
 
-  std::array<std::uint64_t, MASK_WORDS> ipi_mask = {};
-
-  bool has_remote_cores = false;
+  std::size_t remote_count = 0;
+  std::array<std::uint64_t, MASK_WORDS> remote_masks{};
 
   for (std::size_t i = 0; i < MASK_WORDS; ++i) {
-    ipi_mask[i] = m_active_cpus[i].load(std::memory_order_relaxed);
+    remote_masks[i] = m_active_cpus[i].load(std::memory_order_relaxed);
 
-    if (i == word_idx) ipi_mask[i] &= ~bit;
-    if (ipi_mask[i] != 0) has_remote_cores = true;
+    if (i == word_idx) remote_masks[i] &= ~bit;
+    remote_count += static_cast<std::size_t>(std::popcount(remote_masks[i]));
   }
 
-  if (has_remote_cores) {
-    // Send shootdown IPI (ipi_mask, MASK_WORDS, virt)
+  if (remote_count == 0) return;
+
+  std::atomic<std::size_t> pending_acks{remote_count};
+
+  using namespace hal::smp;
+
+  ipi::Message msg{};
+  msg.command                 = ipi::Command::TLB_SHOOTDOWN;
+  msg.priority                = ipi::Priority::IMMEDIATE;
+  msg.payload.tlb.virt_start  = virt.raw();
+  msg.payload.tlb.ack_counter = &pending_acks;
+
+  for (std::size_t i = 0; i < MASK_WORDS; ++i) {
+    std::uint64_t mask = remote_masks[i];
+    while (mask != 0) {
+      std::uint32_t bit_idx =
+          static_cast<std::uint32_t>(std::countr_zero(mask));
+      std::uint32_t target_core = (i * 64) + bit_idx;
+
+      PerCpuState& target_cpu = get_cpu_state(target_core);
+      ipi::Dispatcher::send(target_cpu, {&msg, 1});
+
+      mask &= ~(1ul << bit_idx);
+    }
   }
+
+  while (pending_acks.load(std::memory_order_acquire) > 0) hal::cpu::pause();
 }
 
 void AddressSpace::dispatch_tlb_shootdown_context() noexcept {
@@ -327,24 +352,45 @@ void AddressSpace::dispatch_tlb_shootdown_context() noexcept {
   const std::size_t word_idx       = current_core / 64;
   const std::uint64_t bit          = 1ul << (current_core % 64);
 
-  const std::uint64_t local_active =
-      m_active_cpus[word_idx].load(std::memory_order_relaxed) & bit;
-  if (local_active) arch::flush_local_context();
+  if (m_active_cpus[word_idx].load(std::memory_order_relaxed) & bit)
+    arch::flush_local_context();
 
-  std::array<std::uint64_t, MASK_WORDS> ipi_mask = {};
-
-  bool has_remote_cores = false;
+  std::size_t remote_count                           = 0;
+  std::array<std::uint64_t, MASK_WORDS> remote_masks = {};
 
   for (std::size_t i = 0; i < MASK_WORDS; ++i) {
-    ipi_mask[i] = m_active_cpus[i].load(std::memory_order_relaxed);
+    remote_masks[i] = m_active_cpus[i].load(std::memory_order_relaxed);
 
-    if (i == word_idx) ipi_mask[i] &= ~bit;
-    if (ipi_mask[i] != 0) has_remote_cores = true;
+    if (i == word_idx) remote_masks[i] &= ~bit;
+    remote_count += static_cast<std::size_t>(std::popcount(remote_masks[i]));
   }
 
-  if (has_remote_cores) {
-    // Send TLB shootdown context ipi (cpu_ipi_mask, word_count)
+  if (remote_count == 0) return;
+
+  std::atomic<std::size_t> pending_acks{remote_count};
+
+  using namespace hal::smp;
+
+  ipi::Message msg{};
+  msg.command                 = ipi::Command::TLB_SHOOTDOWN;
+  msg.priority                = ipi::Priority::IMMEDIATE;
+  msg.payload.tlb.ack_counter = &pending_acks;
+
+  for (std::size_t i = 0; i < MASK_WORDS; ++i) {
+    std::uint64_t mask = remote_masks[i];
+    while (mask != 0) {
+      std::uint32_t bit_idx =
+          static_cast<std::uint32_t>(std::countr_zero(mask));
+      std::uint32_t target_core = (i * 64) + bit_idx;
+
+      PerCpuState& target_cpu = get_cpu_state(target_core);
+      ipi::Dispatcher::send(target_cpu, {&msg, 1});
+
+      mask &= ~(1ul << bit_idx);
+    }
   }
+
+  while (pending_acks.load(std::memory_order_acquire) > 0) hal::cpu::pause();
 }
 
 void AddressSpace::handle_shootdown_context_ipi() noexcept {

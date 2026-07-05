@@ -11,6 +11,11 @@ std::expected<ActiveMode, InterruptErrors> DeliveryManager::initialize(
     const EventConfig& config
 ) noexcept {
   ProcessorState& state = get_current_state();
+  auto cr4              = read<CR4>();
+
+  if (state.has_feature(CpuFeature::FSGSBASE)) cr4.bits.fsgsbase = 1;
+  write(cr4);
+
   if (state.has_feature(CpuFeature::FRED)) {
     fred::FRED_CONFIG fred_cfg{};
 
@@ -20,7 +25,6 @@ std::expected<ActiveMode, InterruptErrors> DeliveryManager::initialize(
     write(config.fred_stack_levels);
     write(fred_cfg);
 
-    auto cr4      = read<CR4>();
     cr4.bits.fred = 1;
     write(cr4);
 

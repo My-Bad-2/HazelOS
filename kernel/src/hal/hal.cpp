@@ -3,6 +3,7 @@
 #include "core/log_sink.hpp"
 #include "core/logger.hpp"
 #include "hal/acpi.hpp"
+#include "hal/cpu.hpp"
 #include "hal/smp.hpp"
 
 namespace kernel {
@@ -19,6 +20,7 @@ void initialize() noexcept {
     );
 
   hal::smp::initialize();
+  hal::cpu::enable_interrupts();
 }
 }  // namespace hal
 }  // namespace kernel

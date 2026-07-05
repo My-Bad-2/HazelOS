@@ -1,7 +1,7 @@
 include_guard()
 
 set(HAZEL_DEP_KLIBC_REPOSITORY
-    "git@github.com:My-Bad-2/baremetal-llvm-libc.git"
+    "https://github.com/My-Bad-2/baremetal-llvm-libc.git"
     CACHE STRING
     "Baremetal libc repository URL"
 )

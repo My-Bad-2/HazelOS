@@ -1,12 +1,14 @@
-#include <new>
 #ifndef KERNEL_HAL_SMP_HPP
 #define KERNEL_HAL_SMP_HPP 1
 
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <new>
+#include <span>
 
 #include "compiler.h"
+#include "hal/smp/ipi.hpp"
 #include "memory/vm/asid.hpp"
 
 namespace kernel {
@@ -14,7 +16,6 @@ namespace hal {
 namespace smp {
 enum class CpuId : std::uint32_t {};
 enum class NumaId : std::uint32_t {};
-enum class ApicId : std::uint32_t {};
 
 namespace PreemptOffset {
 constexpr std::uint32_t THREAD   = 1 << 0;
@@ -24,17 +25,7 @@ constexpr std::uint32_t NMI      = 1 << 20;
 constexpr std::uint32_t RESCHED  = 1u << 31;
 }  // namespace PreemptOffset
 
-enum class IpiCommand : std::uint8_t {
-  NONE = 0,
-  TLB_SHOOTDOWN,
-  RESCHEDULE,
-  PANIC_SYNC,
-};
-
-struct IpiMessage {
-  IpiCommand command;
-  std::uint64_t payload;
-};
+enum class CpuActivity : std::uint8_t { Active, Idle };
 
 union PreemptCount {
   uint32_t raw;
@@ -74,41 +65,39 @@ union PreemptCount {
 struct CoreHotState {
   const CpuId id;
   const NumaId numa_node;
-  const ApicId apic_id;
   std::atomic<std::uint32_t> preemption_count{0};
 
   std::uintptr_t stack_top{0};
   std::uintptr_t panic_stack_top{0};
   memory::AsidManager asid;
 
+  std::atomic<CpuActivity> activity{CpuActivity::Active};
+  std::atomic<bool> urgent_ipi_pending{false};
+  std::atomic<bool> nmi_pending{false};
+
+  ipi::IpiQueue<64> immediate_queue;
+  ipi::IpiQueue<16> nmi_queue;
+
   constexpr CoreHotState(
       CpuId i,
       NumaId n,
-      ApicId a,
       std::uintptr_t stack,
       std::uintptr_t panic_stack
   ) noexcept
-      : id(i),
-        numa_node(n),
-        apic_id(a),
-        stack_top(stack),
-        panic_stack_top(panic_stack) {}
+      : id(i), numa_node(n), stack_top(stack), panic_stack_top(panic_stack) {}
 };
 
 struct alignas(std::hardware_constructive_interference_size) CoreColdState {
-  std::atomic<std::uint32_t> ipi_head{0};
-  alignas(
-      std::hardware_constructive_interference_size
-  ) std::atomic<std::uint32_t> ipi_tail{0};
-
-  std::array<IpiMessage, 16> ipi_mailbox{};
+  ipi::IpiQueue<128> idle_queue;
 };
 
 class PerCpuState;
 
 void initialize() noexcept;
 
+const std::span<PerCpuState*> get_cpu_topology() noexcept;
 PerCpuState& get_cpu_state() noexcept;
+PerCpuState& get_cpu_state(std::size_t id) noexcept;
 std::uint32_t get_current_core_id() noexcept;
 }  // namespace smp
 }  // namespace hal

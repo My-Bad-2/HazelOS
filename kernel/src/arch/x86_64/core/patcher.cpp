@@ -41,7 +41,7 @@ void AlternativePatcher::apply_patches() noexcept {
   serialize_pipeline(state);
 }
 
-bool AlternativePatcher::fixup_instructions(
+bool AlternativePatcher::fixup_and_audit_instructions(
     std::uint8_t* buffer,
     const std::uint8_t* src,
     const std::uint8_t* dest,
@@ -60,6 +60,8 @@ bool AlternativePatcher::fixup_instructions(
 
     x86_64::Insn insn = decode_res.value();
     if (insn.length == 0 || cursor + insn.length > len) return false;
+
+    if (!audit_instruction_semantics(insn)) return false;
 
     if (insn.is_rel32_branch || insn.has_rip_relative)
       adjust_rel32(
@@ -123,6 +125,41 @@ bool AlternativePatcher::adjust_rel8(
   return true;
 }
 
+bool AlternativePatcher::audit_instruction_semantics(
+    const Insn& insn
+) noexcept {
+  if (insn.is_locked) {
+    // If ModRm 'mod' bits are 0b11, it targets a register. That's a #UD
+    if (!insn.has_modrm || ((insn.modrm >> 6) & 0b11) == 0b11) return false;
+
+    // Only a strict no. of math/logic opcodes can be locked.
+    if (!insn.is_two_byte) {
+      const std::uint8_t op = insn.opcode;
+
+      // ADD, OR, ADC, SBB, AND, SUB, XOR
+      const bool valid_math = (op >= 0x00 && op <= 0x35);
+      const bool valid_grp  = (op >= 0xfe);                // INC, DEC, NOT, NEG
+      const bool valid_xchg = (op == 0x86 || op == 0x87);  // XCHG
+
+      if (!valid_math && !valid_grp && !valid_xchg) return false;
+    } else {
+      const std::uint8_t op      = insn.opcode;
+      const bool valid_bts       = (op >= 0xab && op <= 0xbb);  // BTS, BTR, BTC
+      const bool valid_cmpxchg8b = (op == 0xc7);
+      const bool valid_xadd =
+          (op == 0xb0 || op == 0xb1 || op == 0xc0 ||
+           op == 0xc1);  // CMPXCHG, XADD
+
+      if (!valid_bts && !valid_xadd && !valid_cmpxchg8b) return false;
+    }
+  }
+
+  if (insn.has_fs_override || insn.has_gs_override)
+    if (insn.is_rel8_branch || insn.is_rel32_branch) return false;
+
+  return true;
+}
+
 void AlternativePatcher::apply_single_patch(const AltEntry& entry) noexcept {
   if (entry.repl_len > entry.instr_len)
     patch_logger.fatal("Alternative replacement is larger than original code!");
@@ -136,7 +173,7 @@ void AlternativePatcher::apply_single_patch(const AltEntry& entry) noexcept {
 
   memcpy(buffer, src, entry.repl_len);
 
-  if (!fixup_instructions(buffer, src, dest, entry.repl_len))
+  if (!fixup_and_audit_instructions(buffer, src, dest, entry.repl_len))
     patch_logger.fatal("Decoder failed during alternative patch fixups.");
 
   memcpy(dest, buffer, entry.repl_len);

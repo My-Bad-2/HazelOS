@@ -4,14 +4,10 @@
 #include <expected>
 
 #include "cpu/interrupts/common.hpp"
-#include "cpu/interrupts/dispatch.hpp"
 #include "cpu/interrupts/fred.hpp"
 #include "cpu/interrupts/idt.hpp"
 
-namespace kernel {
-namespace x86_64 {
-namespace cpu {
-namespace interrupts {
+namespace kernel::x86_64::cpu::interrupts {
 struct EventConfig {
   void* fred_entry_page;
   fred::FRED_STKLVLS fred_stack_levels;
@@ -24,9 +20,6 @@ class DeliveryManager {
       const EventConfig& config
   ) noexcept;
 };
-}  // namespace interrupts
-}  // namespace cpu
-}  // namespace x86_64
-}  // namespace kernel
+}  // namespace kernel::x86_64::cpu::interrupts
 
 #endif

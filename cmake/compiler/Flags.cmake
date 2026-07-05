@@ -102,6 +102,7 @@ if(${PROJECT_NAME}_ARCHITECTURE STREQUAL "x86_64")
         -mno-mmx
         -mno-sse
         -mno-sse2
+        -mcx16
         -mcmodel=kernel
         -mstack-alignment=8
     )

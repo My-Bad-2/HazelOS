@@ -16,6 +16,7 @@ extern volatile limine_memmap_request memmap_request;
 extern volatile limine_executable_address_request kernel_addr_request;
 extern volatile limine_mp_request smp_request;
 extern volatile limine_rsdp_request rsdp_request;
+extern volatile limine_tsc_frequency_request tsc_request;
 }  // namespace boot
 
 void kernel_main();

@@ -78,7 +78,11 @@ class Dispatcher {
     cpu.enter_hard_irq();
     std::atomic_signal_fence(std::memory_order_seq_cst);
 
-    // Fetch the bounded irq thread from the per-cpu-state;
+    // Fetch the bounded irq thread from the per-cpu-state
+
+    // Manage ipis
+    ack_hardware(cpu);
+    if (vector == URGENT_IPI) cpu.process_ipis();
 
     std::atomic_signal_fence(std::memory_order_seq_cst);
     cpu.exit_hard_irq();
@@ -93,8 +97,8 @@ class Dispatcher {
   template <HardwareFrame Frame>
   __hot __always_inline static void
   handle_syscall(PerCpuState& cpu, Frame* frame, bool from_user) noexcept {
-    if (!from_user)
-      __unlikely interrupt_logger.fatal("SYSCALL executed from Ring 0");
+    if (!from_user) [[unlikely]]
+      interrupt_logger.fatal("SYSCALL executed from Ring 0");
 
     // Dispatch syscall
   }
@@ -112,10 +116,10 @@ class Dispatcher {
       case EventType::HARDWARE_EXCEPTION: {
         cpu.enter_hard_irq();
 
-        if (vector == InterruptVectors::PAGE_FAULT && from_user) __likely {
-            // Wakeup the pager thread
-          }
-        else {
+        if (vector == InterruptVectors::PAGE_FAULT && from_user) [[likely]] {
+          // Wakeup the pager thread
+        } else {
+          dump_registers(frame);
           interrupt_logger.fatal("Fatal Hardware Exception");
         }
 
@@ -136,6 +140,7 @@ class Dispatcher {
         cpu.enter_nmi();
         std::atomic_signal_fence(std::memory_order_seq_cst);
         // Process NMI
+        cpu.process_nmis();
         std::atomic_signal_fence(std::memory_order_seq_cst);
         cpu.exit_nmi();
         break;
@@ -169,16 +174,12 @@ class Dispatcher {
     hal::smp::PerCpuState& cpu = hal::smp::get_cpu_state();
     const bool from_user       = (frame->cs & 3) == 3;
 
-    if (type == EventType::EXT_INTERRUPT)
-      __likely handle_external(cpu, frame, vector, from_user);
-    else if (type == EventType::OTHER && vector == 1)
-      __likely handle_syscall(cpu, frame, from_user);
-    else
-      __unlikely
-          handle_other_events(cpu, frame, type, vector, err_code, from_user);
-
-    dump_registers(frame);
-    interrupt_logger.fatal("Interrupts are unsupported right now");
+    if (type == EventType::EXT_INTERRUPT) [[likely]]
+      handle_external(cpu, frame, vector, from_user);
+    else if (type == EventType::OTHER && vector == 1) [[likely]]
+      handle_syscall(cpu, frame, from_user);
+    else [[unlikely]]
+      handle_other_events(cpu, frame, type, vector, err_code, from_user);
   }
 };
 

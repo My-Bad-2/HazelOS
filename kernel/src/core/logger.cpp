@@ -4,8 +4,10 @@
 #include <string_view>
 
 #include "core/log_manager.hpp"
+#include "cpu/smp.hpp"
 #include "guards.hpp"
 #include "hal/cpu.hpp"
+#include "hal/smp.hpp"
 #include "locks.hpp"
 
 namespace kernel {
@@ -85,6 +87,7 @@ void Logger::fatal(const char* fmt, ...) const noexcept {
   format_and_dispatch(Level::Fatal, fmt, args);
   va_end(args);
 
+  hal::smp::get_cpu_state().panic_sync();
   hal::cpu::halt(false);
 }
 }  // namespace log

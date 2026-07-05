@@ -15,8 +15,11 @@ void InsnDecoder::flag_branches(
     Insn& insn,
     std::uint8_t opcode,
     bool is_two_byte,
+    bool is_three_byte,
     std::uint8_t next_pos
 ) noexcept {
+  if (is_three_byte) return;  // No branches in 3-byte map
+
   if (!is_two_byte) {
     if (opcode == 0xe8 || opcode == 0xe9) {
       insn.is_rel32_branch = true;
@@ -33,7 +36,13 @@ void InsnDecoder::flag_branches(
   }
 }
 
-bool InsnDecoder::needs_modrm(std::uint8_t opcode, bool is_two_byte) noexcept {
+bool InsnDecoder::needs_modrm(
+    std::uint8_t opcode,
+    bool is_two_byte,
+    bool is_three_byte
+) noexcept {
+  if (is_three_byte) return true;  // All 3-byte opcodes require a ModR/M byte.
+
   if (!is_two_byte) {
     // Standard ALU ops (ADD, OR, AND, SUB, XOR, CMP)
     // For 0x00 to 0x3f: if the 3rd bit is 0, it requires ModRM
@@ -118,11 +127,17 @@ std::expected<std::uint8_t, DecoderError> InsnDecoder::parse_modrm_sib_disp(
 std::uint8_t InsnDecoder::get_immediate_size(
     std::uint8_t opcode,
     bool is_two_byte,
+    bool is_three_byte,
+    std::uint8_t escape_prefix,
     bool has_66,
     bool has_rex_w,
     bool has_modrm,
     std::uint8_t modrm
 ) noexcept {
+  // `0x0f 0x38` never has an immediate.
+  // `0x0f 0x3a` always has a 1-byte immediate.
+  if (is_three_byte) return (escape_prefix == 0x3a) ? 1 : 0;
+
   if (!is_two_byte) {
     if (has_modrm && (opcode == 0xf6 || opcode == 0xf7)) {
       std::uint8_t reg = (modrm >> 3) & 0b111;
@@ -172,16 +187,36 @@ std::expected<Insn, DecoderError> InsnDecoder::decode(
     auto b = stream.peek();
     if (!b) return std::unexpected(b.error());
 
-    if (*b == 0x66) has_66_prefix = true;
-    if (*b == 0x67) has_67_prefix = true;
+    switch (*b) {
+      case 0x66:
+        has_66_prefix = true;
+        break;
+      case 0x67:
+        has_67_prefix = true;
+        break;
+      case 0xf0:
+        insn.is_locked = true;
+        break;
+      case 0x64:
+        insn.has_fs_override = true;
+        break;
+      case 0x65:
+        insn.has_gs_override = true;
+        break;
+      case 0xF2:  // REP
+      case 0xF3:  // REPE
+      case 0x2E:  // CS
+      case 0x36:  // SS
+      case 0x3E:  // DS
+      case 0x26:  // ES
+        break;
+      default:
+        goto done_prefixes;
+    }
 
-    if (*b == 0x66 || *b == 0x67 || *b == 0xf0 || *b == 0xf2 || *b == 0xf3 ||
-        *b == 0x2e || *b == 0x36 || *b == 0x3e || *b == 0x26 || *b == 0x64 ||
-        *b == 0x65)
-      __maybe_unused auto _ = stream.read();
-    else
-      break;
+    __maybe_unused auto _ = stream.read();
   }
+done_prefixes:
 
   // Parse REX Prefix (0x40 to 0x4f)
   bool has_rex_w = false;  // REX.W promotes operand size to 64-bit
@@ -203,21 +238,31 @@ std::expected<Insn, DecoderError> InsnDecoder::decode(
   auto opcode_res = stream.read();
   if (!opcode_res) return std::unexpected(opcode_res.error());
   std::uint8_t opcode = *opcode_res;
-  bool is_two_byte    = false;
+
+  bool is_two_byte           = false;
+  bool is_three_byte         = false;
+  std::uint8_t escape_prefix = 0;
 
   if (opcode == 0x0f) {
-    is_two_byte    = true;
     auto escape_op = stream.read();
     if (!escape_op) return std::unexpected(escape_op.error());
     opcode = *escape_op;
 
-    if (opcode == 0x38 || opcode == 0x3a)
-      return std::unexpected(DecoderError::THREE_BYTE_OPCODE_UNSUPPORTED);
+    if (opcode == 0x38 || opcode == 0x3a) {
+      is_three_byte = true;
+      escape_prefix = opcode;
+
+      auto real_opcode = stream.read();
+      if (!real_opcode) return std::unexpected(real_opcode.error());
+      opcode = *real_opcode;
+    } else {
+      is_two_byte = true;
+    }
   }
 
-  flag_branches(insn, opcode, is_two_byte, stream.position());
+  flag_branches(insn, opcode, is_two_byte, is_three_byte, stream.position());
 
-  bool has_modrm     = needs_modrm(opcode, is_two_byte);
+  bool has_modrm     = needs_modrm(opcode, is_two_byte, is_three_byte);
   uint8_t modrm_byte = 0;
 
   if (has_modrm) {
@@ -226,9 +271,16 @@ std::expected<Insn, DecoderError> InsnDecoder::decode(
     modrm_byte = *parse_res;
   }
 
+  insn.modrm       = modrm_byte;
+  insn.has_modrm   = has_modrm;
+  insn.opcode      = opcode;
+  insn.is_two_byte = is_two_byte;
+
   std::uint8_t imm_size = get_immediate_size(
       opcode,
       is_two_byte,
+      is_three_byte,
+      escape_prefix,
       has_66_prefix,
       has_rex_w,
       has_modrm,

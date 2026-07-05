@@ -1,3 +1,4 @@
+#include <utility>
 #ifndef KERNEL_ARCH_CPU_FEATS_HPP
 #define KERNEL_ARCH_CPU_FEATS_HPP 1
 
@@ -222,7 +223,57 @@ enum class CpuFeature : std::uint16_t {
   PERFCTR_CORE   = 224 + 23,  // Core Performance Counter Extensions
   PERFCTR_NB     = 224 + 24,  // NB Performance Counter Extensions
 
-  COUNT = 256
+  // Leaf 0x80000007, EDX
+  TSC_EXTENDED      = 256 + 0,  // TS3 Temperature Sensor
+  FID               = 256 + 1,  // Frequency ID Control
+  VID               = 256 + 2,  // Voltage ID Control
+  TTP               = 256 + 3,  // THERMTRIP
+  TM_AMD            = 256 + 4,  // AMD Thermal Hardware Control
+  STC               = 256 + 5,  // Software Thermal Control
+  _100MHzSteps      = 256 + 6,  // 100 MHz Multiplier Control
+  HwpState          = 256 + 7,  // Hardware P-State Control
+  TSC_INVARIANT     = 256 + 8,  // Invariant TSC (Always runs at constant rate!)
+  CPB               = 256 + 9,  // Core Performance Boost
+  EffFreqRO         = 256 + 10,  // Read-only Effective Frequency Interface
+  PROC_FEEDBACK     = 256 + 11,  // Processor Feedback Interface
+  PROC_POWER_REP    = 256 + 12,  // Processor Power Reporting
+  CONNECTED_STANDBY = 256 + 13,  // Connected Standby
+  RAPL              = 256 + 14,  // Running Average Power Limit
+
+  COUNT = 288
+};
+
+enum class KvmFeature : std::uint8_t {
+  CLOCK_SOURCE         = 0,   // KVM_FEATURE_CLOCKSOURCE
+  CLOCK_SOURCE2        = 3,   // KVM_FEATURE_CLOCKSOURCE2
+  ASYNC_PAGE_FAULT     = 4,   // KVM_FEATURE_ASYNC_PF
+  STEAL_TIME           = 5,   // KVM_FEATURE_STEAL_TIME
+  PV_END_OF_INTERRUPT  = 6,   // KVM_FEATURE_PV_EOI P
+  PV_UNHALT            = 7,   // KVM_FEATURE_PV_UNHALT
+  PV_TLB_FLUSH         = 9,   // KVM_FEATURE_PV_TLB_FLUSH
+  ASYNC_PAGE_FAULT_INT = 14,  // KVM_FEATURE_ASYNC_PF_INT
+  PV_SCHED_YIELD       = 13   // KVM_FEATURE_PV_SCHED_YIELD
+};
+
+enum class HyperVFeature : std::uint8_t {
+  // Leaf 0x40000003 - EAX
+  VP_RUNTIME            = 0,  // Partition Reference Counter
+  TIME_REFERENCE_COUNT  = 1,  // SynIC timers available
+  SYN_IC_AVAILABLE      = 2,  // Synthetic Interrupt Controller
+  SYNTHETIC_TIMER       = 3,  // Synthetic Timers
+  APIC_MSRS             = 4,  // APIC access via MSRs
+  HYPERCALL_MSRS        = 5,  // Hypercall MSRs available
+  ACCESS_VP_INDEX       = 6,  // VP Index MSR available
+  VIRTUAL_REFERENCE_TSC = 9   // Invariant TSC reference
+};
+
+enum class HyperVEnlightenment : std::uint8_t {
+  // Leaf 0x40000004 - EAX
+  USE_HYPERCALL_FOR_AS_ADDRESS_SPACE_SWITCH = 0,
+  USE_HYPERCALL_FOR_LOCAL_FLUSH             = 1,
+  USE_HYPERCALL_FOR_REMOTE_FLUSH            = 2,
+  USE_RELAXED_TIMING                        = 5,
+  USE_EXPROCESSOR_MASKS                     = 11
 };
 
 enum class CacheType : std::uint8_t { Null, Data, Instruction, Unified };
@@ -238,7 +289,76 @@ enum class TopologyLevelType : std::uint8_t {
   Package,  // Physical Socket
 };
 
-enum class CpuVendor : std::uint8_t { Unknown = 0, Intel, AMD };
+enum class CpuVendor : std::uint8_t { UNKNOWN = 0, INTEL, AMD };
+
+enum class Microarchitecture : std::uint8_t {
+  UNKNOWN,
+  INTEL_NEHALEM,       // 1st Gen Core
+  INTEL_WESTMERE,      // 1st Gen Shrink
+  INTEL_SANDY_BRIDGE,  // 2nd Gen
+  INTEL_IVY_BRIDGE,    // 3rd Gen
+  INTEL_HASWELL,       // 4th Gen
+  INTEL_BROADWELL,     // 5th Gen
+  INTEL_SKY_LAKE,      // 6th-10th Gen
+  INTEL_ICE_LAKE,      // 10th Gen Mobile
+  INTEL_TIGER_LAKE,    // 11th Gen
+  INTEL_ALDER_LAKE,    // 12th Gen
+  INTEL_RAPTOR_LAKE,   // 13th/14th Gen
+  INTEL_METEOR_LAKE,   // Core ultra 1st gen
+  INTEL_LUNAR_LAKE,    // Core Ultra 2nd Gen (Mobile - Skymont/Lion Cove)
+  INTEL_ARROW_LAKE,    // Core Ultra 2nd Gen (Desktop/HX - Skymont/Lion Cove)
+
+  AMD_PHENOM,     // Family 10h (2007-2011)
+  AMD_BULLDOZER,  // Family 15h (Bulldozer/Piledriver/Excavator)
+  AMD_ZEN1,       // Family 17h (Ryzen 1000/2000)
+  AMD_ZEN2,       // Family 17h (Ryzen 3000/4000)
+  AMD_ZEN3,       // Family 19h (Ryzen 5000/6000)
+  AMD_ZEN4,       // Family 19h (Ryzen 7000/8000)
+  AMD_ZEN5,       // Family 1Ah (Ryzen 9000)
+};
+
+struct ProcessorIdentity {
+  std::uint32_t family{0};
+  std::uint32_t model{0};
+  std::uint32_t stepping{0};
+  std::uint32_t processor_type{0};
+  Microarchitecture microarch{Microarchitecture::UNKNOWN};
+};
+
+enum class HypervisorVendor : std::uint8_t {
+  NONE,
+  KVM,
+  VMWARE,
+  HYPERV,
+  XEN,
+  BHYVE,
+  UNKNOWN
+};
+
+struct HypervisorState {
+  bool is_virtualized{false};
+  HypervisorVendor vendor{HypervisorVendor::NONE};
+  std::uint32_t max_leaf{0};
+  char signature[13]{0};
+
+  std::uint32_t kvm_features{0};
+  std::uint32_t hyperv_features{0};
+  std::uint32_t hyperv_enlightenments{0};
+
+  __nodiscard bool has_kvm_feature(KvmFeature feature) const noexcept {
+    return kvm_features & (1u << std::to_underlying(feature));
+  }
+
+  __nodiscard bool has_hyperv_feature(HyperVFeature feature) const noexcept {
+    return hyperv_features & (1u << std::to_underlying(feature));
+  }
+
+  __nodiscard bool has_hyperv_enlightenment(
+      HyperVEnlightenment enlightenment
+  ) const noexcept {
+    return hyperv_enlightenments & (1u << std::to_underlying(enlightenment));
+  }
+};
 
 struct CacheInfo {
   CacheType type{CacheType::Null};
@@ -271,7 +391,8 @@ class ProcessorState {
  private:
   static constexpr std::size_t FEATURE_COUNT =
       static_cast<std::size_t>(CpuFeature::COUNT);
-  static constexpr std::size_t BITSET_WORDS = (FEATURE_COUNT + 63) / 64;
+  static constexpr std::size_t FEATURE_BLOCKS = FEATURE_COUNT / 32;
+  static constexpr std::size_t BITSET_WORDS   = (FEATURE_COUNT + 63) / 64;
 
   std::array<std::uint64_t, BITSET_WORDS> m_feature_bitset{false};
 
@@ -281,7 +402,7 @@ class ProcessorState {
 
   std::uint32_t m_max_basic_leaf{0};
   std::uint32_t m_max_extended_leaf{0};
-  CpuVendor m_vendor{CpuVendor::Unknown};
+  CpuVendor m_vendor{CpuVendor::UNKNOWN};
   std::uint32_t m_x2apic_id{0};
 
   AddressLimits m_address_limits{};
@@ -293,17 +414,8 @@ class ProcessorState {
   std::array<TopologyLevel, 8> m_topology_levels{};
   std::size_t m_topology_level_count{0};
 
-  __nodiscard static inline CpuidRegs
-  call_cpuid(std::uint32_t leaf, std::uint32_t subleaf) noexcept {
-    CpuidRegs regs{};
-    asm volatile(
-        "cpuid"
-        : "=a"(regs.eax), "=b"(regs.ebx), "=c"(regs.ecx), "=d"(regs.edx)
-        : "a"(leaf), "c"(subleaf)
-        : "memory"
-    );
-    return regs;
-  }
+  ProcessorIdentity m_identity{};
+  HypervisorState m_hypervisor{};
 
   __nodiscard static inline std::uint32_t
   select_registers(const CpuidRegs& regs, TargetRegister r) noexcept {
@@ -343,6 +455,8 @@ class ProcessorState {
         return {0x80000001, 0, TargetRegister::EDX, bit};
       case 7:
         return {0x80000001, 0, TargetRegister::ECX, bit};
+      case 8:
+        return {0x80000007, 0, TargetRegister::EDX, bit};
       default:
         return {0, 0, TargetRegister::EAX, 0};
     }
@@ -355,6 +469,8 @@ class ProcessorState {
   void fetch_extended_topology() noexcept;
   void fetch_cache_hierarchy() noexcept;
   void fetch_frequencies() noexcept;
+  void fetch_identity_and_microarch() noexcept;
+  void fetch_hypervisor() noexcept;
 
  public:
   ProcessorState() = default;
@@ -363,11 +479,25 @@ class ProcessorState {
     fetch_vendor_and_max_leafs();
     fetch_brand_string();
     fetch_features();
+    fetch_hypervisor();
+    fetch_identity_and_microarch();
 
     fetch_address_limits();
     fetch_extended_topology();
     fetch_cache_hierarchy();
     fetch_frequencies();
+  }
+
+  __nodiscard static inline CpuidRegs
+  call_cpuid(std::uint32_t leaf, std::uint32_t subleaf) noexcept {
+    CpuidRegs regs{};
+    asm volatile(
+        "cpuid"
+        : "=a"(regs.eax), "=b"(regs.ebx), "=c"(regs.ecx), "=d"(regs.edx)
+        : "a"(leaf), "c"(subleaf)
+        : "memory"
+    );
+    return regs;
   }
 
   __nodiscard bool has_feature(CpuFeature feature) const noexcept;
@@ -392,8 +522,24 @@ class ProcessorState {
     return m_frequencies;
   }
 
+  __nodiscard const HypervisorState& hypervisor() const noexcept {
+    return m_hypervisor;
+  }
+
+  __nodiscard const ProcessorIdentity& identity() const noexcept {
+    return m_identity;
+  }
+
   __nodiscard std::uint32_t x2apic_id() const noexcept {
     return m_x2apic_id;
+  }
+
+  __nodiscard std::uint32_t max_leaf() const noexcept {
+    return m_max_basic_leaf;
+  }
+
+  __nodiscard std::uint32_t max_extended_leaf() const noexcept {
+    return m_max_extended_leaf;
   }
 
   __nodiscard std::span<const CacheInfo> caches() const noexcept {

@@ -96,7 +96,7 @@ function(_hazel_qemu_default_accel_flags out_var architecture)
         )
     elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
         if(_hazel_qemu_arch STREQUAL "x86_64")
-            set(_hazel_flags -accel tcg -cpu max,+invtsc,+fred)
+            set(_hazel_flags -enable-kvm -cpu max,invtsc=on)
         else()
             set(_hazel_flags -enable-kvm)
         endif()
@@ -239,7 +239,7 @@ function(add_qemu_targets)
     add_custom_target(
         ${_hazel_run_target}
         COMMAND
-            "${_hazel_qemu_cmd}" -cdrom "${ARG_ISO_FILE}" -d int -D ${CMAKE_CURRENT_BINARY_DIR}/log-2.txt ${_hazel_firmware_flags}
+            "${_hazel_qemu_cmd}" -cdrom "${ARG_ISO_FILE}" ${_hazel_firmware_flags}
             ${_hazel_common_flags} ${_hazel_accel_flags}
         DEPENDS "${ARG_ISO_FILE}"
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"

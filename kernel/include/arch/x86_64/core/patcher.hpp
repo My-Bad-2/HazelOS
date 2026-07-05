@@ -1,3 +1,4 @@
+#include "core/insn.hpp"
 #ifndef KERNEL_INCLUDE_CORE_PATCHER_HPP
 #define KERNEL_INCLUDE_CORE_PATCHER_HPP 1
 
@@ -42,7 +43,7 @@ class AlternativePatcher {
   static void toggle_write_protection(bool state) noexcept;
   static void serialize_pipeline(cpu::ProcessorState& state) noexcept;
 
-  static bool fixup_instructions(
+  static bool fixup_and_audit_instructions(
       std::uint8_t* buffer,
       const std::uint8_t* src,
       const std::uint8_t* dest,
@@ -64,6 +65,8 @@ class AlternativePatcher {
       std::uint8_t insn_len,
       std::uint8_t block_len
   ) noexcept;
+
+  static bool audit_instruction_semantics(const Insn& insn) noexcept;
 
  public:
   static void apply_patches() noexcept;

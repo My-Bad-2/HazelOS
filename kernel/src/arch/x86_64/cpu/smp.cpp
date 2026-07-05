@@ -11,9 +11,7 @@
 #include "cpu/registers.hpp"
 #include "hal/smp.hpp"
 
-namespace kernel {
-namespace hal {
-namespace smp {
+namespace kernel::hal::smp {
 namespace {
 union GSBase {
   std::uint64_t raw;
@@ -30,6 +28,39 @@ union KernelGSBase {
 };
 
 log::Logger smp_log_arch{"SMP"};
+
+struct TscAuxMsr {
+  std::uint64_t raw;
+  static constexpr std::uint32_t MSR_ID = 0xC0000103;
+
+  constexpr explicit TscAuxMsr(std::uint64_t val) noexcept : raw(val) {}
+
+  __nodiscard static constexpr TscAuxMsr create(CpuId core_id, NumaId numa) {
+    return TscAuxMsr(
+        (static_cast<std::uint64_t>(numa) << 32) |
+        static_cast<std::uint32_t>(core_id)
+    );
+  }
+
+  __nodiscard constexpr CpuId get_core_id() const noexcept {
+    return static_cast<CpuId>(raw & 0xffffffff);
+  }
+};
+
+struct X2ApicLDR {
+  std::uint32_t raw;
+  constexpr static std::uint32_t MSR_ID = 0x80d;
+
+  constexpr explicit X2ApicLDR(std::uint32_t v) : raw(v) {}
+
+  constexpr std::uint16_t cluster_id() const noexcept {
+    return (raw >> 16) & 0xffff;
+  }
+
+  constexpr std::uint16_t logical_id() const noexcept {
+    return static_cast<std::uint16_t>(raw);
+  }
+};
 
 extern "C" const std::uintptr_t isr_stub_table[256];
 extern "C" void* fred_entry_page;
@@ -66,6 +97,9 @@ void initialize_cpu_hw(PerCpuState* cpu) noexcept {
 
   x86_64::cpu::write(gs_val);
   x86_64::cpu::write(kernel_gs);
+
+  TscAuxMsr msr = TscAuxMsr::create(cpu->hot.id, cpu->hot.numa_node);
+  x86_64::cpu::write(msr);
 }
 
 void initialize_cpu_arch(PerCpuState* cpu) noexcept {
@@ -95,11 +129,6 @@ void initialize_cpu_arch(PerCpuState* cpu) noexcept {
         delivery_res.error()
     );
 
-  smp_log_arch.info(
-      "Active Interrupt Mode: %s",
-      (delivery_res.value() == ActiveMode::FRED) ? "FRED" : "IDT"
-  );
-
   bool has_x2apic =
       cpu->processor_state.has_feature(x86_64::cpu::CpuFeature::X2APIC);
 
@@ -120,6 +149,4 @@ PerCpuState& get_cpu_state() noexcept {
 std::uint32_t get_current_core_id() noexcept {
   return std::to_underlying(get_cpu_state().hot.id);
 }
-}  // namespace smp
-}  // namespace hal
-}  // namespace kernel
+}  // namespace kernel::hal::smp

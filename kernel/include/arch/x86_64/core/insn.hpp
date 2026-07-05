@@ -18,10 +18,19 @@ enum class DecoderError : std::uint8_t {
 
 struct Insn {
   std::uint8_t length     = 0;
-  bool is_rel32_branch    = false;
-  bool is_rel8_branch     = false;
-  bool has_rip_relative   = false;
+  std::uint8_t opcode     = 0;
   std::uint8_t offset_pos = 0;
+
+  bool is_two_byte   = false;
+  bool has_modrm     = false;
+  std::uint8_t modrm = 0;
+
+  bool is_rel32_branch  = false;
+  bool is_rel8_branch   = false;
+  bool has_rip_relative = false;
+  bool is_locked        = false;
+  bool has_fs_override  = false;
+  bool has_gs_override  = false;
 };
 
 class InsnDecoder {
@@ -62,16 +71,23 @@ class InsnDecoder {
       Insn& insn,
       std::uint8_t opcode,
       bool is_two_byte,
+      bool is_three_byte,
       std::uint8_t next_pos
   ) noexcept;
 
-  static bool needs_modrm(std::uint8_t opcode, bool is_two_byte) noexcept;
+  static bool needs_modrm(
+      std::uint8_t opcode,
+      bool is_two_byte,
+      bool is_three_byte
+  ) noexcept;
   static std::expected<std::uint8_t, DecoderError>
   parse_modrm_sib_disp(ByteStream& stream, Insn& insn, bool has_67) noexcept;
 
   static std::uint8_t get_immediate_size(
       std::uint8_t opcode,
       bool is_two_byte,
+      bool is_three_byte,
+      std::uint8_t escape_prefix,
       bool has_66,
       bool has_rex_w,
       bool has_modrm,

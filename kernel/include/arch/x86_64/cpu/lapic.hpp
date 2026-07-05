@@ -1,10 +1,10 @@
-#include "compiler.h"
 #ifndef KERNEL_INCLUDE_ARCH_X86_64_CPU_LAPIC_HPP
 #define KERNEL_INCLUDE_ARCH_X86_64_CPU_LAPIC_HPP 1
 
 #include <cstdint>
 #include <expected>
 
+#include "compiler.h"
 #include "cpu/lapic/regs.hpp"
 #include "cpu/registers.hpp"
 #include "libs/mmio.hpp"
@@ -33,6 +33,7 @@ class LocalApic {
   std::uint32_t m_suspend_err{0};
   std::uint32_t m_suspend_cmci{0};
   std::uint32_t m_suspend_sivr{0};
+  std::uint32_t m_cached_id{0};
 
   std::uint8_t m_max_lvt_entries{0};
   bool m_is_x2apic{false};
@@ -41,7 +42,8 @@ class LocalApic {
 
   template <typename Reg>
   __nodiscard inline Reg read() const noexcept {
-    if (m_is_x2apic) __likely return x86_64::cpu::read<Reg>();
+    if (m_is_x2apic) [[likely]]
+      return x86_64::cpu::read<Reg>();
 
     return libs::mmio::read<Reg>(
         reinterpret_cast<volatile void*>(m_xapic_base)
@@ -50,8 +52,8 @@ class LocalApic {
 
   template <typename Reg>
   inline void write(Reg val) const noexcept {
-    if (m_is_x2apic)
-      __likely x86_64::cpu::write<Reg>(val);
+    if (m_is_x2apic) [[likely]]
+      x86_64::cpu::write<Reg>(val);
     else
       libs::mmio::write(reinterpret_cast<volatile void*>(m_xapic_base), val);
   }
@@ -66,6 +68,24 @@ class LocalApic {
 
   __nodiscard inline std::uint8_t lvt_count() const noexcept {
     return m_max_lvt_entries;
+  }
+
+  __nodiscard inline std::uint32_t id() const noexcept {
+    return m_cached_id;
+  }
+
+  __nodiscard inline std::uint16_t cluster_id() const noexcept {
+    if (m_is_x2apic) [[likely]]
+      return static_cast<std::uint16_t>(m_cached_id >> 4);
+
+    return static_cast<std::uint16_t>((m_cached_id >> 2) & 0x0fu);
+  }
+
+  __nodiscard inline std::uint16_t core_mask() const noexcept {
+    if (m_is_x2apic) [[likely]]
+      return static_cast<std::uint16_t>(1 << (m_cached_id & 0x0fu));
+
+    return static_cast<std::uint16_t>(1 << (m_cached_id & 0x03u));
   }
 
   std::expected<void, ApicError> arm_periodic(

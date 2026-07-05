@@ -8,6 +8,8 @@
 #include "core/boot.hpp"
 #include "core/logger.hpp"
 #include "hal/cpu.hpp"
+#include "hal/smp.hpp"
+#include "libs/maths.hpp"
 #include "memory/address/physical.hpp"
 #include "memory/address/virtual.hpp"
 #include "memory/address_space.hpp"
@@ -15,15 +17,13 @@
 #include "memory/paging/paging.hpp"
 #include "memory/pmm.hpp"
 
-namespace kernel {
-namespace hal {
-namespace smp {
+namespace kernel::hal::smp {
 namespace {
 log::Logger smp_logger{"SMP", log::Level::Debug};
 std::atomic<bool> initialized{false};
 std::uintptr_t apic_base_addr{0};
 
-constinit std::array<PerCpuState*, MAX_CPU_COUNT> per_cpu_state = {};
+std::span<PerCpuState*> per_cpu_state;
 
 alignas(PerCpuState) std::byte bsp_early_storage[sizeof(PerCpuState)];
 PerCpuState* bsp_early_state = nullptr;
@@ -40,12 +40,12 @@ __noreturn void ap_entry_point(limine_mp_info* info) {
   memory::arch::initialize_pat();
   cpu->hot.asid.initialize(memory::arch::flush_all_pcids);
 
-  smp_logger.info("APIC %u online and waiting", cpu->hot.apic_id);
+  smp_logger.info("APIC %u online and waiting", cpu->lapic.id());
 
   // Wait until the BSP finishes fully setting
   while (!initialized.load(std::memory_order_acquire)) cpu::pause();
 
-  cpu::halt(true);
+  cpu->idle_loop();
   std::unreachable();
 }
 }  // namespace
@@ -55,7 +55,6 @@ void early_bsp_initialize() noexcept {
       reinterpret_cast<PerCpuState*>(bsp_early_storage),
       CpuId{0},
       NumaId{0},
-      ApicId{0},
       0,
       0
   );
@@ -72,6 +71,17 @@ void initialize() noexcept {
 
   const std::uint32_t active_cpus =
       std::min<uint32_t>(available_cpus.size(), MAX_CPU_COUNT);
+
+  const std::size_t count = libs::maths::div_roundup(
+      active_cpus * sizeof(void*),
+      memory::PAGE_SIZE_SMALL
+  );
+
+  PerCpuState** data = memory::PhysicalManager::alloc_zeroed_pages(count)
+                           .to_virt()
+                           .as<PerCpuState*>();
+
+  per_cpu_state = std::span<PerCpuState*>{data, active_cpus};
 
   for (std::uint32_t i = 0; i < active_cpus; ++i) {
     limine_mp_info* info = available_cpus[i];
@@ -103,7 +113,7 @@ void initialize() noexcept {
     const memory::VirtAddr panic_stack = stack_raw.to_virt();
 
     const memory::PhysAddr state_phys =
-        memory::PhysicalManager::alloc_zeroed_pages(1);
+        memory::PhysicalManager::alloc_zeroed_pages(4);
     if (unlikely(state_phys.is_null()))
       smp_logger.fatal("Failed to allocate state for CPU %u", info->lapic_id);
 
@@ -113,7 +123,6 @@ void initialize() noexcept {
         reinterpret_cast<PerCpuState*>(state_virt),
         CpuId{i},
         NumaId{0},
-        ApicId{info->lapic_id},
         stack.raw() + KSTACK_SIZE,
         panic_stack.raw() + KSTACK_SIZE
     );
@@ -138,6 +147,14 @@ void initialize() noexcept {
   initialized.store(true, std::memory_order_release);
   smp_logger.info("SMP Initialized. %u cores active.", active_cpus);
 }
-}  // namespace smp
-}  // namespace hal
-}  // namespace kernel
+
+PerCpuState& get_cpu_state(std::size_t id) noexcept {
+  if (!initialized.load(std::memory_order_relaxed)) [[unlikely]]
+    return *bsp_early_state;
+  return *per_cpu_state[id];
+}
+
+const std::span<PerCpuState*> get_cpu_topology() noexcept {
+  return per_cpu_state;
+}
+}  // namespace kernel::hal::smp

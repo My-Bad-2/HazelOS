@@ -16,7 +16,8 @@ bool ProcessorState::has_feature(CpuFeature feature) const noexcept {
   const std::size_t word_idx = index / 64;
   const std::size_t bit_idx  = index % 64;
 
-  return libs::maths::has_bits(m_feature_bitset[word_idx], bit_idx);
+  bool ret = libs::maths::has_bits(m_feature_bitset[word_idx], bit_idx);
+  return ret;
 }
 
 void ProcessorState::fetch_vendor_and_max_leafs() noexcept {
@@ -30,14 +31,14 @@ void ProcessorState::fetch_vendor_and_max_leafs() noexcept {
 
   const std::string_view v_str = vendor_string();
   if (v_str == "GenuineIntel")
-    m_vendor = CpuVendor::Intel;
+    m_vendor = CpuVendor::INTEL;
   else if (v_str == "AuthenticAMD")
     m_vendor = CpuVendor::AMD;
   else
-    m_vendor = CpuVendor::Unknown;
+    m_vendor = CpuVendor::UNKNOWN;
 
   const CpuidRegs regs_ext = call_cpuid(0x80000000, 0);
-  m_max_basic_leaf         = regs_ext.eax;
+  m_max_extended_leaf      = regs_ext.eax;
 }
 
 void ProcessorState::fetch_brand_string() noexcept {
@@ -80,8 +81,187 @@ void ProcessorState::fetch_address_limits() noexcept {
   }
 }
 
+void ProcessorState::fetch_identity_and_microarch() noexcept {
+  if (m_max_basic_leaf < 1) return;
+
+  CpuidRegs regs = call_cpuid(1, 0);
+
+  std::uint32_t base_stepping = regs.eax & 0xf;
+  std::uint32_t base_model    = (regs.eax >> 4) & 0xf;
+  std::uint32_t base_family   = (regs.eax >> 8) & 0xf;
+  std::uint32_t base_type     = (regs.eax >> 12) & 0x3;
+
+  std::uint32_t ext_model  = (regs.eax >> 16) & 0xf;
+  std::uint32_t ext_family = (regs.eax >> 20) & 0xff;
+
+  m_identity.stepping       = base_stepping;
+  m_identity.processor_type = base_type;
+  m_identity.family         = base_family;
+  m_identity.model          = base_model;
+
+  if (base_family == 0xf) m_identity.family += ext_family;
+
+  if (base_family == 0x6 || base_family == 0xf)
+    m_identity.model = (ext_model << 4) | base_model;
+
+  if (m_vendor == CpuVendor::INTEL && m_identity.family == 0x6) {
+    switch (m_identity.model) {
+      case 0x1a:
+      case 0x1e:
+      case 0x1f:
+      case 0x2e:
+        m_identity.microarch = Microarchitecture::INTEL_NEHALEM;
+        break;
+      case 0x25:
+      case 0x2C:
+      case 0x2F:
+        m_identity.microarch = Microarchitecture::INTEL_WESTMERE;
+        break;
+      case 0x2a:
+      case 0x2d:
+        m_identity.microarch = Microarchitecture::INTEL_SANDY_BRIDGE;
+        break;
+      case 0x3a:
+      case 0x3e:
+        m_identity.microarch = Microarchitecture::INTEL_IVY_BRIDGE;
+        break;
+      case 0x3c:
+      case 0x3f:
+      case 0x45:
+      case 0x46:
+        m_identity.microarch = Microarchitecture::INTEL_HASWELL;
+        break;
+      case 0x3d:
+      case 0x47:
+      case 0x4f:
+      case 0x56:
+        m_identity.microarch = Microarchitecture::INTEL_BROADWELL;
+        break;
+      case 0x4e:
+      case 0x5e:
+      case 0x8e:
+      case 0x9e:
+      case 0x55:
+      case 0xa5:
+      case 0xa6:
+        m_identity.microarch = Microarchitecture::INTEL_SKY_LAKE;
+        break;
+      case 0x7d:
+      case 0x7e:
+      case 0x6a:
+      case 0x6c:
+        m_identity.microarch = Microarchitecture::INTEL_ICE_LAKE;
+        break;
+      case 0x8c:
+      case 0x8d:
+        m_identity.microarch = Microarchitecture::INTEL_TIGER_LAKE;
+        break;
+      case 0x97:
+      case 0x9a:
+      case 0xbe:
+        m_identity.microarch = Microarchitecture::INTEL_ALDER_LAKE;
+        break;
+      case 0xb7:
+      case 0xba:
+      case 0xbf:
+        m_identity.microarch = Microarchitecture::INTEL_RAPTOR_LAKE;
+        break;
+      case 0xaa:
+      case 0xac:
+        m_identity.microarch = Microarchitecture::INTEL_METEOR_LAKE;
+        break;
+      case 0xbd:
+        m_identity.microarch = Microarchitecture::INTEL_LUNAR_LAKE;
+        break;
+      case 0xc5:
+      case 0xc6:
+        m_identity.microarch = Microarchitecture::INTEL_ARROW_LAKE;
+        break;
+      default:
+        break;
+    }
+  } else if (m_vendor == CpuVendor::AMD) {
+    switch (m_identity.family) {
+      case 0x10:
+        m_identity.microarch = Microarchitecture::AMD_PHENOM;
+        break;
+      case 0x15:
+        m_identity.microarch = Microarchitecture::AMD_BULLDOZER;
+        break;
+      case 0x17:
+        if (m_identity.model < 0x30)
+          m_identity.microarch = Microarchitecture::AMD_ZEN1;
+        else
+          m_identity.microarch = Microarchitecture::AMD_ZEN2;
+        break;
+      case 0x19:
+        if (m_identity.model < 0x60)
+          m_identity.microarch = Microarchitecture::AMD_ZEN3;
+        else
+          m_identity.microarch = Microarchitecture::AMD_ZEN4;
+        break;
+      case 0x1a:
+        m_identity.microarch = Microarchitecture::AMD_ZEN5;
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+void ProcessorState::fetch_hypervisor() noexcept {
+  if (!has_feature(CpuFeature::HYPERVISOR)) {
+    m_hypervisor.is_virtualized = false;
+    return;
+  }
+
+  m_hypervisor.is_virtualized = true;
+
+  CpuidRegs regs        = call_cpuid(0x40000000, 0);
+  m_hypervisor.max_leaf = regs.eax;
+
+  auto* sig_raw = reinterpret_cast<std::uint32_t*>(m_hypervisor.signature);
+  sig_raw[0]    = regs.ebx;
+  sig_raw[1]    = regs.ecx;
+  sig_raw[2]    = regs.edx;
+  m_hypervisor.signature[12] = '\0';
+
+  std::string_view sig_view{m_hypervisor.signature};
+
+  if (sig_view == "KVMKVMKVM\0\0\0") {
+    m_hypervisor.vendor = HypervisorVendor::KVM;
+
+    if (m_hypervisor.max_leaf >= 0x40000001) {
+      auto kvm_regs             = call_cpuid(0x40000001, 0);
+      m_hypervisor.kvm_features = kvm_regs.eax;
+    }
+  } else if (sig_view == "VMwareVMware") {
+    m_hypervisor.vendor = HypervisorVendor::VMWARE;
+
+    if (m_hypervisor.max_leaf >= 0x40000003) {
+      auto hv_regs                 = call_cpuid(0x40000003, 0);
+      m_hypervisor.hyperv_features = hv_regs.eax;
+    }
+
+    if (m_hypervisor.max_leaf >= 0x40000004) {
+      auto hv_rec                        = call_cpuid(0x40000004, 0);
+      m_hypervisor.hyperv_enlightenments = hv_rec.eax;
+    }
+  } else if (sig_view == "Microsoft Hv") {
+    m_hypervisor.vendor = HypervisorVendor::HYPERV;
+    // VMWare relies on an I/O port backdoor rather than CPUID for feature
+    // discovery
+  } else if (sig_view == "XenVMMXenVMM") {
+    m_hypervisor.vendor = HypervisorVendor::XEN;
+  } else if (sig_view == "bhyve bhyve ") {
+    m_hypervisor.vendor = HypervisorVendor::BHYVE;
+  } else {
+    m_hypervisor.vendor = HypervisorVendor::UNKNOWN;
+  }
+}
+
 void ProcessorState::fetch_features() noexcept {
-  for (std::size_t block = 0; block < 8; ++block) {
+  for (std::size_t block = 0; block < FEATURE_BLOCKS; ++block) {
     const FeatureCoordinate coord = get_feature_coordinate(block * 32);
 
     if ((coord.leaf < 0x80000000 && coord.leaf > m_max_basic_leaf) ||
@@ -141,7 +321,7 @@ void ProcessorState::fetch_extended_topology() noexcept {
 void ProcessorState::fetch_cache_hierarchy() noexcept {
   std::uint32_t cache_leaf = 0;
 
-  if (m_vendor == CpuVendor::Intel && m_max_basic_leaf >= 4)
+  if (m_vendor == CpuVendor::INTEL && m_max_basic_leaf >= 4)
     cache_leaf = 4;
   else if (m_vendor == CpuVendor::AMD && m_max_extended_leaf >= 0x8000001d)
     cache_leaf = 0x8000001d;

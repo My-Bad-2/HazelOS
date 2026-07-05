@@ -110,12 +110,12 @@ struct IcrConfig {
   }
 
   constexpr IcrConfig& delivery(IpiDelivery d) noexcept {
-    m_low |= (static_cast<std::uint32_t>(d) << 8);
+    m_low = (m_low & ~0x700u) | (static_cast<std::uint32_t>(d) << 8);
     return *this;
   }
 
   constexpr IcrConfig& dest_mode(IpiDestMode m) noexcept {
-    m_low |= (static_cast<std::uint32_t>(m) << 11);
+    m_low = (m_low & ~0x800u) | (static_cast<std::uint32_t>(m) << 11);
     return *this;
   }
 
@@ -130,7 +130,7 @@ struct IcrConfig {
   }
 
   constexpr IcrConfig& shorthand(IpiShorthand s) noexcept {
-    m_low |= (static_cast<std::uint32_t>(s) << 18);
+    m_low = (m_low & ~0xc0000u) | (static_cast<std::uint32_t>(s) << 18);
     return *this;
   }
 

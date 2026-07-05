@@ -33,6 +33,7 @@ enum InterruptVectors : std::uint8_t {
   VMM_COMM,                   // Virtualization Event (AMD only)
   SECURITY_EXCEPTION,         // Security-sensitive event under SVM (AMD only)
   USER_BASE         = 0x20,
+  URGENT_IPI        = 0xfd,  // Maximum priority (Class 15)
   APIC_SPURIOUS_INT = 0xff,
   USER_MAX          = 0xff
 };

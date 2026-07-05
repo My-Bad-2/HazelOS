@@ -21,8 +21,8 @@ constexpr std::uint64_t LAPIC_BASE_VIRT = 0xffffffffffffe000ul;
 
 std::expected<void, ApicError>
 LocalApic::initialize(std::uint8_t spurious_vec, bool enable_x2apic) noexcept {
-  if (spurious_vec < interrupts::InterruptVectors::USER_BASE)
-    __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (spurious_vec < interrupts::InterruptVectors::USER_BASE) [[unlikely]]
+    return std::unexpected(ApicError::InvalidVector);
 
   auto base = x86_64::cpu::read<ApicBaseMsr>();
   base.enable_global();
@@ -42,6 +42,9 @@ LocalApic::initialize(std::uint8_t spurious_vec, bool enable_x2apic) noexcept {
 
   m_is_x2apic  = enable_x2apic;
   m_xapic_base = LAPIC_BASE_VIRT;
+
+  auto id     = read<ID>();
+  m_cached_id = id.raw32;
 
   constexpr std::uint32_t SUPPORTS_EOI_BROADCAST_SUPPRESSION = (1 << 24);
 
@@ -71,8 +74,8 @@ std::expected<void, ApicError> LocalApic::arm_periodic(
     std::uint32_t ticks,
     TimerDivide div
 ) noexcept {
-  if (vector < interrupts::InterruptVectors::USER_BASE)
-    __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE) [[unlikely]]
+    return std::unexpected(ApicError::InvalidVector);
 
   std::uint32_t lvt = LvtConfig{}
                           .vector(vector)
@@ -91,8 +94,8 @@ std::expected<void, ApicError> LocalApic::arm_tsc_deadline(
     std::uint8_t vector,
     std::uint64_t absolute_tsc
 ) noexcept {
-  if (vector < interrupts::InterruptVectors::USER_BASE)
-    __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE) [[unlikely]]
+    return std::unexpected(ApicError::InvalidVector);
 
   std::uint32_t lvt = LvtConfig{}
                           .vector(vector)
@@ -111,11 +114,11 @@ std::expected<void, ApicError> LocalApic::send_ipi(
     const IcrConfig& config,
     bool is_nmi_context
 ) const noexcept {
-  if (m_is_x2apic) __likely {
-      // x2APIC Mode: IPIs are dispatched via a single 64-bit MSR write.
-      x86_64::cpu::write(X2ApicIcr{.raw = config.to_x2apic()});
-      return {};
-    }
+  if (m_is_x2apic) [[likely]] {
+    // x2APIC Mode: IPIs are dispatched via a single 64-bit MSR write.
+    x86_64::cpu::write(X2ApicIcr{.raw = config.to_x2apic()});
+    return {};
+  }
 
   // xAPIC Fallback: IPIs require two separate 32-bit MMIO writes. The caller
   // must ensure local interrupts are disabled before executing this block
@@ -132,10 +135,10 @@ std::expected<void, ApicError> LocalApic::send_ipi(
   // Wait for the delivery Status bit to clear from any prior IPI.
   std::uint32_t timeout = 1'000'000;
   while (read<ICR_LOW>().raw32 & DELIVERY_STATUS_BIT) {
-    if (--timeout == 0) __unlikely {
-        if (!is_nmi_context) m_xapic_icr_lock.unlock();
-        return std::unexpected(ApicError::IpiDeliveryTimeout);
-      }
+    if (--timeout == 0) [[unlikely]] {
+      if (!is_nmi_context) m_xapic_icr_lock.unlock();
+      return std::unexpected(ApicError::IpiDeliveryTimeout);
+    }
 
     hal::cpu::pause();
   }
@@ -189,8 +192,8 @@ void LocalApic::setup_nmi(bool on_lint1) noexcept {
 std::expected<void, ApicError> LocalApic::setup_profiler(
     std::uint8_t vector
 ) noexcept {
-  if (vector < interrupts::InterruptVectors::USER_BASE)
-    __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE) [[unlikely]]
+    return std::unexpected(ApicError::InvalidVector);
 
   std::uint32_t lvt = LvtConfig{}.vector(vector).mask(false).raw();
   write(LVT_PMC{lvt});
@@ -202,8 +205,8 @@ std::expected<void, ApicError> LocalApic::setup_cmci(
     std::uint8_t vector
 ) noexcept {
   if (m_max_lvt_entries < 6) return std::unexpected(ApicError::HardwareFault);
-  if (vector < interrupts::InterruptVectors::USER_BASE)
-    __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE) [[unlikely]]
+    return std::unexpected(ApicError::InvalidVector);
 
   std::uint32_t lvt = LvtConfig{}.vector(vector).mask(false).raw();
   write(LVT_CMCI{lvt});
@@ -212,8 +215,8 @@ std::expected<void, ApicError> LocalApic::setup_cmci(
 
 std::expected<void, ApicError>
 LocalApic::broadcast_ipi(std::uint8_t vector, bool include_self) noexcept {
-  if (vector < interrupts::InterruptVectors::USER_BASE)
-    __unlikely return std::unexpected(ApicError::InvalidVector);
+  if (vector < interrupts::InterruptVectors::USER_BASE) [[unlikely]]
+    return std::unexpected(ApicError::InvalidVector);
 
   auto broadcast = IcrConfig{}
                        .vector(vector)
@@ -252,8 +255,8 @@ HardwareErrorStatus LocalApic::read_hardware_errors() const noexcept {
 }
 
 void LocalApic::send_self_ipi(std::uint8_t vector) const noexcept {
-  if (m_is_x2apic)
-    __likely return x86_64::cpu::write(X2ApicSelfIpi{.raw = vector});
+  if (m_is_x2apic) [[likely]]
+    return x86_64::cpu::write(X2ApicSelfIpi{.raw = vector});
 
   // xAPIC fallback: Rely on `send_ipi` to handle ICR spinlock
   auto self_cmd = IcrConfig{}
